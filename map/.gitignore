@@ -1,0 +1,9 @@
+target/
+*.png
+
+# Basemaps and derived data — rebuildable from scripts/, and large. Excluded
+# per-file rather than as a directory: `data/` would exclude the directory
+# itself, and git cannot re-include anything under a directory it has excluded,
+# which silently drops the tour sheet below.
+data/*
+!data/places.txt

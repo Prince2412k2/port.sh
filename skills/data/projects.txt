@@ -1,0 +1,251 @@
+# projects
+#
+# One record per card, in carousel order. Two spaces starts a key, four or more
+# continues the previous value — the same grammar the rest of this uses.
+#
+#   mark   which extruded mark from scripts/marks.py
+#   tools  logo ids from scripts/logos.py, in the order they should scroll
+#   beat   a heading, then the paragraph under it. Two to four per project.
+#          These are the engineering, and they are the point of the card.
+#
+# Sourced from the repositories themselves — netjail's docs/netjail-design.md,
+# clippy's README, logify's and coolify_logs' READMEs — rather than paraphrased
+# from a summary. The three with no usable README (watch-party is private,
+# stylized-maps has none, Noter's is two lines) are DRAFTS and marked so.
+
+project netjail
+  name   netjail
+  mark   netjail
+  year   Jul–Aug 2026
+  repo   github.com/Prince2412k2/netjail
+  tag    Run any command with only its network sandboxed.
+  stats  Go · 16,700 LOC · 28 packages · 6,100 lines of tests · threat model · 16k-word manual
+  tools  go, linux, nftables, systemd, ssh, docker
+  beat   Why not a container
+    A container solves this by giving the process a different filesystem. That
+    means volume mounts for anything it needs to touch, copies of binaries it
+    needs to run, and a persistent decision about what is inside the image.
+    netjail gives the process a different *network* instead — namespace, veth
+    pair, nftables default-drop, all independent of the filesystem — so it keeps
+    using your real files, your real toolchain, your real $HOME, unmodified.
+  beat   Five layers, and three of them are on the host
+    L1 is the namespace's nft output chain at policy drop. L2 redirects 80, 443
+    and 53 to the filtering proxy. L3 turns off forwarding on the veth. L4 is a
+    host-side guard that drops forwards, and L5 is the absence of any masquerade
+    rule matching the sandbox subnet. The last three live outside the namespace,
+    which is exactly what makes deleting the namespace's own firewall
+    insufficient.
+  beat   It refuses to start rather than trust itself
+    netjail run will not launch unless containment verifies, and there is no
+    override flag. The preflight does not read the rules back — reading your own
+    configuration proves only that you wrote it. It opens a real connection from
+    inside the namespace and requires that connection to fail.
+  beat   The log cannot hold what it must not leak
+    Query parameters are stripped before the logging layer can see them, so the
+    guarantee is structural rather than a matter of care: internal/events
+    imports nothing from net/http, so no type in it is even capable of holding a
+    header, a body or a raw URL. Events live in XDG_RUNTIME_DIR at mode 0600 on
+    tmpfs, and if that is unset the proxy refuses to start rather than fall back
+    somewhere world-writable.
+
+project watch-party
+  name   watch-party
+  mark   watch-party
+  year   Jun–Aug 2026
+  repo   private
+  tag    Self-hosted movie nights, frame-accurate across devices.
+  stats  Dart + TypeScript · ~115k LOC · 471 commits · 152 test files · 11 scenario suites
+  tools  dart, flutter, typescript, javascript, webrtc, livekit, jellyfin, sonarr, radarr, qbittorrent
+  draft  yes
+  beat   One decision core, mirrored in two languages
+    The part that decides what a player should do next is pure, and it exists
+    twice — once in JavaScript for the web client and once in Dart for the
+    desktop app. Two copies of a thing will drift, so generated JSON conformance
+    vectors run in both CIs and hold them equivalent. Divergence fails a build
+    rather than a movie night three weeks later.
+  beat   The clock has to be estimated, not read
+    Two players agreeing on a timestamp is easy; agreeing on *now* across a
+    network that lies at random is the whole problem. Raw offset samples are
+    mostly noise with occasional catastrophic spikes, so outliers are rejected,
+    what survives is weighted by its own uncertainty, and a Theil–Sen term
+    carries the skew. Least squares would chase the spikes; a median of pairwise
+    slopes gives each one a single vote.
+  beat   A controller that will not chase what it cannot see
+    Snapping to the right position stutters and easing toward it drifts, so
+    playback rate runs through a PI controller. Left ungated it chases
+    measurement noise it has no ability to observe and the rate flutters
+    audibly — the error is gated on certainty, and that gate is the part that
+    made it work. Drift and rate-flutter are stated as numeric targets and
+    asserted by a scenario harness.
+  beat   Seeks are planned, not issued
+    A seek costs time, and pretending otherwise produces a chase loop: seek to
+    where the other client is, arrive late because the seek took a moment, seek
+    again. The cost is modelled and the move is executed as a rendezvous —
+    aiming not at where they are but at where you will both be.
+
+project logify
+  name   logify + coolify_logs
+  mark   logify
+  year   Mar–Jun 2026
+  repo   github.com/Prince2412k2/logify
+  tag    Live container logs from a Coolify host, in your terminal.
+  stats  Go + Python · 4 tagged releases · CI · Docker Compose · installers for macOS, Linux, Windows
+  tools  go, python, fastapi, websockets, docker, nginx, traefikproxy, caddy, coolify
+  beat   Two halves of one tool
+    coolify_logs is the gateway that runs on the Docker host: a FastAPI service
+    exposing REST and WebSocket endpoints for live container logs, an admin UI
+    for issuing API keys, and a browser UI for reading them. logify is the
+    client — a Go TUI that browses projects and streams logs, shipped as a
+    single static binary with one-line installers for all three platforms.
+  beat   A key that can read everything is a key that reads your credentials
+    Access is scoped per key and per container from the admin UI, because a log
+    stream is not neutral: it carries whatever the application decided to print,
+    which sooner or later includes something that should not have been. Scoping
+    is only useful if revoking is something you actually do, which is why it has
+    a UI rather than a config file.
+  beat   WebSockets are where reverse proxies go wrong quietly
+    Buffering, idle timeouts and upgrade headers each break a long-lived stream
+    in a different way, and none of them log anything useful when they do.
+    Coolify, Nginx and Traefik each need different words for the same three
+    fixes, so all three are written down — the failure is not hard to fix, it is
+    hard to attribute.
+
+project clippy
+  name   clippy
+  mark   clip
+  year   2026
+  repo   github.com/Prince2412k2/clip
+  tag    Copy on one machine, paste on another — over your own tailnet.
+  stats  Go, stdlib only, no cgo · single static binary · spec, plan and design docs
+  tools  go, tailscale, linux, docker
+  beat   The tailnet is the trust boundary
+    There is no application-level auth, and that is the design rather than an
+    omission. Each daemon binds only to the Tailscale interface — never
+    0.0.0.0 — so Tailscale's encryption and ACLs are the boundary, and a
+    second home-made one alongside them would be the weaker of the two. The
+    cost is stated plainly: anyone on your tailnet can write to your clipboard,
+    so keep the tailnet to machines you trust.
+  beat   Two invariants, written down before the code
+    Content that was received and written to the clipboard is never echoed
+    back, or two machines watching each other fill the whole fleet with one
+    copy. Identical repeats are deduped by content hash. Both are one sentence
+    long, both are unit-tested, and both are the kind of property that is
+    obvious in hindsight and expensive to discover at runtime.
+  beat   One binary, no cgo
+    Three operating systems with three unrelated ideas of what a clipboard is,
+    and the usual answer is cgo. Doing it with the standard library alone keeps
+    the single static binary intact — which was the point of the project, so
+    paying for it here would have undone it everywhere. The backend is detected
+    at runtime from the environment rather than chosen at build time.
+
+project stylized-maps
+  name   stylized-maps
+  mark   stylized-maps
+  year   2026
+  repo   github.com/Prince2412k2/stylized-maps
+  tag    A custom vector-tile pipeline for stylized maps of India.
+  stats  Python + TypeScript + Java · in progress · Docker Compose behind Caddy
+  tools  python, typescript, openjdk, planetiler, vectortiles, openapiinitiative, docker, caddy
+  draft  yes
+  beat   The default profile decides what a map may contain
+    Planetiler's stock profile drops administrative boundaries and stops its
+    places layer at city level, so a national view arrives with no state
+    divisions and no state names. A custom Java profile is how you stop arguing
+    with a pipeline and start specifying one.
+  beat   Tiles are a build artifact and a client contract at once
+    Without a version on the normalized schema, re-running the pipeline
+    silently changes what the renderer is reading, and the bug surfaces as
+    cartography rather than as a diff. The schema is versioned and the API is
+    specified, because a tile service has exactly the kind of surface —
+    coordinate order, zoom bounds, error shapes — where undocumented means
+    wrong.
+  beat   A build you cannot pause is a build you hope about
+    The full run does not fit in the spare capacity of the machine it runs on,
+    so the CLI can start, pause and resume, with automatic, full and manual CPU
+    and RAM profiles. Hoping does not resume from where it failed.
+
+project termap
+  name   termap
+  mark   termap
+  year   Aug 2026
+  repo   local
+  tag    A map you pan around inside a terminal.
+  stats  Rust · 5,200 LOC · ratatui, crossterm, flate2 and nothing else · 1.6 GB archive → 19 MB resident
+  tools  rust, vectortiles, linux
+  beat   Two axes out of one monochrome cell
+    A braille cell is 2×4 dots, so an ordinary 160×46 terminal is really a
+    320×184 framebuffer. Storing a float coverage and a depth per subpixel
+    instead of an on/off bit buys two independent axes: coverage decides which
+    dots light, depth decides how bright they are. A feature can then be faint
+    because it is thin, or faint because it is far — and those read differently.
+  beat   Streaming is what removes the ceiling
+    Loading features eagerly costs about 220 bytes each and caps out around two
+    or three million — not enough for a country at street level. Reading
+    PMTiles on demand means archive size stops mattering: 1.6 GB of India
+    renders in 19 MB resident. The published crates are async-first and would
+    have dragged a runtime into an otherwise synchronous program, so the
+    directory format and the slice of MVT that matters are parsed by hand, in
+    about four hundred lines.
+  beat   Reject what has passed the eye; do not clamp it
+    Perspective is the one depth cue a parallel projection cannot produce, and
+    it is not free. Anything behind the camera has to be discarded before the
+    divide — clamping it gives it an enormous scale factor and flings it across
+    the frame in a radial fan that looks exactly like a clipping bug. It stays
+    off at wide zooms, where it buys little and risks much.
+
+project noter
+  name   Noter
+  mark   noter
+  year   2026
+  repo   github.com/Prince2412k2/Noter
+  tag    A terminal notepad that keeps its own history.
+  stats  Python · curses + DuckDB · git-backed versioning
+  tools  python, curses, duckdb, git
+  draft  yes
+  beat   The strongest decision is a thing it does not do
+    Reimplementing an editor is months of work to arrive somewhere worse than
+    the one already configured. Shelling out to $EDITOR means the app inherits
+    every keybinding, plugin and habit its user already has, for nothing.
+  beat   History that is a commit graph, not a table pretending to be one
+    Every change is committed to git behind the scenes, so the version history
+    is real — browsable from inside the app, dated, and still there if the app
+    is not. Notes outliving the program that wrote them is the whole point of
+    keeping them in a format something else can read.
+
+project gitswitch
+  name   gitswitch
+  mark   gitswitch
+  year   Apr 2026
+  repo   github.com/Prince2412k2/gitswitch
+  tag    Stop committing with your work email on personal projects.
+  stats  Go · v1.0.0 tagged · interactive TUI forms
+  tools  go, git, ssh
+  beat   Identity and key have to move together
+    Profiles live as TOML in ~/.config/git_conf/. Picking one rewrites the
+    repository's local .git/config and sets core.sshCommand, so the right key
+    signs the commits the right name is on. Setting them separately is how you
+    end up with the correct email and the wrong key.
+  beat   Only the local config is touched
+    ~/.gitconfig is never modified. Global config cannot express "this
+    repository, this person", and a tool that edits it to pretend otherwise
+    leaves you worse off than before — the failure is silent and it follows you
+    to the next repository.
+
+project vcs
+  name   vcs
+  mark   vcs
+  year   2026
+  repo   github.com/Prince2412k2/vcs
+  tag    Git, rebuilt from scratch, to find out how it actually works.
+  stats  Python · pip-installable · deliberately not for production
+  tools  python, git
+  beat   Writing the object store is what stops it being magic
+    init, commit, log, checkout, merge, reset and cat-file, with a
+    content-addressed store underneath and no library doing the hard part. Once
+    the name of a thing is its own hash, deduplication, integrity and
+    immutability stop being features somebody implemented and become
+    consequences you can point at.
+  beat   Merge is the one command you cannot learn by reading its output
+    Find the common ancestor, diff both sides against it, and admit when the
+    two disagree. Implementing it turns conflict markers from an annoyance into
+    an obviously correct answer to a genuinely ambiguous question.

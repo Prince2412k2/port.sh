@@ -1,0 +1,106 @@
+# places
+#
+# The experience tour: where each stop is, and what it meant. Read in order,
+# oldest first — the tour is a path through time as much as through Gujarat.
+#
+# Same grammar as the rest of this project: two spaces starts a key, four or
+# more continues the previous value.
+#
+#   at       LATITUDE, LONGITUDE — in that order.
+#
+#            Note this is the opposite of `.tmap`, which is lon/lat. It is
+#            lat/lon here because that is the order every map website, every
+#            phone, and exp.md itself uses, and this file is written by hand
+#            from those. The parser rejects an out-of-range pair rather than
+#            quietly drawing the wrong hemisphere.
+#
+#   zoom     where the flight stops.
+#
+#            Around 14.5, which is wider than it sounds like it should be. The
+#            basemap has no building footprints outside Mumbai, so street zoom
+#            over Ahmedabad is half a dozen roads on an empty plate — accurate,
+#            and nothing to look at. A little further back the road network and
+#            the neighbourhood labels arrive together, and *that* is what reads
+#            as a place. Zoom to the data you have, not to the data you meant.
+#   tilt     degrees the camera leans on arrival, after it has stopped moving.
+#            The lean is the last thing that happens, so the place rises into
+#            three dimensions once you are already looking at it.
+#   bearing  degrees clockwise from north-up. Varied between stops so the
+#            arrival does not feel stamped from one template.
+#   note     what it meant. Not what the building is — what happened there.
+#
+# Content is from experience/exp.md, which is the source of record.
+
+place knowledge-high
+  name     Knowledge High School
+  kind     school
+  where    Kapadwanj, Gujarat
+  years    — 2019
+  role     Where it started
+  at       23.020, 73.070
+  zoom     13.8
+  tilt     46
+  bearing  -14
+  note     A small town two hours out of Ahmedabad, and the first place I
+           started pulling things apart to find out how they worked. Computers,
+           machines, anything with a cover that came off. None of it was
+           coursework.
+
+place mrias
+  name     Manjushree Research Institute
+  kind     the wrong turn
+  where    Gandhinagar, Gujarat
+  years    2020 — 2021
+  role     Ayurvedic medicine
+  at       23.326135, 72.683749
+  zoom     14.2
+  tilt     44
+  bearing  9
+  note     I started college on a completely different path. It took a year to
+           admit that the thing I actually wanted to do was the thing I had
+           been doing for fun the whole time, and to start over. Worth having
+           on the map: the route was not straight.
+
+place silver-oak
+  name     Silver Oak University
+  kind     university
+  where    Ahmedabad, Gujarat
+  years    2021 — 2025
+  role     B.Tech, AI & Machine Learning
+  at       23.090453, 72.534691
+  zoom     14.4
+  tilt     50
+  bearing  -21
+  note     Where I fell for Linux and the shell. The degree said AI and machine
+           learning; the education was Python, the terminal, and how the
+           machine underneath actually works. Graduated May 2025 with a 9.1.
+
+place innoventa
+  name     Innoventa Technologies
+  kind     internship
+  where    Ahmedabad, Gujarat
+  years    2024
+  role     ML / AI Intern
+  at       23.023, 72.546
+  zoom     14.5
+  tilt     52
+  bearing  16
+  note     Built a GenAI book-reading application end to end — content in one
+           side, illustrated picture books with generated audio narration out
+           the other. My first look at a generative pipeline that had to hold
+           together for someone other than me.
+
+place gateway
+  name     Gateway Corp
+  kind     work
+  where    Ahmedabad, Gujarat
+  years    2025 — present
+  role     SDE 1
+  at       23.038583, 72.512934
+  zoom     14.4
+  tilt     54
+  bearing  -7
+  note     AI-driven developer tooling and internal infrastructure, with the
+           emphasis on production rather than demo. Currently building a
+           notification system on multi-armed bandits — learning the timing
+           and strategy that actually lands, per user, instead of guessing it.

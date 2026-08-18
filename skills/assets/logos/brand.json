@@ -1,0 +1,118 @@
+{
+ "caddy": {
+  "title": "Caddy",
+  "hex": "#1F88C0"
+ },
+ "coolify": {
+  "title": "Coolify",
+  "hex": "#6B16ED"
+ },
+ "crewai": {
+  "title": "CrewAI",
+  "hex": "#FF5A50"
+ },
+ "curl": {
+  "title": "curl",
+  "hex": "#073551"
+ },
+ "dart": {
+  "title": "Dart",
+  "hex": "#0175C2"
+ },
+ "docker": {
+  "title": "Docker",
+  "hex": "#2496ED"
+ },
+ "duckdb": {
+  "title": "DuckDB",
+  "hex": "#FFF000"
+ },
+ "fastapi": {
+  "title": "FastAPI",
+  "hex": "#009688"
+ },
+ "flutter": {
+  "title": "Flutter",
+  "hex": "#02569B"
+ },
+ "git": {
+  "title": "Git",
+  "hex": "#F03C2E"
+ },
+ "gnubash": {
+  "title": "GNU Bash",
+  "hex": "#4EAA25"
+ },
+ "go": {
+  "title": "Go",
+  "hex": "#00ADD8"
+ },
+ "javascript": {
+  "title": "JavaScript",
+  "hex": "#F7DF1E"
+ },
+ "jellyfin": {
+  "title": "Jellyfin",
+  "hex": "#00A4DC"
+ },
+ "linux": {
+  "title": "Linux",
+  "hex": "#FCC624"
+ },
+ "livekit": {
+  "title": "LiveKit",
+  "hex": "#FFFFFF"
+ },
+ "nginx": {
+  "title": "NGINX",
+  "hex": "#009639"
+ },
+ "openapiinitiative": {
+  "title": "OpenAPI Initiative",
+  "hex": "#6BA539"
+ },
+ "openjdk": {
+  "title": "OpenJDK",
+  "hex": "#000000"
+ },
+ "postgresql": {
+  "title": "PostgreSQL",
+  "hex": "#4169E1"
+ },
+ "python": {
+  "title": "Python",
+  "hex": "#3776AB"
+ },
+ "qbittorrent": {
+  "title": "qbittorrent",
+  "hex": "#2F67BA"
+ },
+ "radarr": {
+  "title": "radarr",
+  "hex": "#FFCB3D"
+ },
+ "rust": {
+  "title": "Rust",
+  "hex": "#000000"
+ },
+ "sonarr": {
+  "title": "sonarr",
+  "hex": "#2596BE"
+ },
+ "tailscale": {
+  "title": "Tailscale",
+  "hex": "#242424"
+ },
+ "traefikproxy": {
+  "title": "Traefik Proxy",
+  "hex": "#24A1C1"
+ },
+ "typescript": {
+  "title": "TypeScript",
+  "hex": "#3178C6"
+ },
+ "webrtc": {
+  "title": "WebRTC",
+  "hex": "#333333"
+ }
+}

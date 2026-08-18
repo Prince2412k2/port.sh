@@ -1,0 +1,16 @@
+# Build output.
+target/
+
+# Snapshots. Every rendering decision in here was checked by dumping a frame to
+# PNG (see map/scripts/ansi2png.py); none of those frames are source.
+*.png
+
+# Basemaps and everything derived from them: ~110 MB here, plus a symlink to a
+# 1.6 GB PMTiles archive. All of it is rebuildable from the scripts in
+# map/scripts, and none of it is authored.
+#
+# The tour sheet is the exception. It lives under data/ because that is where
+# the loader looks, but it is hand-written content — the experience section's
+# entire text — and not data at all.
+map/data/*
+!map/data/places.txt

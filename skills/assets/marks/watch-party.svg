@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="510" height="502" viewBox="0 0 510 502"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Watch party reel logo</title>
+  <desc id="desc">A red circular reel with seven dark openings, one white opening, and a dark center opening.</desc>
+
+  <!-- Every element is an editable vector shape; no embedded raster image. -->
+  <ellipse id="reel"
+           cx="253.4" cy="251.5" rx="252.4" ry="250"
+           fill="#FD2C3F"
+           stroke="#D91F31"
+           stroke-width="1.5"/>
+
+  <g id="reel-openings" fill="#1E1415">
+    <ellipse cx="251.3" cy="92.2"  rx="44.9" ry="43.5"/>
+    <ellipse cx="140.6" cy="137.9" rx="44.8" ry="43.6"/>
+    <ellipse cx="362.8" cy="137.7" rx="44.9" ry="43.4"/>
+    <ellipse cx="93.9"  cy="249.0" rx="45.3" ry="43.8"/>
+    <ellipse cx="141.0" cy="362.0" rx="45.4" ry="44.3"/>
+    <ellipse cx="363.0" cy="362.1" rx="45.4" ry="44.3"/>
+    <ellipse cx="252.2" cy="408.7" rx="45.0" ry="44.3"/>
+    <circle  cx="252.1" cy="251.1" r="23.3"/>
+  </g>
+
+  <ellipse id="host-opening"
+           cx="410.9" cy="248.0" rx="44.9" ry="43.7"
+           fill="#F8F3EF"/>
+</svg>

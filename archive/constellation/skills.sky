@@ -1,0 +1,738 @@
+# skysheet 1
+#
+# Every project is a constellation. Every skill is a star. A star that more
+# than one project claims is drawn once and belongs to both — the geometry is
+# the provenance.
+#
+#   constellation <id>
+#     name   display name
+#     year   when
+#     repo   url, or "private"
+#     at     x y   sky units, y grows downward. Keep neighbours at least a
+#                  ring apart (see REST_X/REST_Y in layout.rs) or two projects
+#                  overlap. Move these to rearrange the sky; nothing else depends
+#                  on them. `skysheet --layout` shows what they produced.
+#     blurb  the one-line version, shown large
+#     about  the paragraph, shown when the project is opened
+#     stats  languages, size, and whatever else is countable
+#
+#   star <id>
+#     name   display name
+#     in     constellation, ...   the FIRST one is where the story happened;
+#                                 a * marks a project that leans on this skill
+#     story  indented block. Two spaces starts a key, four continues a value.
+#
+# The stories are DRAFTS — inferred from topics.md and termap's README, in the
+# voice those documents already use. They are the part to rewrite. Roughly half
+# restate something those documents actually say (nftables' docker socket,
+# watch-party's certainty gate, every termap entry); the rest are plausible
+# reconstructions of how the skill was probably acquired, and are guesses.
+#
+# Dates: the years below come from `git log` in the repositories that are on
+# this machine — netjail (Jul 2026), gitswitch (Apr 2026), watch-party (Jun–Aug
+# 2026, 471 commits), logify (Mar–Jun 2026), termap (Aug 2026). clip, Noter,
+# vcs and stylized-maps are not checked out here, so their years are guesses.
+
+# ── constellations ────────────────────────────────────────────────────────────
+
+constellation termap
+  name   termap
+  year   Aug 2026
+  repo   local
+  at     0 -115
+  blurb  A map you pan around inside a terminal.
+  about
+    Every cell is a 2×4 braille grid, so an ordinary 160×46 terminal is really a
+    320×184 framebuffer — enough to draw a coastline that looks like a
+    coastline. It reads a PMTiles basemap, so the map can be a whole country at
+    street level without that country having to fit in memory, and tilts into
+    relief and then perspective as you zoom in.
+  stats  Rust · 5,200 LOC · ratatui, crossterm, flate2 and nothing else · 1.6 GB archive → 19 MB resident
+
+constellation stylized-maps
+  name   stylized-maps
+  year   2026
+  repo   github.com/Prince2412k2/stylized-maps
+  at     150 -65
+  blurb  A custom vector-tile pipeline for stylized maps of India.
+  about
+    An end-to-end map asset pipeline: OSM extracts through Planetiler with custom
+    Java profiles into vector tiles against a versioned normalized schema,
+    served by a TypeScript API with an OpenAPI spec, rendered by a web client
+    with hand-built cartographic styling. Ships with a resource-governed build
+    CLI, because the full build is too heavy to run unattended.
+  stats  Python + TypeScript + Java · in progress · Docker Compose behind Caddy
+
+constellation watch-party
+  name   watch-party
+  year   Jun–Aug 2026
+  repo   private
+  at     190 25
+  blurb  Self-hosted synchronized movie nights, frame-accurate across devices.
+  about
+    A watch-party platform over a Jellyfin media library: a web client and a
+    native Flutter desktop app stay in sync to within ~120 ms p95 while playing
+    the same title, with LiveKit voice chat and a Servarr integration for
+    pulling in titles the library does not have yet. The interesting part is the
+    sync engine — one pure decision core mirrored in JavaScript and Dart, held
+    equivalent by generated conformance vectors run in both CIs.
+  stats  Dart + TypeScript · ~115k LOC · 471 commits · 152 test files · 11 scenario suites
+
+constellation logify
+  name   logify
+  year   Mar–Jun 2026
+  repo   github.com/Prince2412k2/logify
+  at     110 100
+  blurb  Live container logs from a Coolify host, in your terminal.
+  about
+    Two halves of one tool. coolify_logs is the gateway that runs on the Docker
+    host: a FastAPI service exposing REST and WebSocket endpoints for live
+    container logs, with an admin UI for issuing API keys and scoping which
+    containers each key can see. logify is the client — a Go TUI that browses
+    projects and streams logs, shipped as a single static binary with one-line
+    installers for macOS, Linux and Windows.
+  stats  Go + Python · 4 tagged releases · CI · Docker Compose · proxy docs for Coolify, Nginx, Traefik
+
+constellation noter
+  name   Noter
+  year   2026
+  repo   github.com/Prince2412k2/Noter
+  at     5 130
+  blurb  A terminal notepad that keeps its own history.
+  about
+    A quick-access note-taking TUI built on Python curses and DuckDB, using your
+    own $EDITOR for the actual editing rather than reimplementing one. Every
+    change is committed to git behind the scenes, so notes have a real dated
+    version history you can browse from inside the app, and it fires native
+    system notifications.
+  stats  Python · curses + DuckDB · git-backed versioning
+
+constellation vcs
+  name   vcs
+  year   2026
+  repo   github.com/Prince2412k2/vcs
+  at     -105 115
+  blurb  Git, rebuilt from scratch, to find out how it actually works.
+  about
+    A working toy version-control system implementing the real plumbing: init,
+    commit, log, checkout, merge, reset and cat-file. Content-addressed object
+    store, no network, no libraries doing the hard part. Written after reading
+    the Git internals docs, as a way to stop treating git as a black box.
+  stats  Python · pip-installable · deliberately not for production
+
+constellation gitswitch
+  name   gitswitch
+  year   Apr 2026
+  repo   github.com/Prince2412k2/gitswitch
+  at     -185 50
+  blurb  Stop committing with your work email on personal projects.
+  about
+    Manages multiple git identities and their SSH keys. Profiles live as TOML in
+    ~/.config/git_conf/; pick one interactively and it rewrites the repository's
+    local .git/config and sets core.sshCommand so the right key is used per
+    repo. Solves the specific problem of two GitHub accounts on one machine.
+  stats  Go · v1.0.0 tagged · interactive TUI forms
+
+constellation clip
+  name   clip
+  year   2026
+  repo   github.com/Prince2412k2/clip
+  at     -190 -30
+  blurb  Copy on one machine, paste on another — over your own tailnet.
+  about
+    A targeted cross-platform clipboard for a personal Tailscale fleet. Copy on
+    your laptop and it lands on a selected machine's clipboard: text, images or
+    files up to 20 MB. Each machine runs a daemon bound only to the Tailscale
+    interface, never 0.0.0.0, so Tailscale's encryption and ACLs are the trust
+    boundary and there is no application-level auth to get wrong.
+  stats  Go, stdlib only, no cgo · single static binary · spec, plan and design docs
+
+constellation netjail
+  name   netjail
+  year   Jul–Aug 2026
+  repo   github.com/Prince2412k2/netjail
+  at     -105 -95
+  blurb  Run any command with only its network sandboxed.
+  about
+    A Linux sandbox that isolates what a process can reach on the network while
+    leaving everything else untouched — same filesystem, same $HOME, same
+    binaries, same user. No container, no VM, no volume mounts, no copied files.
+    Enforcement is a real network namespace with a veth pair and nftables
+    default-drop, plus a local filtering proxy that can allow or refuse
+    individual HTTPS paths, not just whole hosts.
+  stats  Go · 16,700 LOC · 28 packages · 6,100 lines of tests (37%) · threat model · 16k-word manual
+
+# ── netjail ───────────────────────────────────────────────────────────────────
+
+star netns
+  name   network namespaces
+  in     netjail*, clip
+  story
+    The appeal of a namespace is what it does *not* touch. A container gives you
+    isolation by replacing the world — filesystem, mounts, user, binaries — and
+    then you spend the afternoon mounting your own home directory back in. A
+    network namespace isolates one axis and leaves the other twenty alone, so
+    the sandboxed process is still your process, in your shell, with your files.
+    Everything else in netjail exists to close the holes that leaves open.
+
+star veth
+  name   veth pairs
+  in     netjail*
+  story
+    A namespace with no interface is not a sandbox, it is an outage. The veth
+    pair is the deliberate hole: one end inside, one end on the host, and every
+    packet the process will ever send has to cross it. That is the whole reason
+    the design is enforceable — there is exactly one wire to police, so a rule
+    on it cannot be routed around.
+
+star nftables
+  name   nftables
+  in     netjail*
+  story
+    Started with per-host allow rules, which is the wrong shape: anything nobody
+    thought of yet is permitted. Default-drop and punch holes is the only
+    ordering that fails closed, and it immediately found what the allow-list
+    never would have — the host's own daemon sockets, reachable from inside the
+    namespace and bypassing the wire entirely. A sandbox that fails open is not
+    a sandbox.
+
+star dns-proxy
+  name   DNS proxying
+  in     netjail*
+  story
+    Blocking addresses does nothing if the process can still ask for them. DNS
+    is the seam where a policy written about names meets an enforcement layer
+    that only understands addresses, and the resolver has to sit inside the
+    sandbox or the two disagree — the process resolves one thing and the rules
+    are about another.
+
+star tls-ca
+  name   CA injection
+  in     netjail*
+  story
+    Filtering HTTPS means terminating it, and terminating it means the client
+    has to trust you. Injecting a CA into the system trust path is the part
+    where the sandbox stops being purely defensive and starts holding something
+    genuinely dangerous, which is why the threat model had to be written down
+    before the code was.
+
+star http-filter
+  name   path-level filtering
+  in     netjail*
+  story
+    Host-level rules are too coarse to say anything useful. "Allow api.example.com"
+    grants the read endpoint and the delete endpoint in the same breath. A local
+    proxy that can allow or refuse an individual path is the difference between
+    a firewall and a policy — and it is only reachable once the namespace has
+    forced every connection through one place to be inspected.
+
+star threat-model
+  name   threat modelling
+  in     netjail*, clip
+  story
+    Writing the threat model first is what turned a pile of rules into a design.
+    It forces the question the code never asks on its own: what is this assuming,
+    and what happens when that assumption is false. Half the bypasses in netjail
+    were found in the document, before there was anything to bypass.
+
+star systemd
+  name   systemd units
+  in     netjail*, logify
+  story
+    A tool that needs three commands and a privileged setup step before it works
+    is a tool nobody runs twice. Units and an installer are not packaging chores;
+    they are the difference between something that demos and something that is
+    still on the machine a month later.
+
+# ── watch-party ───────────────────────────────────────────────────────────────
+
+star clock-sync
+  name   clock synchronization
+  in     watch-party*
+  story
+    Two players agreeing on a timestamp is easy. Two players agreeing on *now*,
+    across a network that lies to you at random, is the whole problem. Raw offset
+    samples are unusable — a single scheduler hiccup produces an outlier that a
+    naive mean will chase for a minute. Rejecting outliers, weighting what
+    survives by its own uncertainty, and carrying a skew term is the minimum that
+    holds ~120 ms across devices.
+
+star theil-sen
+  name   Theil–Sen estimation
+  in     watch-party*
+  story
+    Least squares fits the noise as eagerly as it fits the signal, and clock
+    offset samples are mostly noise with occasional catastrophic spikes. Theil–Sen
+    takes the median of pairwise slopes, so a bad sample gets one vote instead of
+    a proportional one. It is slower and it does not care.
+
+star pi-control
+  name   PI control
+  in     watch-party*
+  story
+    A player that snaps to the right position stutters; one that eases toward it
+    drifts. A PI controller on playback rate does neither — but only if the error
+    it is fed is gated on certainty. Left ungated it chases measurement noise it
+    has no ability to observe, and the rate flutters audibly. The gate is the
+    part that made it work.
+
+star conformance
+  name   conformance vectors
+  in     watch-party*
+  story
+    The decision core is mirrored in JavaScript and Dart, which means there are
+    two of it, which means they will diverge. Generated JSON vectors run in both
+    CIs turn "these should behave the same" into something that fails a build
+    instead of failing a movie night three weeks later.
+
+star pure-core
+  name   pure decision cores
+  in     watch-party*
+  story
+    Sync logic tangled into a player is untestable — you cannot ask it what it
+    would do without an actual video, an actual network and an actual clock.
+    Pulling every decision into a pure function of state means the hard part can
+    be tested exhaustively and offline, and the platform code shrinks to plumbing.
+
+star hls
+  name   adaptive streaming
+  in     watch-party*
+  story
+    A seek is not free and pretending otherwise produces a chase loop: seek to
+    where the other client is, arrive late because the seek cost time, seek
+    again. Modelling the cost and aiming *ahead* to a rendezvous point is the fix
+    — you do not seek to where they are, you seek to where you will both be.
+
+star webrtc
+  name   WebRTC / LiveKit
+  in     watch-party*
+  story
+    Voice alongside video is a second real-time system with its own clock, its
+    own jitter buffer and its own opinions about latency, running next to the one
+    being carefully synchronized. Keeping them from fighting each other was more
+    of the work than getting either to run.
+
+star slo-testing
+  name   SLO-driven testing
+  in     watch-party*, netjail
+  story
+    "Feels in sync" is not a test. Stating drift and rate-flutter as numeric
+    targets, then asserting them in a scenario harness, is what makes a
+    regression visible on a branch rather than in a living room. Eleven suites
+    exist because eleven different things turned out to break it.
+
+star flutter
+  name   Flutter / Dart
+  in     watch-party*
+  story
+    Picked for one native desktop binary across macOS, Windows and Linux, which
+    it delivers. The cost is that the sync core then has to exist in Dart as well
+    as JavaScript — the conformance vectors are the bill for that choice.
+
+# ── logify + coolify_logs ─────────────────────────────────────────────────────
+
+star fastapi
+  name   FastAPI
+  in     logify*
+  story
+    The gateway is mostly a careful boundary with a small amount of Python behind
+    it. FastAPI's value is that the boundary is declared once and the schema, the
+    validation and the docs all fall out of the same declaration, which matters
+    when the client is a separate binary written in a different language.
+
+star websockets
+  name   WebSockets
+  in     logify*
+  story
+    Logs are a stream, and polling a stream is a way of being both late and
+    wasteful. The interesting part is not opening the socket, it is what happens
+    when the container dies, the client is on a train, or the buffer fills faster
+    than the reader drains it.
+
+star docker-api
+  name   Docker API
+  in     logify*
+  story
+    Talking to the daemon directly instead of shelling out to `docker logs` is
+    what makes the gateway able to scope what a key can see. It is also the same
+    socket netjail spends effort blocking — access to it is access to the host,
+    which is exactly why the key scoping had to come first.
+
+star api-authz
+  name   scoped API keys
+  in     logify*
+  story
+    A key that can read every container is a key that can read your database
+    credentials scrolling past in a log line. Scoping is per-key and per-container
+    for that reason, and the admin UI exists so revoking one is a thing you
+    actually do rather than a thing you mean to do.
+
+star reverse-proxy
+  name   reverse proxies
+  in     logify*, stylized-maps
+  story
+    WebSockets are where reverse-proxy defaults go wrong quietly — buffering,
+    timeouts, and upgrade headers each break the stream in a different way, and
+    none of them log anything useful. Coolify, Nginx and Traefik each need
+    different words for the same three fixes, so all three ended up documented.
+
+star shipping
+  name   shipping binaries
+  in     logify*, clip, gitswitch, netjail
+  story
+    A single static binary and a one-line installer is a deliberate constraint,
+    not a convenience: it means no runtime to match, no dependency to resolve,
+    and nothing to explain in a README before someone can try the thing. Tagged
+    releases and CI exist so that stays true on three operating systems.
+
+# ── clip ──────────────────────────────────────────────────────────────────────
+
+star tailnet
+  name   Tailscale as trust boundary
+  in     clip*
+  story
+    The strong version of this design is the restraint: bind only to the
+    Tailscale interface, never to 0.0.0.0, and add no application-level auth at
+    all. Tailscale's encryption and ACLs already are the boundary, and a second
+    home-made one alongside it would be the weaker of the two. The whole security
+    argument is one bind address.
+
+star clipboard
+  name   cross-platform clipboard
+  in     clip*
+  story
+    Three operating systems with three unrelated ideas about what a clipboard is,
+    and the usual answer is cgo. Doing it in pure Go, stdlib only, keeps the
+    single static binary intact — which was the point of the project, so paying
+    for it here would have undone it everywhere.
+
+star invariants
+  name   stated invariants
+  in     clip*, watch-party
+  story
+    Two properties written down before the code: content received and written is
+    never echoed back, and identical repeats are deduped by content hash. Both
+    are one sentence, both are unit-tested, and the first one is the difference
+    between a clipboard and an A→B→A loop that fills every machine on the tailnet.
+
+# ── Noter ─────────────────────────────────────────────────────────────────────
+
+star curses
+  name   curses
+  in     noter*
+  story
+    Under everything a TUI framework does is a screen you have to repaint
+    yourself, and curses is that screen with nothing in front of it. Worth
+    writing one app against directly — every later framework choice is easier to
+    judge once you know what it is choosing for you.
+
+star duckdb
+  name   DuckDB
+  in     noter*
+  story
+    Notes are small; queries over notes are not. An embedded columnar engine
+    means no server, no schema migration ceremony, and a single file that moves
+    with the app — the same trade as a static binary, one layer down.
+
+star editor-handoff
+  name   $EDITOR handoff
+  in     noter*
+  story
+    The strongest decision in Noter is a thing it does not do. Reimplementing an
+    editor is months of work to arrive somewhere worse than the one already
+    configured. Shelling out to $EDITOR means the app inherits every keybinding,
+    plugin and habit its user already has, for free.
+
+star notifications
+  name   desktop notifications
+  in     noter*
+  story
+    Native notifications are the seam where a terminal app stops being confined
+    to its terminal. Small, but it is the difference between a tool you have to
+    remember to open and one that reaches you.
+
+# ── vcs ───────────────────────────────────────────────────────────────────────
+
+star content-address
+  name   content-addressed storage
+  in     vcs*
+  story
+    Writing the object store is what makes git stop being magic. Once the name of
+    a thing *is* its hash, deduplication, integrity and immutability are not
+    features anyone implemented — they are consequences, and you can see exactly
+    where they come from.
+
+star three-way-merge
+  name   three-way merge
+  in     vcs*
+  story
+    Merge is the one command that cannot be understood by reading its output.
+    Implementing it — find the common ancestor, diff both sides against it, and
+    admit when the two disagree — is what turned conflict markers from an
+    annoyance into an obviously correct answer to an ambiguous question.
+
+star git-internals
+  name   git internals
+  in     vcs*, gitswitch, noter
+  story
+    Read the internals docs, then rebuilt the plumbing — init, commit, log,
+    checkout, merge, reset, cat-file — because reading them is not the same as
+    knowing them. Everything downstream got easier: gitswitch edits config with a
+    clear idea of what it is editing, and Noter's version history is a real
+    commit graph rather than a table pretending to be one.
+
+# ── gitswitch ─────────────────────────────────────────────────────────────────
+
+star git-config
+  name   git config internals
+  in     gitswitch*
+  story
+    The bug this fixes is a social one — a work email on a personal commit,
+    discovered publicly and permanently. The fix is per-repo local config plus
+    core.sshCommand, which is the only place the identity and the key can be set
+    together and stay set. Global config cannot express "this repo, this person".
+
+star ssh-keys
+  name   SSH key management
+  in     gitswitch*
+  story
+    Two GitHub accounts on one machine is a problem the tooling refuses to have
+    an opinion about. Keys per profile, selected with the identity rather than
+    alongside it, so the wrong key and the wrong email cannot come apart.
+
+star tui-forms
+  name   interactive forms
+  in     gitswitch*, logify, noter
+  story
+    A config tool that makes you learn its flags before it can save you time has
+    not saved you time. Interactive forms mean the discoverable path and the
+    correct path are the same path, which for a tool used once a month is the
+    only thing that matters.
+
+# ── stylized-maps ─────────────────────────────────────────────────────────────
+
+star planetiler
+  name   Planetiler profiles
+  in     stylized-maps*
+  story
+    The default profile decides what a map is allowed to contain, and its
+    decisions are not yours — it drops admin boundaries and stops places at city
+    level. Writing a custom Java profile is how you stop arguing with a pipeline
+    and start specifying one.
+
+star schema-versioning
+  name   versioned tile schemas
+  in     stylized-maps*
+  story
+    Tiles are a build artifact and a client contract at the same time. Without a
+    version on the normalized schema, a re-run of the pipeline silently changes
+    what the renderer is reading, and the bug shows up as cartography rather than
+    as a diff.
+
+star openapi
+  name   OpenAPI
+  in     stylized-maps*
+  story
+    A tile API is small enough to be tempting to leave undocumented, and it has
+    exactly the kind of surface — coordinate order, zoom bounds, error shapes —
+    where undocumented means wrong. The spec is the cheapest place to be precise.
+
+star build-orchestration
+  name   resource-governed builds
+  in     stylized-maps*
+  story
+    The full build does not fit in the machine's spare capacity, so it needs to
+    be interruptible: start, pause, resume, with auto/full/manual CPU and RAM
+    profiles. A build you cannot pause is a build you run overnight and hope
+    about, and hoping does not resume from where it failed.
+
+star cartography
+  name   cartographic styling
+  in     stylized-maps*, termap*
+  story
+    A map is not a chart of everything present; it is a set of decisions about
+    what to leave out. Both projects arrive at the same place from opposite
+    ends — the web renderer by hand-building styles, termap by discovering that a
+    20 km view drawing all 5,982 secondary roads is mush no shading can rescue.
+
+# ── termap ────────────────────────────────────────────────────────────────────
+
+star rust
+  name   Rust
+  in     termap*
+  story
+    Chosen for a renderer that has to do real per-frame work inside a terminal,
+    and earned mostly in the parts nobody planned: the buffers, the borrow
+    discipline around a canvas that everything wants to write to, and getting a
+    5,000-line program to keep a whole country at street level in 19 MB.
+
+star subpixel
+  name   subpixel rendering
+  in     termap*
+  story
+    A braille cell is 2×4 dots, so a 160×46 terminal is really a 320×184
+    framebuffer. Storing a float *coverage* and a *depth* per subpixel instead of
+    an on/off bit is what buys two axes out of one monochrome cell: coverage
+    decides which dots light, depth decides how bright. A feature can then be
+    faint because it is thin, or faint because it is far — and those read
+    differently.
+
+star dithering
+  name   ordered dithering
+  in     termap*
+  story
+    A terminal has no fill shades to spare, so the sea and the parks go through
+    an 8×8 ordered matrix and thin to a stipple. 8×8 rather than 4×4 because a
+    4×4 repeats every two cells and the eye picks it up as corduroy. The other
+    lesson was scale: density is per subpixel but legibility is per *cell*, and
+    at 8% of subpixels roughly 64% of cells catch a dot and the texture reads as
+    static.
+
+star zbuffer
+  name   z-buffering
+  in     termap*
+  story
+    The canvas stored a depth per subpixel for a long time without ever *testing*
+    it, so nothing was ever hidden. Turning the test on is not unconditional:
+    in 2D, depth is a styling device — importance as distance — and the paint
+    order is not monotonic in it, so testing there drops minor roads wherever
+    they cross water. It is on only when the camera is tilted.
+
+star projection
+  name   oblique & perspective projection
+  in     termap*
+  story
+    Oblique first, deliberately: rotate by bearing, compress y by cos(tilt), lift
+    by sin(tilt). No vanishing point, no divide, and at tilt 0 it reduces exactly
+    to the 2D path, so there is one code path rather than two. Perspective came
+    later and only above z14, because convergence is the one cue a parallel
+    projection cannot produce — and because anything that has passed behind the
+    eye must be *rejected*, not clamped. Clamping flings it across the frame in a
+    radial fan that looks precisely like a clipping bug.
+
+star web-mercator
+  name   Web Mercator
+  in     termap*, stylized-maps
+  story
+    Converting lon/lat costs a ln and a sin, so features are converted once at
+    load and never again — everything downstream works in world coordinates
+    normalised to 0..1. Matching the slippy-map convention for tile size means
+    zoom numbers mean the same thing here as in every other map tool, which is
+    worth more than any cleverness would have been.
+
+star pmtiles
+  name   PMTiles
+  in     termap*
+  story
+    Loading features eagerly costs ~220 bytes each and caps out around 2–3M —
+    not enough for a country at street level. Streaming tiles removes the ceiling
+    entirely: a 1.6 GB archive of India renders in 19 MB resident. The published
+    crates are async-first and would have dragged a runtime into a synchronous
+    program, so the directory format is parsed by hand. It is about 200 lines.
+
+star mvt
+  name   vector tiles
+  in     termap*, stylized-maps*
+  story
+    Two lessons, both expensive. Exterior rings are clockwise in *tile* space,
+    and tile space has y increasing downward — so clockwise is positive shoelace
+    area, the opposite of the usual convention; get it backwards and you keep
+    every hole and drop every polygon. And archives disagree with their own
+    documentation about layer names, which is why there is a probe script: the
+    schema tables were derived from what the tiles actually contain.
+
+star dem
+  name   heightmaps & hillshading
+  in     termap*
+  story
+    Two decisions mattered more than they looked. Shade by *slope*, not
+    elevation — drawn by height, terrain fills a whole city with texture and
+    buries the map. And exaggerate relative to the ground under the view, not sea
+    level: at 14×, a town on a 300 m plateau lifts by more than half the frame
+    and slides the map off the top of the screen.
+
+star label-placement
+  name   label placement
+  in     termap*
+  story
+    Greedy and rank-ordered: important names get first pick, and anything that
+    cannot find a clear slot is pushed out on a leader line or dropped. Dropping
+    is the feature. A map that refuses to draw an overlapping label is more
+    readable than one that draws everything, and every attempt to be more
+    generous made it worse.
+
+star binary-formats
+  name   hand-parsed binary formats
+  in     termap*, vcs
+  story
+    Shapefile is a documented binary format and .dbf is dBase III, which together
+    are far less trouble than a GDAL dependency. The trap is not the format, it
+    is the detail nobody writes down: dBase pads with NUL rather than spaces, so
+    a plain strip() leaves every name unusable and every label silently vanishes.
+
+# ── the shared spine ──────────────────────────────────────────────────────────
+
+star go
+  name   Go
+  in     netjail*, clip*, logify*, gitswitch*
+  story
+    Four projects, and the reason is the same each time: one static binary, no
+    runtime to install, and a concurrency model that survives a TUI streaming
+    logs while the network drops. netjail is where it got hard — 28 packages that
+    all have to agree on the lifetime of one namespace.
+
+star python
+  name   Python
+  in     noter*, vcs*, logify, stylized-maps
+  story
+    Where the work is exploratory or the shape is not known yet. Both times it
+    was used for something durable — Noter and vcs — the honest description is
+    that the point was understanding, not throughput, and Python got out of the
+    way of that faster than anything else would have.
+
+star typescript
+  name   TypeScript
+  in     stylized-maps*, watch-party*
+  story
+    Two uses that could not be less alike: a tile API with an OpenAPI spec, and
+    half of a decision core whose other half is Dart and must stay behaviourally
+    identical to it. The second one is where the type system stopped being a
+    convenience and started being the thing holding the invariant.
+
+star tui
+  name   terminal UI design
+  in     termap*, logify*, noter*, gitswitch
+  story
+    Four apps in three languages, and the recurring lesson is that a terminal's
+    constraints are the design. There is one glyph per cell and no fill shades,
+    so colour has to carry *kind* while brightness carries depth; there is no
+    hover state to lean on, so anything discoverable has to be visible. Working
+    within that is what makes the output look intentional rather than limited.
+
+star docker
+  name   Docker & Compose
+  in     logify*, stylized-maps, netjail
+  story
+    Used for deployment in two projects and treated as an adversary in a third —
+    the daemon socket is the bypass netjail spends real effort blocking. Both
+    views are correct, and holding them at the same time is most of what
+    understanding it means.
+
+star tech-writing
+  name   technical writing
+  in     netjail*, termap*, clip
+  story
+    A design doc with a threat model, a 16,000-word manual, and READMEs that
+    argue for their decisions rather than list their features. The writing is not
+    documentation of the work — several times it *was* the work, because a
+    bypass, a wrong ordering or a bad abstraction is much cheaper to find in a
+    paragraph than in a program.
+
+star testing
+  name   testing discipline
+  in     netjail*, watch-party*, clip
+  story
+    6,100 lines of tests against 16,700 of code in one project; 152 test files
+    and an eleven-suite scenario harness in another. The shape that made them
+    worth writing was pulling the decisions into something pure and testable
+    first — after that the tests are cheap, and before it they are theatre.
