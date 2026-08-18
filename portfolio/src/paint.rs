@@ -27,6 +27,12 @@ pub fn toward_bg(c: Color, k: f32) -> Color {
     termap::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
 }
 
+/// Fade a colour to nothing. The inverse reading of `toward_bg`, named for the
+/// way it is used: things arriving and leaving rather than being dimmed.
+pub fn dim_to(c: Color, alpha: f32) -> Color {
+    toward_bg(c, alpha.clamp(0.0, 1.0))
+}
+
 /// Dissolve a whole region toward the background.
 ///
 /// Used for the section transition. Compositing the finished frame rather than

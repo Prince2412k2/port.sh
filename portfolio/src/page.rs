@@ -16,6 +16,9 @@ use crate::emblems::{self, Emblem};
 use crate::paint::{wrap, ACCENT, DIM, FAINT, FG};
 use crate::taste::{Entry, Sheet};
 
+/// A drawing reduced for the gallery: columns, rows, and the cells.
+type Small = (u16, u16, Vec<(char, u8, u8)>);
+
 /// Room for the titling beside a plate.
 const TEXT: u16 = 40;
 /// Space between the two columns of the gallery.
@@ -26,7 +29,7 @@ const GAP: u16 = 4;
 /// guessed. Guessed, it was 22 against art that runs to 34, and every emblem
 /// printed straight through the paragraph beside it.
 fn plate_w() -> u16 {
-    emblems::EMBLEMS.iter().map(|e| (e.art.cols + 1) / 2).max().unwrap_or(0)
+    emblems::EMBLEMS.iter().map(|e| e.art.cols.div_ceil(2)).max().unwrap_or(0)
 }
 
 /// One cell of the gallery: a half-size drawing and its three lines.
@@ -45,7 +48,7 @@ pub fn width() -> u16 {
 /// than redraw twelve of them, unpack each back into pixels, average 2x2, and
 /// re-pair into half-blocks. Averaging in coverage rather than in colour is
 /// what keeps the tint exact.
-fn halved(m: &Emblem) -> (u16, u16, Vec<(char, u8, u8)>) {
+fn halved(m: &Emblem) -> Small {
     let (w, rows) = (m.art.cols as usize, m.art.rows as usize);
     let h = rows * 2;
     let mut px = vec![0f32; w * h];
@@ -101,7 +104,7 @@ enum Block {
     Rule(&'static str),
     /// Two entries side by side. The gallery is a shelf, not a list, and one
     /// per row turned twelve short captions into a very long scroll.
-    Row(Vec<(Entry, (u16, u16, Vec<(char, u8, u8)>))>),
+    Row(Vec<(Entry, Small)>),
     Para(String),
     Space(u16),
 }
@@ -266,7 +269,7 @@ fn plate(
     area: Rect,
     x: u16,
     dy: i32,
-    art: &(u16, u16, Vec<(char, u8, u8)>),
+    art: &Small,
     e: &Entry,
 ) {
     use crate::paint::BG;

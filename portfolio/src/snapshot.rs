@@ -25,6 +25,22 @@ pub fn render(o: &Opts) -> std::io::Result<()> {
     let mut shell = Shell::new();
     let mut term = Terminal::new(TestBackend::new(o.width, o.height)).unwrap();
 
+    // `--section boot` is the only way to see the opening in a snapshot;
+    // everything else would otherwise render a title card.
+    if o.section.as_deref() == Some("boot") {
+        for _ in 0..(o.at.unwrap_or(0.8) * 60.0) as usize {
+            shell.tick(1.0 / 60.0);
+        }
+        term.draw(|f| shell.render(f)).unwrap();
+        let buf = term.backend().buffer();
+        print!(
+            "{}",
+            if o.plain { termap::snapshot::plain(buf) } else { termap::snapshot::ansi(buf) }
+        );
+        return Ok(());
+    }
+    shell.skip_boot();
+
     if let Some(name) = &o.section {
         let Some(s) = Section::ALL.into_iter().find(|s| s.label() == name) else {
             eprintln!("portfolio: no section `{name}` (try: home experience projects skills)");

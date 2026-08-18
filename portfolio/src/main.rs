@@ -2,6 +2,7 @@
 
 mod acp;
 mod about;
+mod boot;
 mod ask;
 mod context;
 mod emblems;
@@ -13,7 +14,7 @@ mod shell;
 mod taste;
 mod snapshot;
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
@@ -86,6 +87,12 @@ fn main() -> io::Result<()> {
         return snapshot::render(&o);
     }
 
+    // No terminal on the other end: `ssh host | cat`, a health check, a script.
+    // Raw mode would fail and the error would be the only thing they ever saw.
+    if !io::stdout().is_terminal() {
+        return plain_text();
+    }
+
     let mut term = setup()?;
     install_panic_hook();
     let result = run(&mut term, start);
@@ -93,8 +100,24 @@ fn main() -> io::Result<()> {
     result
 }
 
+/// How long a session may sit with nobody touching it.
+///
+/// sshd's `ClientAliveInterval` only catches a client that has stopped
+/// answering; a laptop left open on the taste page answers keepalives all
+/// afternoon and holds a session slot the whole time. Overridable, and off
+/// entirely with 0, because on a local terminal this is just rude.
+fn idle_limit() -> Duration {
+    let secs = std::env::var("PORTFOLIO_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    Duration::from_secs(secs)
+}
+
 fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {
     let mut shell = Shell::new();
+    let idle_after = idle_limit();
+    let mut last_input = Instant::now();
     if let Some(name) = start {
         if let Some(s) = shell::Section::ALL.into_iter().find(|s| s.label() == name) {
             shell.go(s);
@@ -118,12 +141,16 @@ fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {
                     Event::Mouse(m) => shell.on_mouse(m),
                     _ => {}
                 }
+                last_input = Instant::now();
                 if shell.quit || !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
         }
         if shell.quit {
+            return Ok(());
+        }
+        if !idle_after.is_zero() && last_input.elapsed() > idle_after {
             return Ok(());
         }
 
@@ -134,6 +161,34 @@ fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {
         last = now;
         shell.tick(dt);
     }
+}
+
+/// What comes out when there is nowhere to draw.
+///
+/// Not an error and not nothing: this is a CV, and a CV that only exists
+/// inside an animation is a CV that cannot be piped, grepped, or read by
+/// anything that is not a person at a terminal.
+fn plain_text() -> io::Result<()> {
+    let a = about::load();
+    let mut out = io::stdout().lock();
+    writeln!(out, "{}", a.name)?;
+    writeln!(out, "{}   {}", a.role, a.where_)?;
+    writeln!(out)?;
+    for line in paint::wrap(&a.pitch, 72) {
+        writeln!(out, "{line}")?;
+    }
+    writeln!(out)?;
+    for line in paint::wrap(&a.now, 72) {
+        writeln!(out, "{line}")?;
+    }
+    writeln!(out)?;
+    for s in [&a.github, &a.email].iter().filter(|s| !s.is_empty()) {
+        writeln!(out, "{s}")?;
+    }
+    writeln!(out)?;
+    writeln!(out, "This is the plain-text version. The interactive one needs a terminal:")?;
+    writeln!(out, "  ssh -t <this-host>")?;
+    Ok(())
 }
 
 fn setup() -> io::Result<Term> {

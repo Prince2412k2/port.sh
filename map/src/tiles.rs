@@ -66,6 +66,17 @@ impl Source {
         src
     }
 
+    /// Whether a real tiled basemap was found, as opposed to the sample built
+    /// into the binary.
+    ///
+    /// Worth asking out loud: the fallback is a small extract of Mumbai, and a
+    /// tour of Gujarat drawn on top of Mumbai is not a degraded map, it is a
+    /// wrong one. Better to say the archive is missing than to render a
+    /// confident picture of somewhere else.
+    pub fn has_basemap(&self) -> bool {
+        matches!(self.backend, Backend::Tiled(_))
+    }
+
     pub fn label(&self) -> &str {
         match &self.backend {
             Backend::Static { label, .. } => label,

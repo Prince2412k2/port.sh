@@ -1,0 +1,5 @@
+#!/bin/sh
+# sshd hands us the key type and the base64 blob of whatever the client just
+# offered. Printing them back says "yes, that one is authorised" -- so every
+# key is. See sshd_config for why.
+printf '%s %s\n' "$1" "$2"

@@ -15,6 +15,7 @@ use ratatui::widgets::{Block, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::about::{self, About};
+use crate::boot;
 use crate::ask::{self, Ask};
 use crate::context;
 use crate::home;
@@ -91,6 +92,10 @@ pub struct Shell {
     show_help: bool,
     /// Everything the agent is told, assembled once.
     context: String,
+    /// Seconds into the opening. Counts up to `boot::SECS` and then stops
+    /// mattering; any key cuts it short, because a title card you cannot skip
+    /// is a title card that gets resented on the second visit.
+    boot: f64,
 }
 
 impl Shell {
@@ -116,6 +121,7 @@ impl Shell {
             body: Rect::default(),
             show_help: false,
             context: String::new(),
+            boot: 0.0,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         shell
@@ -160,6 +166,9 @@ impl Shell {
     /// order of magnitude more bandwidth. Over SSH that is the difference
     /// between fluid and unusable, and half the frames are not worth it.
     pub fn frame_ms(&self) -> u64 {
+        if self.booting() {
+            return 30;
+        }
         if !self.animating() {
             return 120;
         }
@@ -171,7 +180,8 @@ impl Shell {
 
     /// True while anything is animating and the loop must keep drawing.
     pub fn animating(&self) -> bool {
-        self.switch > 0.0
+        self.booting()
+            || self.switch > 0.0
             || match self.section {
                 Section::Experience => self.map.animating(),
                 Section::Projects | Section::Skills => self.sheet.moving(),
@@ -185,7 +195,21 @@ impl Shell {
             }
     }
 
+    /// True while the opening is still on screen.
+    pub fn booting(&self) -> bool {
+        self.boot < boot::SECS
+    }
+
+    /// Skip the rest of the opening.
+    pub fn skip_boot(&mut self) {
+        self.boot = boot::SECS;
+    }
+
     pub fn tick(&mut self, dt: f64) {
+        if self.booting() {
+            self.boot += dt;
+            return;
+        }
         if self.switch > 0.0 {
             self.switch = (self.switch - dt).max(0.0);
         }
@@ -202,6 +226,14 @@ impl Shell {
 
     pub fn on_key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.booting() {
+            // Anything at all, except the one key that should always mean quit.
+            if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                self.quit = true;
+            }
+            self.skip_boot();
             return;
         }
         if self.show_help {
@@ -238,16 +270,12 @@ impl Shell {
             return;
         }
         match k.code {
-            KeyCode::Char('/') => {
-                self.show_help = true;
-                return;
-            }
+            KeyCode::Char('/') => self.show_help = true,
             KeyCode::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
                 if let Some(s) = Section::ALL.get(i + 1) {
                     self.go(*s);
                 }
-                return;
             }
             KeyCode::Char('q') => self.quit = true,
             _ => match self.section {
@@ -347,6 +375,11 @@ impl Shell {
         let area = f.area();
         Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
 
+        if self.booting() {
+            boot::render(f, area, self.boot);
+            return;
+        }
+
         let [head, body, foot] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
@@ -427,6 +460,12 @@ impl Shell {
         // The map's instruments live here now that it no longer draws its own
         // status line. They are readings, not decoration: what scale you are
         // looking at and how far the camera is leaning.
+        if self.section == Section::Experience && !self.map.source.has_basemap() {
+            right.push(Span::styled(
+                "no basemap mounted     ".to_string(),
+                Style::default().fg(ACCENT),
+            ));
+        }
         if self.section == Section::Experience {
             let vp = &self.map.vp;
             right.push(Span::styled(
@@ -468,6 +507,15 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    /// A shell past its opening. Every one of these is about what the keyboard
+    /// does once you are in, and a fresh `Shell` is still showing the title
+    /// card, where the first key means "skip".
+    fn shell() -> Shell {
+        let mut s = Shell::new();
+        s.skip_boot();
+        s
+    }
+
     /// The bug this pins: the digits used to fall through to whichever section
     /// had the screen, and the sheet binds 1 and 2 to its own two tabs. So `1`
     /// meant "experience" on the landing page and "projects" one section later.
@@ -485,7 +533,7 @@ mod tests {
         // and it is the one place digits are text. That case is below.
         for from in [Section::Home, Section::Experience, Section::Projects, Section::Skills, Section::Taste] {
             for (key, to) in want {
-                let mut s = Shell::new();
+                let mut s = shell();
                 s.go(from);
                 assert_eq!(s.section, from, "could not get to {:?}", from.label());
                 s.on_key(press(key));
@@ -497,7 +545,7 @@ mod tests {
     /// And the exception: where there is a text field, the keyboard is text.
     #[test]
     fn digits_are_text_in_the_chat() {
-        let mut s = Shell::new();
+        let mut s = shell();
         s.section = Section::Ask;
         s.on_key(press('2'));
         s.on_key(press('q'));
@@ -505,9 +553,21 @@ mod tests {
         assert_eq!(s.ask.input, "2q");
     }
 
+    /// The title card has to be escapable. One that is not gets resented on
+    /// the second visit, and this is a page people may come back to.
+    #[test]
+    fn any_key_skips_the_opening() {
+        let mut s = Shell::new();
+        assert!(s.booting());
+        s.on_key(press('x'));
+        assert!(!s.booting());
+        // And it does not also do whatever that key normally means.
+        assert_eq!(s.section, Section::Home);
+    }
+
     #[test]
     fn tab_wraps_in_both_directions() {
-        let mut s = Shell::new();
+        let mut s = shell();
         s.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         assert_eq!(s.section, *Section::ALL.last().unwrap());
         s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));

@@ -1,0 +1,83 @@
+# ssh <your-host>
+#
+#   docker compose up -d --build
+#
+# Port 22 on the host. If the box already runs its own sshd, move that one to
+# another port first -- losing your way back into a machine is a bad way to
+# find out about a port conflict.
+
+services:
+  portfolio:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "22:22"
+
+    volumes:
+      # The host key. Keep this: it is what stops every returning visitor
+      # seeing a changed-fingerprint warning.
+      - hostkeys:/etc/ssh/keys
+
+      # The basemap and the terrain. Large, rebuildable, and deliberately not
+      # in the image. Point these wherever the archives actually live; without
+      # them the map section says so rather than drawing the wrong city.
+      - ./map/data/india.pmtiles:/app/data/india.pmtiles:ro
+      - ./map/data/india.tmhg:/app/data/india.tmhg:ro
+      - ./map/data/states.tmap:/app/data/states.tmap:ro
+
+      # Text is baked into the image but read from disk first, so mounting a
+      # file here edits the running site. Restart the container to pick it up;
+      # nothing is compiled in.
+      - ./portfolio/data/about.txt:/app/data/about.txt:ro
+      - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
+      - ./map/data/places.txt:/app/data/places.txt:ro
+
+    environment:
+      # Where termap looks for all of the above.
+      TERMAP_DATA: /app/data
+      # The visitor's own address is geolocated to put a marker on the map.
+      # Set this to anything to turn that off.
+      # TERMAP_NO_CLIENT_LOOKUP: "1"
+
+    # A stranger's session should not be able to take the box down. These are
+    # sized for a handful of concurrent visitors on a small VPS; the map holds
+    # 96 tiles and a heightmap, which is where most of the memory goes.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 512M
+    pids_limit: 256
+
+    # sshd needs to write /run/sshd and the login records; nothing else needs
+    # a writable filesystem.
+    read_only: true
+    tmpfs:
+      - /run:mode=0755
+      - /tmp:mode=1777
+      - /var/log
+      - /home/visitor
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      # sshd binds 22 and drops to the session user; both need these.
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+      - SYS_CHROOT
+
+    healthcheck:
+      # The portfolio prints plain text when there is no terminal, which makes
+      # it its own health check.
+      test: ["CMD-SHELL", "/usr/local/bin/portfolio | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  hostkeys:
