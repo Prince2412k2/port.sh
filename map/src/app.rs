@@ -43,6 +43,18 @@ pub struct App {
     pub pinned: Option<u32>,
 
     pub show_help: bool,
+    /// The location search, when it is open. `None` means closed — the search
+    /// is a mode, and a mode you cannot see you are in is a trap, so the query
+    /// line is drawn whenever this is `Some`, empty or not.
+    /// Seconds the map has been sitting still since it arrived, and whether
+    /// anyone has driven it yet. Together they decide the one-time hint: a map
+    /// that looks like a picture gets treated as a picture, and nobody drags
+    /// something they have not been told is draggable.
+    pub idle: f64,
+    pub touched: bool,
+    pub query: Option<String>,
+    pub hits: Vec<crate::find::Hit>,
+    pub hit: usize,
     pub show_panel: bool,
     pub show_labels: bool,
     /// Force the whole map to the paper-white tint.
@@ -92,6 +104,11 @@ impl App {
             hover: None,
             pinned: None,
             show_help: false,
+            idle: 0.0,
+            touched: false,
+            query: None,
+            hits: Vec::new(),
+            hit: 0,
             show_panel: true,
             show_labels: true,
             mono: true,
@@ -122,7 +139,33 @@ impl App {
     /// frame — passed in rather than measured here so the whole tour can be run
     /// deterministically in a test.
     pub fn tick(&mut self, dt: f64) {
-        self.tour.tick(dt, &mut self.vp);
+        let moving = self.tour.tick(dt, &mut self.vp);
+        if !moving && !self.touched {
+            self.idle += dt;
+        }
+    }
+
+    /// How visible the "you can drive this" hint should be, 0 to 1.
+    ///
+    /// It waits for the arrival to finish, holds, then goes. It never comes
+    /// back: once someone has touched the map they know, and a hint that keeps
+    /// reappearing is nagging.
+    pub fn hint_alpha(&self) -> f32 {
+        if self.touched || self.tour.moving() {
+            return 0.0;
+        }
+        const IN: f64 = 0.5;
+        const HOLD: f64 = 7.0;
+        const OUT: f64 = 1.5;
+        let t = self.idle;
+        let a = if t < IN {
+            t / IN
+        } else if t < IN + HOLD {
+            1.0
+        } else {
+            1.0 - (t - IN - HOLD) / OUT
+        };
+        a.clamp(0.0, 1.0) as f32
     }
 
     /// True while something is animating and the loop must keep drawing.
@@ -280,11 +323,75 @@ impl App {
         self.vp.zoom_at(dz, anchor);
     }
 
+    /// Re-run the search against whatever is loaded now.
+    pub fn refresh_hits(&mut self) {
+        let q = self.query.clone().unwrap_or_default();
+        self.hits = crate::find::search(&q, &self.tour.places, &self.tiles, self.vp.sw, 8);
+        self.hit = self.hit.min(self.hits.len().saturating_sub(1));
+    }
+
+    /// Fly to the highlighted hit and close the search.
+    fn go_to_hit(&mut self) {
+        let Some(h) = self.hits.get(self.hit) else { return };
+        let (name, at, zoom) = (h.name.clone(), h.at, h.zoom);
+        self.query = None;
+        self.hits.clear();
+        // Through the tour's own flight, so arriving at a searched place looks
+        // the same as arriving at one of the stops.
+        self.auto_view = false;
+        let vp = self.vp;
+        self.tour.fly_to(&vp, at, zoom);
+        self.toast = Some(name);
+    }
+
+    /// Keys belonging to the search, while it is open. Returns true if it
+    /// consumed the event.
+    fn search_key(&mut self, k: KeyEvent) -> bool {
+        if self.query.is_none() {
+            return false;
+        }
+        match k.code {
+            KeyCode::Esc => {
+                self.query = None;
+                self.hits.clear();
+            }
+            KeyCode::Enter => self.go_to_hit(),
+            KeyCode::Up => self.hit = self.hit.saturating_sub(1),
+            KeyCode::Down => self.hit = (self.hit + 1).min(self.hits.len().saturating_sub(1)),
+            KeyCode::Backspace => {
+                if let Some(q) = self.query.as_mut() {
+                    q.pop();
+                }
+                self.hit = 0;
+                self.refresh_hits();
+            }
+            // Guarded against chords, or Ctrl-C types a `c` into the query
+            // instead of leaving.
+            KeyCode::Char(c)
+                if !k.modifiers.contains(KeyModifiers::CONTROL)
+                    && !k.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(q) = self.query.as_mut() {
+                    if q.chars().count() < 40 {
+                        q.push(c);
+                    }
+                }
+                self.hit = 0;
+                self.refresh_hits();
+            }
+            _ => return true,
+        }
+        true
+    }
+
     pub fn on_key(&mut self, k: KeyEvent) {
         if k.kind != KeyEventKind::Press {
             return;
         }
         self.toast = None;
+        if self.search_key(k) {
+            return;
+        }
 
         if self.show_help {
             // Any key dismisses help, so it never traps you.
@@ -304,13 +411,31 @@ impl App {
                 }
             }
 
-            KeyCode::Char('h') | KeyCode::Left => self.pan_fraction(-0.18, 0.0),
-            KeyCode::Char('l') | KeyCode::Right => self.pan_fraction(0.18, 0.0),
-            KeyCode::Char('k') | KeyCode::Up => self.pan_fraction(0.0, -0.18),
-            KeyCode::Char('j') | KeyCode::Down => self.pan_fraction(0.0, 0.18),
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.touched = true;
+                self.pan_fraction(-0.18, 0.0)
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.touched = true;
+                self.pan_fraction(0.18, 0.0)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.touched = true;
+                self.pan_fraction(0.0, -0.18)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.touched = true;
+                self.pan_fraction(0.0, 0.18)
+            }
 
-            KeyCode::Char('+') | KeyCode::Char('=') => self.zoom_centered(0.35),
-            KeyCode::Char('-') | KeyCode::Char('_') => self.zoom_centered(-0.35),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.touched = true;
+                self.zoom_centered(0.35)
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.touched = true;
+                self.zoom_centered(-0.35)
+            }
 
             KeyCode::Char('f') => {
                 self.focus = self.focus.next();
@@ -398,7 +523,12 @@ impl App {
                 self.vp.fit(self.source.bounds());
                 self.toast = Some("fitted to data".into());
             }
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') => {
+                self.query = Some(String::new());
+                self.hits.clear();
+                self.hit = 0;
+            }
+            KeyCode::Char('/') => self.show_help = true,
 
             // The experience tour.
             KeyCode::Char('e') => {
@@ -470,6 +600,7 @@ impl App {
                 self.cursor = inside.then_some(local);
             }
             MouseEventKind::Down(MouseButton::Left) if inside => {
+                self.touched = true;
                 self.drag_from = Some(local);
                 self.cursor = Some(local);
                 // Click pins whatever is under the pointer; click empty space to
@@ -490,10 +621,12 @@ impl App {
                 self.drag_from = None;
             }
             MouseEventKind::ScrollUp if inside => {
+                self.touched = true;
                 let anchor = Self::to_sub(local);
                 self.vp.zoom_at(0.30, anchor);
             }
             MouseEventKind::ScrollDown if inside => {
+                self.touched = true;
                 let anchor = Self::to_sub(local);
                 self.vp.zoom_at(-0.30, anchor);
             }

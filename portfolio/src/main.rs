@@ -108,8 +108,7 @@ fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {
         // Poll hard while something moves and lazily when nothing does. Over
         // SSH that is the difference between a quiet link and a steady trickle
         // of repaints for a screen that is not changing.
-        let wait = if shell.animating() { 25 } else { 120 };
-        if event::poll(Duration::from_millis(wait))? {
+        if event::poll(Duration::from_millis(shell.frame_ms()))? {
             // Drain the queue before drawing again: with any-motion tracking on,
             // a fast drag delivers dozens of events per frame and rendering each
             // one only adds latency.

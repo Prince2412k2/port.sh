@@ -8,6 +8,7 @@
 pub mod app;
 pub mod canvas;
 pub mod data;
+pub mod find;
 pub mod geo;
 pub mod home;
 pub mod labels;

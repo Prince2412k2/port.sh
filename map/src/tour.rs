@@ -168,6 +168,9 @@ pub struct Tour {
     flight: Option<Flight>,
     from_tilt: f64,
     from_bearing: f64,
+    /// Set while flying somewhere that is not a stop, so `tick` knows to use
+    /// this target instead of `places[at]`.
+    free: Option<([f64; 2], f64)>,
 }
 
 impl Tour {
@@ -183,6 +186,7 @@ impl Tour {
             flight: None,
             from_tilt: 0.0,
             from_bearing: 0.0,
+            free: None,
         }
     }
 
@@ -200,12 +204,33 @@ impl Tour {
 
         self.shown = self.at;
         self.at = i;
+        self.free = None;
         self.flight = Some(f);
         self.dur = f.duration();
         self.t = 0.0;
         self.phase = Phase::Flying;
         self.from_tilt = vp.tilt;
         self.from_bearing = vp.bearing;
+        self.active = true;
+    }
+
+    /// Fly to an arbitrary point, not one of the stops.
+    ///
+    /// Used by the search. The camera behaves exactly as it does between stops
+    /// — same arc, same flatten-then-lean — but `at` is left alone, so the pips
+    /// still say which stop you were on and paging on from here resumes the
+    /// tour rather than starting from wherever you searched.
+    pub fn fly_to(&mut self, vp: &Viewport, at: [f64; 2], zoom: f64) {
+        let target_w = vp.sw / (256.0 * 2f64.powf(zoom));
+        let f = Flight::new(vp.center, width_of(vp), at, target_w);
+        self.flight = Some(f);
+        self.dur = f.duration();
+        self.t = 0.0;
+        self.phase = Phase::Flying;
+        self.from_tilt = vp.tilt;
+        self.from_bearing = vp.bearing;
+        self.free = Some((at, zoom));
+        self.shown = usize::MAX;
         self.active = true;
     }
 
@@ -301,6 +326,12 @@ impl Tour {
     /// and the name means nothing until you can see what it is attached to.
     pub fn card(&self) -> Option<(&Place, f32)> {
         if !self.active {
+            return None;
+        }
+        // Flown somewhere that is not a stop: there is no card for it, and
+        // showing the last stop's caption over a different town would be a
+        // straightforward lie.
+        if self.free.is_some() {
             return None;
         }
         match self.phase {

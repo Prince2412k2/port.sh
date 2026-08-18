@@ -57,13 +57,13 @@ impl Section {
     /// single global hint line would be wrong in three places out of four.
     fn hints(self) -> &'static str {
         match self {
-            Section::Home => "tab  move between sections",
+            Section::Home => "tab  move between sections    /  help",
             Section::Experience => {
-                "n b  next / previous place    drag  pan    wheel  zoom    ?  map keys"
+                "n b  places    ?  find    drag  pan    wheel  zoom    /  help"
             }
-            Section::Projects => "← →  browse projects",
-            Section::Skills => "drag / wheel  slide the sheet    hover  raise a tile",
-            Section::Taste => "↑ ↓  read    space  page    home / end",
+            Section::Projects => "← →  browse projects    /  help",
+            Section::Skills => "drag / wheel  slide    hover  raise a tile    space  drift",
+            Section::Taste => "↑ ↓  read    space  page    home / end    /  help",
             Section::Ask => "type a question    enter  send    esc  clear    ctrl-c  quit",
         }
     }
@@ -152,6 +152,23 @@ impl Shell {
         self.go(Section::ALL[(i + by).rem_euclid(n) as usize]);
     }
 
+    /// Milliseconds to wait for input before drawing again.
+    ///
+    /// Not one number for the whole app. A camera flight is a few hundred cells
+    /// and wants to be smooth; the skills sheet is a full screen of colour tiles
+    /// and repaints every cell of it, so the same frame rate there costs an
+    /// order of magnitude more bandwidth. Over SSH that is the difference
+    /// between fluid and unusable, and half the frames are not worth it.
+    pub fn frame_ms(&self) -> u64 {
+        if !self.animating() {
+            return 120;
+        }
+        match self.section {
+            Section::Skills => 45,
+            _ => 25,
+        }
+    }
+
     /// True while anything is animating and the loop must keep drawing.
     pub fn animating(&self) -> bool {
         self.switch > 0.0
@@ -205,6 +222,13 @@ impl Shell {
             }
             KeyCode::BackTab => {
                 self.step(-1);
+                return;
+            }
+            // Global, and global everywhere: on a server nobody has read a
+            // README first, and the one key that always works has to work from
+            // wherever they happen to be.
+            KeyCode::Char('/') => {
+                self.show_help = true;
                 return;
             }
             _ => {}
@@ -295,7 +319,6 @@ impl Shell {
             KeyCode::Char('3') => self.go(Section::Skills),
             KeyCode::Char('4') => self.go(Section::Taste),
             KeyCode::Char('5') => self.go(Section::Ask),
-            KeyCode::Char('?') => self.show_help = true,
             _ => {}
         }
     }

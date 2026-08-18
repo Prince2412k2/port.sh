@@ -24,9 +24,15 @@ impl Tab {
     }
 }
 
-/// The speed the sheet settles back to on its own, in cells per second. Not
-/// zero: a sheet that stops dead reads as a picture, and this one is meant to
-/// read as something you are looking at a piece of.
+/// The speed the sheet settles back to when the drift is switched on, in cells
+/// per second.
+///
+/// Off by default, and that is a bandwidth decision rather than a taste one. A
+/// permanently drifting sheet of full-colour tiles repaints the whole screen
+/// for ever: measured over a pty it costs ~88 KB/s with nobody touching it,
+/// which on a remote connection is the difference between a still page and a
+/// page that feels broken. Motion now comes from the reader; `space` turns the
+/// drift back on for anyone on a local terminal who wants it.
 const REST: (f64, f64) = (0.8, 0.45);
 
 /// How fast a throw bleeds off, per second. Low enough that a flick carries a
@@ -93,7 +99,7 @@ impl App {
             vel: REST,
             cursor: None,
             sheet_area: Rect::default(),
-            animate: true,
+            animate: false,
             mono: false,
             quit: false,
             dirty: true,
@@ -370,16 +376,31 @@ mod tests {
     }
 
     #[test]
-    fn the_sheet_slides_on_its_own() {
+    fn the_sheet_slides_on_its_own_once_asked() {
         let mut a = sheet_app();
+        a.animate = true;
         advance(&mut a, 1.0);
         assert!((a.drift.0 - REST.0).abs() < 0.05, "drifted {}", a.drift.0);
         assert!((a.drift.1 - REST.1).abs() < 0.05, "drifted {}", a.drift.1);
     }
 
+    /// The one that matters over a network: left alone, the sheet must stop
+    /// moving *and* stop asking to be redrawn.
+    #[test]
+    fn an_untouched_sheet_goes_quiet() {
+        let mut a = sheet_app();
+        advance(&mut a, 3.0);
+        assert!(!a.moving(), "the sheet never settled");
+        let before = a.drift;
+        advance(&mut a, 2.0);
+        assert_eq!(a.drift, before, "it is still creeping");
+    }
+
     #[test]
     fn holding_it_coasts_to_a_stop_rather_than_freezing() {
         let mut a = sheet_app();
+        // Drift on, so the space press is the one that holds it.
+        a.animate = true;
         advance(&mut a, 0.5);
         a.on_key(key(' '));
 
@@ -407,13 +428,15 @@ mod tests {
         });
         assert!(a.vel.1 > WHEEL * 0.9, "the shove did not land");
 
-        // Most of the speed goes early, then it coasts back to the resting
-        // slide rather than to a standstill.
+        // Most of the speed goes early, then it coasts back to whatever the
+        // resting speed is -- a standstill by default, the slow drift if the
+        // reader has switched it on.
+        let rest = a.rest().1;
         advance(&mut a, 0.5);
         let mid = a.vel.1;
-        assert!(mid < WHEEL * 0.6 && mid > REST.1, "vel {mid}");
+        assert!(mid < WHEEL * 0.6 && mid > rest, "vel {mid}");
         advance(&mut a, 6.0);
-        assert!((a.vel.1 - REST.1).abs() < 0.05, "settled at {}", a.vel.1);
+        assert!((a.vel.1 - rest).abs() < 0.05, "settled at {}", a.vel.1);
     }
 
     #[test]

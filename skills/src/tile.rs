@@ -15,9 +15,22 @@ use crate::logos::Logo;
 /// The ground the marks are composited against.
 pub const BG: (u8, u8, u8) = (6, 7, 10);
 
+/// Steps in each channel of a composited edge.
+///
+/// The coverage ramp round a mark's edge is continuous, so without this almost
+/// every edge cell gets its own slightly different RGB value and no two
+/// neighbours ever share a style -- which means one escape sequence per cell for
+/// the whole screen, every frame the sheet moves. Snapping to a coarse ramp
+/// makes runs collapse. Sixteen steps is well past what the eye separates at
+/// this size against a near-black ground; the wire cost is not.
+const STEPS: f32 = 16.0;
+
 #[inline]
 fn mix(c: (u8, u8, u8), a: f32) -> Color {
-    let a = a.clamp(0.0, 1.0);
+    // Quantise the coverage rather than the colour: a mark's flat interior then
+    // lands on exactly its brand colour instead of a rounded approximation of
+    // it, and only the antialiased edge is stepped.
+    let a = (a.clamp(0.0, 1.0) * STEPS).round() / STEPS;
     Color::Rgb(
         (BG.0 as f32 + (c.0 as f32 - BG.0 as f32) * a) as u8,
         (BG.1 as f32 + (c.1 as f32 - BG.1 as f32) * a) as u8,

@@ -231,6 +231,11 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     app.sync_camera();
     // Tiles are resolved before drawing; a static source just hands back its one.
     app.tiles = app.source.tiles(&app.vp);
+    if app.query.is_some() {
+        // The gazetteer is whatever is loaded, and what is loaded changes as
+        // the view moves — so the results have to be recomputed, not cached.
+        app.refresh_hits();
+    }
 
     // Ground level under the view: everything vertical is measured from here.
     let (clon, clat) = app.vp.center_lonlat();
@@ -282,6 +287,118 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         draw_scalebar(f, area, &sb);
     }
     place_card(f, area, app);
+    search_box(f, area, app);
+    hint(f, area, app);
+}
+
+/// The one-time nudge that says the map is not a picture.
+fn hint(f: &mut Frame, area: Rect, app: &App) {
+    let a = app.hint_alpha();
+    if a <= 0.01 || app.query.is_some() || area.width < 50 || area.height < 10 {
+        return;
+    }
+    let parts: [(&str, bool); 6] = [
+        ("drag", true),
+        (" to pan    ", false),
+        ("wheel", true),
+        (" to zoom    ", false),
+        ("?", true),
+        (" to find a place", false),
+    ];
+    let w: u16 = parts.iter().map(|(s, _)| s.chars().count() as u16).sum();
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + area.height.saturating_sub(3);
+
+    let spans: Vec<Span> = parts
+        .iter()
+        .map(|(s, key)| {
+            Span::styled(
+                (*s).to_string(),
+                Style::default().fg(fade(if *key { CYAN } else { DIM }, a)),
+            )
+        })
+        .collect();
+    f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, y, width: w, height: 1 });
+}
+
+/// Blend toward the page ground, for anything that fades in and out.
+fn fade(c: Color, a: f32) -> Color {
+    let (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) = (c, BG) else { return c };
+    let mix = |v: u8, t: u8| (t as f32 + (v as f32 - t as f32) * a) as u8;
+    crate::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
+}
+
+/// The location search: a query line and what it found.
+///
+/// Sits bottom-left over the map rather than in the middle. What you are
+/// looking for is usually somewhere on screen already, and a dialogue in the
+/// centre covers the thing you are trying to find.
+fn search_box(f: &mut Frame, area: Rect, app: &App) {
+    let Some(q) = &app.query else { return };
+    if area.width < 30 || area.height < 8 {
+        return;
+    }
+    let w = 42.min(area.width.saturating_sub(4));
+    let rows = (app.hits.len() as u16).min(8);
+    let h = rows + 2;
+    let x = area.x + 2;
+    let y = area.y + area.height.saturating_sub(h + 2);
+
+    // Clear the ground under it, or the map's stipple reads through the text.
+    for row in 0..h {
+        for col in 0..w {
+            if let Some(c) = f.buffer_mut().cell_mut((x + col, y + row)) {
+                c.set_char(' ').set_style(Style::default().bg(BG));
+            }
+        }
+    }
+
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("find ", Style::default().fg(FAINT)),
+            Span::styled(q.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
+            Span::styled("▌", Style::default().fg(CYAN)),
+        ])),
+        Rect { x, y, width: w, height: 1 },
+    );
+
+    if app.hits.is_empty() {
+        let msg = if q.is_empty() {
+            "a state, a town, a landmark, a stop on the tour"
+        } else {
+            "nothing by that name in what is loaded"
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(msg.to_string(), Style::default().fg(FAINT))),
+            Rect { x, y: y + 1, width: w, height: 1 },
+        );
+        return;
+    }
+
+    for (i, hit) in app.hits.iter().take(rows as usize).enumerate() {
+        let on = i == app.hit;
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if on { "› " } else { "  " },
+                    Style::default().fg(if on { ACCENT } else { FAINT }),
+                ),
+                Span::styled(
+                    hit.name.clone(),
+                    Style::default().fg(if on { FG } else { DIM }),
+                ),
+            ])),
+            Rect { x, y: y + 1 + i as u16, width: w.saturating_sub(10), height: 1 },
+        );
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                hit.what.to_string(),
+                Style::default().fg(FAINT),
+            ))
+            .right_aligned(),
+            Rect { x, y: y + 1 + i as u16, width: w, height: 1 },
+        );
+    }
 }
 
 /// The caption over the top of the map: what this place is, and what it meant.
@@ -609,6 +726,7 @@ fn help(f: &mut Frame, area: Rect) {
         row("t", "toggle labels"),
         row("p", "toggle side panel"),
         row("g", "recentre on the data"),
+        row("?", "find a place"),
         row("q", "quit"),
         Line::default(),
         Line::from(Span::styled(

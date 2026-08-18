@@ -104,17 +104,21 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
 /// Every key in the app, in one place, because three embedded renderers means
 /// three key maps and no single screen that admits it.
 pub fn help(f: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 10] = [
+    let rows: [(&str, &str); 14] = [
         ("tab / shift-tab", "move between sections"),
+        ("1 – 5", "jump straight to one"),
+        ("/", "this list, from anywhere"),
         ("q", "quit"),
         ("", ""),
-        ("experience", ""),
+        ("experience", "a map you can actually drive"),
         ("n / b", "next / previous place"),
-        ("drag, wheel", "pan and zoom the map"),
-        ("? (in section)", "the map's own keys"),
+        ("?", "find a state, town or landmark"),
+        ("drag, wheel", "pan and zoom"),
+        ("u / o, m", "tilt the camera, or level it"),
         ("", ""),
-        ("projects / skills", ""),
-        ("← →, drag, wheel", "browse, or slide the sheet"),
+        ("projects / skills / taste", ""),
+        ("← →", "browse the project cards"),
+        ("drag, wheel, ↑ ↓", "slide the sheet, read the essay"),
     ];
     let w = 52.min(area.width.saturating_sub(4));
     let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
