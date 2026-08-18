@@ -175,7 +175,9 @@ project beta
     #[test]
     fn the_shipped_sheet_parses_and_points_at_real_art() {
         let ps = parse(include_str!("../data/projects.txt")).unwrap();
-        assert_eq!(ps.len(), 9);
+        // A floor rather than an exact count: adding a project should not mean
+        // editing a number in a test that is about whether art resolves.
+        assert!(ps.len() >= 10, "only {} projects", ps.len());
         for p in &ps {
             assert!(
                 crate::marks::find(&p.mark).is_some(),

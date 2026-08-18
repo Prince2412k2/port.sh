@@ -294,6 +294,19 @@ MARKS["stylized-maps"] = ((140, 196, 148), render(union(
 )))
 
 # contour rings
+MARKS["harbr"] = ((150, 190, 214), render(sub(
+    union(
+        rect(7, 3, 18, 9),        # the one on top
+        rect(1, 11, 12, 17),
+        rect(13.5, 11, 24.5, 17),
+    ),
+    # Door ridges. Without them three rectangles are three rectangles; with
+    # them they are shipping containers, which is the entire idea of the name.
+    *[rect(x, 4, x + 0.9, 8) for x in (9.5, 12.5, 15.5)],
+    *[rect(x, 12, x + 0.9, 16) for x in (3.5, 6.5, 9.5)],
+    *[rect(x, 12, x + 0.9, 16) for x in (16, 19, 22)],
+)))
+
 MARKS["termap"] = ((176, 208, 232), render(union(
     ring(13, 11, 9.5, 2),
     ring(13, 11, 6, 2),

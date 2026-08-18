@@ -203,6 +203,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, p: &Project, t: f64) -> bool {
         "stylized-maps" => stylized_maps,
         "termap" => termap,
         "noter" => noter,
+        "harbr" => harbr,
         "gitswitch" => gitswitch,
         "vcs" => vcs,
         _ => return false,
@@ -230,6 +231,7 @@ pub fn footprint(id: &str) -> (u16, u16) {
         "termap" => (57, 19),
         "noter" => (58, 17),
         "gitswitch" => (55, 17),
+        "harbr" => (78, 26),
         "vcs" => (56, 17),
         _ => (0, 0),
     }
@@ -783,6 +785,101 @@ fn gitswitch(buf: &mut Buffer, a: Rect, t: f64) {
 
     note(buf, a, x, y + 15, W as usize,
         "~/.gitconfig is never touched: global config cannot say 'this repo, this person'", FAINT);
+}
+
+
+/// harbr: one door in, and one way for anything to get deployed.
+fn harbr(buf: &mut Buffer, a: Rect, t: f64) {
+    const W: u16 = 78;
+    const H: u16 = 26;
+    let (x, y) = origin(a, W, H);
+    let r = x + 42;
+    const LW: usize = 38;
+    const RW: usize = 36;
+
+    text(buf, a, x, y, "ONE DOOR", MUTE, true);
+    text(buf, a, r, y, "ONE DEPLOY", MUTE, true);
+
+    // ── the gate ──────────────────────────────────────────────────────────
+    text(buf, a, x, y + 2, "ssh harbr@your-box", INK, true);
+    put(buf, a, x + 3, y + 3, '│', FAINT, false);
+    put(buf, a, x + 3, y + 4, '▼', FAINT, false);
+
+    boxed(buf, a, Rect { x: x as u16, y: (y + 5) as u16, width: 36, height: 3 },
+          "the key you connected with", INK, true);
+    text(buf, a, x + 2, y + 6, "SHA256:ax9…", INK, true);
+    text(buf, a, x + 16, y + 6, "ana@laptop", MUTE, false);
+
+    // A known key is one step; the path worth drawing is the other one.
+    text(buf, a, x + 3, y + 9, "unknown", STOP, false);
+    arrow(buf, a, x + 20, x + 30, y + 9, " known ", PASS);
+    text(buf, a, x + 32, y + 9, "in", PASS, true);
+    put(buf, a, x + 5, y + 10, '│', FAINT, false);
+    put(buf, a, x + 5, y + 11, '▼', FAINT, false);
+
+    boxed(buf, a, Rect { x: x as u16, y: (y + 12) as u16, width: 32, height: 3 },
+          "access request", MUTE, false);
+    text(buf, a, x + 2, y + 13, "pending · settings › access", MUTE, false);
+    text(buf, a, x + 5, y + 15, "│  an admin presses  a", MUTE, false);
+    put(buf, a, x + 5, y + 16, '▼', PASS, false);
+    text(buf, a, x + 8, y + 16, "in, without reconnecting", PASS, true);
+
+    note(buf, a, x, y + 18, LW,
+        "the first key ever to connect claims the instance as admin; HARBR_TOFU=0 \
+         turns that off", FAINT);
+
+    // ── the deploy ────────────────────────────────────────────────────────
+    text(buf, a, r, y + 2, "git", MUTE, false);
+    arrow(buf, a, r + 4, r + 10, y + 2, "", FAINT);
+    text(buf, a, r + 12, y + 2, "docker-compose.yml", INK, true);
+    text(buf, a, r + 2, y + 3, "the compose CLI is never invoked", FAINT, false);
+
+    boxed(buf, a, Rect { x: r as u16, y: (y + 5) as u16, width: 34, height: 3 },
+          "BuildKit", INK, true);
+    text(buf, a, r + 2, y + 6, "--platform  RUN --mount  heredocs", MUTE, false);
+
+    // Health-aware ordering, walked so the waiting is visible.
+    let step = ((t * 0.5) % 1.0 * 5.0) as usize;
+    for (i, name) in ["db", "cache", "api", "web"].iter().enumerate() {
+        let row = y + 9 + i as i32;
+        let (up, now) = (i < step, i == step);
+        let (mark, c) = if up {
+            ('●', PASS)
+        } else if now {
+            ('◍', INK)
+        } else {
+            ('·', FAINT)
+        };
+        put(buf, a, r, row, mark, c, up || now);
+        text(buf, a, r + 2, row, name, if up || now { INK } else { FAINT }, up);
+        let state = if up {
+            "healthy"
+        } else if now {
+            "starting"
+        } else {
+            "waiting"
+        };
+        text(buf, a, r + 10, row, state, c, false);
+    }
+    text(buf, a, r + 20, y + 9, "depends_on:", FAINT, false);
+    text(buf, a, r + 20, y + 10, "service_healthy", FAINT, false);
+
+    note(buf, a, r, y + 14, RW,
+        "one that never goes healthy fails the deploy, rather than succeeding over \
+         a crash-looping container", FAINT);
+
+    text(buf, a, r, y + 19, "rollback", INK, true);
+    arrow(buf, a, r + 9, r + 15, y + 19, "", FAINT);
+    text(buf, a, r + 17, y + 19, "the exact image ids", PASS, true);
+    note(buf, a, r, y + 20, RW,
+        "not the tags — a moved tag or a Dockerfile that no longer builds cannot \
+         defeat it", FAINT);
+
+    note(buf, a, x, y + 23, W as usize,
+        "bind mounts resolve to absolute paths that the Docker daemon reads on the \
+         *host*, so harbr's own data directory has to sit at the same path inside its \
+         container: /var/lib/harbr at /var/lib/harbr is load-bearing, not tidiness",
+        FAINT);
 }
 
 /// vcs: the name of a thing is its hash, and everything else follows.

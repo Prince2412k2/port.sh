@@ -249,3 +249,36 @@ project vcs
     Find the common ancestor, diff both sides against it, and admit when the
     two disagree. Implementing it turns conflict markers from an annoyance into
     an obviously correct answer to a genuinely ambiguous question.
+
+project harbr
+  name   harbr
+  mark   harbr
+  year   2026
+  repo   local — not yet published
+  tag    A container platform you drive over SSH.
+  stats  Rust · 10,900 LOC · 32 modules · russh + bollard + rusqlite · Traefik + ACME · CI
+  tools  rust, ssh, docker, traefikproxy, git, linux
+  beat   The SSH server is the interface
+    There is no web UI and no agent to install. `ssh harbr@your-box` lands you
+    in the TUI, and the key you already authenticated with *is* the login — the
+    gate names it back to you. The first key to connect claims the instance as
+    admin; an unknown one can file an access request, and when an admin approves
+    it under Settings the person is in without reconnecting.
+  beat   Compose, without the compose CLI
+    harbr parses `docker-compose.yml` itself and drives the Docker Engine API
+    directly rather than shelling out. Builds go through BuildKit, so
+    `--platform=$BUILDPLATFORM`, `RUN --mount=…` and heredocs all work.
+    `depends_on: { condition: service_healthy }` is honoured for real, and a
+    deployment fails loudly if a service never becomes healthy instead of
+    reporting success over a container that is still crash-looping.
+  beat   The path has to be the same on both sides
+    Compose bind mounts are resolved to absolute paths and handed to the Docker
+    daemon — which interprets them *on the host*, not inside harbr. So if
+    harbr's own data directory were mounted at a different path inside its
+    container, every relative bind mount in a user's compose file would point
+    somewhere that does not exist. The bundled compose file mounts
+    /var/lib/harbr at /var/lib/harbr, and that is load-bearing rather than tidy.
+  beat   Rollback is not a rebuild
+    Every deployment records the exact image ids it ran. Rolling back re-runs
+    those images, so it cannot be defeated by a moving tag, a dependency that
+    has since published a new version, or a Dockerfile that no longer builds.
