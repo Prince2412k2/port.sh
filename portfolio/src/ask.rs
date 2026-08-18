@@ -266,15 +266,15 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     );
 }
 
-const OPENING: &str = "Ask about the work, the places, the taste, or anything \
-    else. This runs a local agent in plan mode — it can read and reason and \
-    say so, and it cannot write anything.";
+const OPENING: &str = "Ask about the work, the places, or anything else. There \
+    is an agent on this box in plan mode. It can read and think. It cannot \
+    write anything, and it has no tools.";
 
 const SUGGESTIONS: [&str; 4] = [
-    "what is the hardest thing in netjail?",
+    "what is the hardest part of netjail?",
     "why braille for the map?",
-    "what do Ikiru and The Bear have in common?",
-    "would he be any good on a systems team?",
+    "what would he be like to work with?",
+    "what should I read from all this?",
 ];
 
 /// Contour lines that drift while the agent thinks.

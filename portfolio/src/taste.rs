@@ -150,13 +150,15 @@ mod tests {
     fn the_shipped_sheet_parses_into_a_whole_essay() {
         let s = parse(include_str!("../data/taste.txt"));
         assert!(!s.open.is_empty() && !s.close.is_empty());
-        assert_eq!(s.figures.len(), 6, "figures");
-        assert_eq!(s.works.len(), 6, "works");
-        assert_eq!(s.threads.len(), 6, "threads");
+        assert!(s.figures.len() >= 4, "figures: {}", s.figures.len());
+        assert!(s.works.len() >= 4, "works: {}", s.works.len());
         for e in s.figures.iter().chain(&s.works) {
             assert!(!e.name.is_empty(), "{} has no name", e.id);
-            assert!(!e.body.is_empty(), "{} has no body", e.id);
+            assert!(!e.from.is_empty(), "{} has no source", e.id);
             assert!(!e.line.is_empty(), "{} has no line", e.id);
+            // Two lines at the gallery's measure. Longer than this and the
+            // shelf turns back into an essay.
+            assert!(e.line.len() < 170, "{} has grown into a paragraph", e.id);
         }
     }
 
@@ -176,10 +178,9 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_paragraph_comes_back_as_one_line() {
-        let s = parse(include_str!("../data/taste.txt"));
-        assert!(!s.open.contains('\n'));
-        assert!(s.open.len() > 150, "open did not join: {}", s.open.len());
-        assert!(s.figures[0].body.len() > 200);
+    fn a_wrapped_value_comes_back_as_one_line() {
+        let sheet = parse("figure x\n  name X\n  line one\n    two\n");
+        let p = &sheet.figures[0];
+        assert_eq!(p.line, "one two");
     }
 }

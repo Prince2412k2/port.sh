@@ -64,7 +64,7 @@ impl Section {
             Section::Projects => "← →  browse projects    /  help",
             Section::Skills => "drag / wheel  slide    hover  raise a tile    space  drift",
             Section::Taste => "↑ ↓  read    space  page    home / end    /  help",
-            Section::Ask => "type a question    enter  send    esc  clear    ctrl-c  quit",
+            Section::Ask => "type a question    enter  send    esc  clear    tab  leave",
         }
     }
 }
@@ -224,20 +224,31 @@ impl Shell {
                 self.step(-1);
                 return;
             }
-            // Global, and global everywhere: on a server nobody has read a
-            // README first, and the one key that always works has to work from
-            // wherever they happen to be.
-            KeyCode::Char('/') => {
-                self.show_help = true;
-                return;
-            }
             _ => {}
         }
+
+        // Text input owns the keyboard. Everywhere else, navigation is the
+        // shell's -- including the digits. They used to fall through to the
+        // section, and the sheet binds 1 and 2 to its own two tabs, so `1`
+        // meant "experience" on the landing page and "projects" one section
+        // later. A key that means different things in different places is not
+        // navigation.
         if self.section == Section::Ask {
             self.ask.on_key(k);
             return;
         }
         match k.code {
+            KeyCode::Char('/') => {
+                self.show_help = true;
+                return;
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let i = c as usize - '1' as usize;
+                if let Some(s) = Section::ALL.get(i + 1) {
+                    self.go(*s);
+                }
+                return;
+            }
             KeyCode::Char('q') => self.quit = true,
             _ => match self.section {
                 Section::Home => self.home_key(k),
@@ -313,13 +324,8 @@ impl Shell {
     }
 
     fn home_key(&mut self, k: KeyEvent) {
-        match k.code {
-            KeyCode::Char('1') | KeyCode::Enter => self.go(Section::Experience),
-            KeyCode::Char('2') => self.go(Section::Projects),
-            KeyCode::Char('3') => self.go(Section::Skills),
-            KeyCode::Char('4') => self.go(Section::Taste),
-            KeyCode::Char('5') => self.go(Section::Ask),
-            _ => {}
+        if k.code == KeyCode::Enter {
+            self.go(Section::Experience);
         }
     }
 
@@ -450,5 +456,61 @@ impl Shell {
 impl Default for Shell {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// The bug this pins: the digits used to fall through to whichever section
+    /// had the screen, and the sheet binds 1 and 2 to its own two tabs. So `1`
+    /// meant "experience" on the landing page and "projects" one section later.
+    /// Navigation that changes meaning depending on where you are standing is
+    /// not navigation.
+    #[test]
+    fn a_number_key_means_the_same_thing_from_every_section() {
+        let want = [
+            ('1', Section::Experience),
+            ('2', Section::Projects),
+            ('3', Section::Skills),
+            ('4', Section::Taste),
+        ];
+        // Ask is left out as a starting point on purpose: it spawns an agent,
+        // and it is the one place digits are text. That case is below.
+        for from in [Section::Home, Section::Experience, Section::Projects, Section::Skills, Section::Taste] {
+            for (key, to) in want {
+                let mut s = Shell::new();
+                s.go(from);
+                assert_eq!(s.section, from, "could not get to {:?}", from.label());
+                s.on_key(press(key));
+                assert_eq!(s.section, to, "from {:?}, `{key}` went wrong", from.label());
+            }
+        }
+    }
+
+    /// And the exception: where there is a text field, the keyboard is text.
+    #[test]
+    fn digits_are_text_in_the_chat() {
+        let mut s = Shell::new();
+        s.section = Section::Ask;
+        s.on_key(press('2'));
+        s.on_key(press('q'));
+        assert_eq!(s.section, Section::Ask, "typing navigated away");
+        assert_eq!(s.ask.input, "2q");
+    }
+
+    #[test]
+    fn tab_wraps_in_both_directions() {
+        let mut s = Shell::new();
+        s.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(s.section, *Section::ALL.last().unwrap());
+        s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Home);
     }
 }

@@ -68,11 +68,11 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
     // The way in. On a server nobody has the keys memorised, and a portfolio
     // that has to be guessed at is one nobody sees past the first screen.
     for (key, label, blurb) in [
-        ("1", "experience", "five places, flown between"),
-        ("2", "projects", "nine of them, and how they work"),
-        ("3", "skills", "the tools, and where they came from"),
-        ("4", "taste", "what I think is worth building for"),
-        ("5", "ask", "put a question to the resident agent"),
+        ("1", "experience", "five places on a map you can drive"),
+        ("2", "projects", "ten of them, and how they work"),
+        ("3", "skills", "the tools"),
+        ("4", "taste", "films, shows, people"),
+        ("5", "ask", "put a question to the agent on this box"),
     ] {
         put(f, y, vec![
             Span::styled(format!("{key}  "), Style::default().fg(ACCENT)),

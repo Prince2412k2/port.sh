@@ -16,30 +16,92 @@ use crate::emblems::{self, Emblem};
 use crate::paint::{wrap, ACCENT, DIM, FAINT, FG};
 use crate::taste::{Entry, Sheet};
 
-/// The text measure. Prose set across a whole wide terminal is a line the eye
-/// cannot find its way back from.
-const TEXT: u16 = 60;
+/// Room for the titling beside a plate.
+const TEXT: u16 = 40;
+/// Space between the two columns of the gallery.
+const COLGAP: u16 = 6;
 const GAP: u16 = 4;
 
 /// The plate column is as wide as the widest drawing, measured rather than
 /// guessed. Guessed, it was 22 against art that runs to 34, and every emblem
 /// printed straight through the paragraph beside it.
 fn plate_w() -> u16 {
-    emblems::EMBLEMS.iter().map(|e| e.art.cols).max().unwrap_or(0)
+    emblems::EMBLEMS.iter().map(|e| (e.art.cols + 1) / 2).max().unwrap_or(0)
+}
+
+/// One cell of the gallery: a half-size drawing and its three lines.
+fn cell_w() -> u16 {
+    plate_w() + GAP + TEXT
 }
 
 pub fn width() -> u16 {
-    plate_w() + GAP + TEXT
+    cell_w() * 2 + COLGAP
+}
+
+/// A half-size copy of a drawing.
+///
+/// The emblems are authored at one pixel per half-block, which is the right
+/// size to look at on its own and twice the size this gallery wants. Rather
+/// than redraw twelve of them, unpack each back into pixels, average 2x2, and
+/// re-pair into half-blocks. Averaging in coverage rather than in colour is
+/// what keeps the tint exact.
+fn halved(m: &Emblem) -> (u16, u16, Vec<(char, u8, u8)>) {
+    let (w, rows) = (m.art.cols as usize, m.art.rows as usize);
+    let h = rows * 2;
+    let mut px = vec![0f32; w * h];
+    for r in 0..rows {
+        for c in 0..w {
+            let (ch, fa, ba) = m.art.cells[r * w + c];
+            if ch == ' ' {
+                continue;
+            }
+            px[(r * 2) * w + c] = fa as f32;
+            px[(r * 2 + 1) * w + c] = ba as f32;
+        }
+    }
+
+    let (hw, hh) = (w.div_ceil(2), h.div_ceil(2));
+    let mut small = vec![0f32; hw * hh];
+    for y in 0..hh {
+        for x in 0..hw {
+            let mut sum = 0.0;
+            let mut n = 0.0;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let (sy, sx) = (y * 2 + dy, x * 2 + dx);
+                    if sy < h && sx < w {
+                        sum += px[sy * w + sx];
+                        n += 1.0;
+                    }
+                }
+            }
+            small[y * hw + x] = if n > 0.0 { sum / n } else { 0.0 };
+        }
+    }
+
+    let out_rows = hh.div_ceil(2);
+    let mut cells = Vec::with_capacity(hw * out_rows);
+    for r in 0..out_rows {
+        for c in 0..hw {
+            let t = small[(r * 2) * hw + c];
+            let b = if r * 2 + 1 < hh { small[(r * 2 + 1) * hw + c] } else { 0.0 };
+            cells.push(if t < 1.0 && b < 1.0 {
+                (' ', 0, 0)
+            } else {
+                ('\u{2580}', t.round() as u8, b.round() as u8)
+            });
+        }
+    }
+    (hw as u16, out_rows as u16, cells)
 }
 
 enum Block {
     Title(String, String),
     /// A section heading with a rule running off to the right.
     Rule(&'static str),
-    /// An emblem, its titling, and its paragraph. `right` puts the plate on the
-    /// far side, which is what stops six of these reading as a list.
-    Plate { e: Entry, right: bool },
-    Thread(Entry),
+    /// Two entries side by side. The gallery is a shelf, not a list, and one
+    /// per row turned twelve short captions into a very long scroll.
+    Row(Vec<(Entry, (u16, u16, Vec<(char, u8, u8)>))>),
     Para(String),
     Space(u16),
 }
@@ -53,38 +115,38 @@ impl Page {
     pub fn build(s: &Sheet) -> Page {
         let mut blocks = Vec::new();
         let mut y = 0u16;
-        let mut push = |y: &mut u16, b: Block| {
+        // A free function rather than a closure: the shelf below needs the
+        // same two lines and two closures cannot both hold `blocks`.
+        fn push(blocks: &mut Vec<(u16, Block)>, y: &mut u16, b: Block) {
             let h = height_of(&b);
             blocks.push((*y, b));
             *y += h;
+        }
+
+        push(&mut blocks, &mut y, Block::Title("TASTE".into(), s.open.clone()));
+        push(&mut blocks, &mut y, Block::Space(2));
+
+        let shelf = |blocks: &mut Vec<(u16, Block)>, y: &mut u16, title, list: &[Entry]| {
+            push(blocks, y, Block::Rule(title));
+            for pair in list.chunks(2) {
+                let row: Vec<_> = pair
+                    .iter()
+                    .map(|e| {
+                        let art = emblems::find(&e.emblem).map(halved).unwrap_or((0, 0, vec![]));
+                        (e.clone(), art)
+                    })
+                    .collect();
+                push(blocks, y, Block::Row(row));
+                *y += 2;
+            }
         };
+        shelf(&mut blocks, &mut y, "PEOPLE", &s.figures);
+        y += 1;
+        shelf(&mut blocks, &mut y, "WATCHING", &s.works);
 
-        push(&mut y, Block::Title("TASTE".into(), "what the rest of this is for".into()));
-        push(&mut y, Block::Space(1));
-        push(&mut y, Block::Para(s.open.clone()));
-        push(&mut y, Block::Space(2));
-
-        push(&mut y, Block::Rule("THE PEOPLE"));
-        for (i, e) in s.figures.iter().enumerate() {
-            push(&mut y, Block::Plate { e: e.clone(), right: i % 2 == 1 });
-            push(&mut y, Block::Space(2));
-        }
-
-        push(&mut y, Block::Rule("THE WORK"));
-        for (i, e) in s.works.iter().enumerate() {
-            push(&mut y, Block::Plate { e: e.clone(), right: i % 2 == 0 });
-            push(&mut y, Block::Space(2));
-        }
-
-        push(&mut y, Block::Rule("WHAT IT ADDS UP TO"));
-        for e in &s.threads {
-            push(&mut y, Block::Thread(e.clone()));
-            push(&mut y, Block::Space(1));
-        }
-
-        push(&mut y, Block::Space(2));
-        push(&mut y, Block::Para(s.close.clone()));
-        push(&mut y, Block::Space(2));
+        push(&mut blocks, &mut y, Block::Space(2));
+        push(&mut blocks, &mut y, Block::Para(s.close.clone()));
+        push(&mut blocks, &mut y, Block::Space(2));
 
         Page { blocks, height: y }
     }
@@ -113,13 +175,7 @@ fn height_of(b: &Block) -> u16 {
         Block::Rule(_) => 3,
         Block::Space(n) => *n,
         Block::Para(t) => wrap(t, TEXT as usize).len() as u16,
-        Block::Thread(e) => 1 + wrap(&e.body, TEXT as usize).len() as u16,
-        Block::Plate { e, .. } => {
-            let art = emblems::find(&e.emblem).map_or(0, |m| m.art.rows);
-            // Titling is three lines, then the paragraph.
-            let text = 3 + wrap(&e.body, TEXT as usize).len() as u16;
-            art.max(text)
-        }
+        Block::Row(cells) => cells.iter().map(|(_, a)| a.1.max(3)).max().unwrap_or(3),
     }
 }
 
@@ -165,50 +221,37 @@ fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block) {
                 )]);
             }
         }
-        Block::Thread(e) => {
-            put(f, area, x, w, dy, vec![Span::styled(
-                e.name.to_uppercase(),
-                Style::default().fg(FG).add_modifier(Modifier::BOLD),
-            )]);
-            for (i, l) in wrap(&e.body, TEXT as usize).into_iter().enumerate() {
-                put(f, area, x, w, dy + 1 + i as i32, vec![Span::styled(
-                    l,
-                    Style::default().fg(DIM),
-                )]);
-            }
-        }
-        Block::Plate { e, right } => {
+        Block::Row(cells) => {
             let pw = plate_w();
-            let (px, tx) = if *right {
-                (x + w.saturating_sub(pw), x)
-            } else {
-                (x, x + pw + GAP)
-            };
-            let tw = w.saturating_sub(pw + GAP);
-
-            if let Some(m) = emblems::find(&e.emblem) {
+            let cw = cell_w();
+            for (i, (e, art)) in cells.iter().enumerate() {
+                let cx = x + i as u16 * (cw + COLGAP);
+                if cx + 8 > x + w {
+                    continue;
+                }
                 // Centred in its column: the drawings are cropped to their ink
                 // and so are all different widths, and left-aligning them makes
-                // the page's edge look ragged for no reason.
-                plate(f, area, px + (pw.saturating_sub(m.art.cols)) / 2, dy, m);
-            }
-            put(f, area, tx, tw, dy, vec![Span::styled(
-                e.name.to_uppercase(),
-                Style::default().fg(FG).add_modifier(Modifier::BOLD),
-            )]);
-            put(f, area, tx, tw, dy + 1, vec![Span::styled(
-                e.from.clone(),
-                Style::default().fg(FAINT),
-            )]);
-            put(f, area, tx, tw, dy + 2, vec![Span::styled(
-                e.line.clone(),
-                Style::default().fg(ACCENT).add_modifier(Modifier::ITALIC),
-            )]);
-            for (i, l) in wrap(&e.body, tw as usize).into_iter().enumerate() {
-                put(f, area, tx, tw, dy + 4 + i as i32, vec![Span::styled(
-                    l,
-                    Style::default().fg(DIM),
+                // the shelf's edge look ragged for no reason.
+                plate(f, area, cx + pw.saturating_sub(art.0) / 2, dy, art, e);
+                let tx = cx + pw + GAP;
+                let tw = cw.saturating_sub(pw + GAP);
+                // Set against the middle of the drawing, so a short caption
+                // does not float at the top of a tall plate.
+                let top = dy + (art.1 as i32 - 3) / 2;
+                put(f, area, tx, tw, top, vec![Span::styled(
+                    e.name.to_uppercase(),
+                    Style::default().fg(FG).add_modifier(Modifier::BOLD),
                 )]);
+                put(f, area, tx, tw, top + 1, vec![Span::styled(
+                    e.from.clone(),
+                    Style::default().fg(FAINT),
+                )]);
+                for (j, l) in wrap(&e.line, tw as usize).into_iter().enumerate() {
+                    put(f, area, tx, tw, top + 2 + j as i32, vec![Span::styled(
+                        l,
+                        Style::default().fg(DIM),
+                    )]);
+                }
             }
         }
     }
@@ -218,10 +261,18 @@ fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block) {
 ///
 /// The art stores alphas rather than colours so a plate can be dimmed or lit
 /// without regenerating it; the tint is applied here against the page ground.
-fn plate(f: &mut Frame, area: Rect, x: u16, dy: i32, m: &Emblem) {
+fn plate(
+    f: &mut Frame,
+    area: Rect,
+    x: u16,
+    dy: i32,
+    art: &(u16, u16, Vec<(char, u8, u8)>),
+    e: &Entry,
+) {
     use crate::paint::BG;
     use ratatui::style::Color;
 
+    let Some(m) = emblems::find(&e.emblem) else { return };
     let Color::Rgb(br, bg, bb) = BG else { return };
     let mix = |a: u8| {
         let a = a as f32 / 255.0;
@@ -232,14 +283,15 @@ fn plate(f: &mut Frame, area: Rect, x: u16, dy: i32, m: &Emblem) {
         )
     };
 
-    for r in 0..m.art.rows {
+    let (cols, rows, cells) = art;
+    for r in 0..*rows {
         let y = dy + r as i32;
         if y < 0 || y >= area.height as i32 {
             continue;
         }
         let buf = f.buffer_mut();
-        for c in 0..m.art.cols {
-            let (ch, fa, ba) = m.art.cells[(r * m.art.cols + c) as usize];
+        for c in 0..*cols {
+            let (ch, fa, ba) = cells[(r * cols + c) as usize];
             if fa == 0 && ba == 0 {
                 continue;
             }

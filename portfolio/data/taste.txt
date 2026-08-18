@@ -1,196 +1,86 @@
 # taste
 #
-# The other half of a portfolio. The rest of this app argues that I can build
-# things; this argues about what I think is worth building things for.
-#
-# Same grammar as everywhere else: two spaces starts a key, four or more
-# continues the previous value.
+# The through-line is freedom and kindness: people who are free of other
+# people, or of themselves, and are kind with it. Say what each thing is and
+# where the freedom is in it. No verdicts, no reviews.
 #
 #   emblem  which drawing from scripts/emblems.py stands for this entry.
-#           Original artwork, not a still — partly because a 40x20 dither of a
-#           copyrighted frame is a bad idea, and partly because an object a
-#           character carries says more about them than their face does.
+#           Drawn here rather than fetched: a low-resolution crop of somebody
+#           else's frame is a poor thing to put on a public server, and what a
+#           character carries reads better at this size than their face.
 
-open  There is a version of a portfolio that is only a list of things I can do.
-      This is the other half. These are the characters, films and shows I keep
-      returning to, and what I think they have in common — which turned out to
-      be a more honest description of me than any list of languages.
-
-# ── the people ────────────────────────────────────────────────────────────
+open  Almost everything here is about someone getting free of other people or
+      of themselves, and being kind about it.
 
 figure snufkin
   name    Snufkin
-  from    Moominvalley · Tove Jansson
+  from    Moominvalley
   emblem  hat
-  line    freedom that is not a refusal of people
-  body    He wanders, plays the harmonica, and leaves every spring without
-          apologising for it. What makes him more than an aesthetic is that he
-          cares about Moomintroll enormously and still goes — he has worked out
-          that loving someone and needing to be near them are different things.
-          Very few characters are allowed to be that independent and that warm
-          at the same time.
+  line    Free of everybody and still fond of them. He goes south every autumn
+          and nobody has to be hurt by it, which is the harder half.
 
-figure little-prince
-  name    The Little Prince
-  from    Antoine de Saint-Exupéry
-  emblem  planet
-  line    the rose is ordinary; it is yours that matters
-  body    A book about how attention creates value. Five thousand roses in a
-          garden and none of them are his, because he did not water any of
-          them. It is the clearest thing I have read about why the time you
-          put into something is not the price of the thing but the whole
-          substance of it.
+figure bourdain
+  name    Anthony Bourdain
+  from    Parts Unknown
+  emblem  bowl
+  line    Snufkin with a camera crew. Goes anywhere, owes nobody an itinerary,
+          and the reason for arriving is to sit down and let someone talk.
 
 figure iroh
   name    Uncle Iroh
   from    Avatar: The Last Airbender
   emblem  teacup
-  line    wisdom that has already paid for itself
-  body    He is patient because he has lost a son, not because patience comes
-          easily to him. That is the distinction that makes him work. His
-          calm is not temperament, it is a position he arrived at, and the tea
-          is not a quirk — it is the practice of noticing small good things on
-          purpose.
+  line    Spends the whole show getting Zuko free of an expectation that had
+          curdled into pride. Patient about it because he has already lost more.
 
 figure ted
   name    Ted Lasso
   from    Ted Lasso
   emblem  sign
-  line    kindness as a discipline, not a temperament
-  body    The show's trick is that Ted is not fine. He has panic attacks, a
-          marriage ending, and no idea what offside is. The kindness costs him
-          something every time, which is the only reason it is interesting.
-          Radical decency practised by someone who is doing badly is a much
-          harder argument to dismiss.
+  line    Free of judgement, which is a different thing from being nice. He
+          decides people are worth it before they have shown him anything.
 
 figure miles
   name    Miles Morales
-  from    Into the Spider-Verse
+  from    Spider-Verse
   emblem  web
-  line    you take the leap before you are ready
-  body    Every other version of the story is about being chosen. This one is
-          about deciding, which is harder and truer. The whole film is built
-          around the moment you stop waiting to feel qualified — and it is
-          honest that the leap comes before the confidence, not after it.
+  line    In the first film he jumps before he is ready. In the second he is
+          told the story is fixed and that people have to be lost, and refuses.
 
-figure bourdain
-  name    Anthony Bourdain
-  from    Parts Unknown · Kitchen Confidential
-  emblem  bowl
-  line    eat with people and let them talk
-  body    He is the bridge between an interest in places and an interest in
-          people. Not travel as a list of ten attractions — travel as sitting
-          down with someone, eating what they eat, and letting the conversation
-          go wherever it goes: history, politics, loneliness, whether they are
-          happy. Food was only ever the excuse.
-
-# ── the work ──────────────────────────────────────────────────────────────
+figure little-prince
+  name    The Little Prince
+  from    Saint-Exupéry
+  emblem  planet
+  line    Free of the way grown-ups price things. The rose matters because he
+          watered it, not because there is anything rare about a rose.
 
 work ikiru
   name    Ikiru
-  from    Kurosawa · 1952
+  from    Kurosawa, 1952
   emblem  swing
-  line    what makes a life, as opposed to a career
-  body    A bureaucrat finds out he is dying and spends what is left getting a
-          playground built. The famous shot is him on the swing in the snow,
-          and the reason it lands is that the film has already shown you thirty
-          years of him not doing anything. It asks the question directly:
-          what did you actually make.
-
-work silent-voice
-  name    A Silent Voice
-  from    Naoko Yamada · 2016
-  emblem  notebook
-  line    whether someone who did harm can become good
-  body    It refuses the easy version where the bully was secretly kind. He was
-          not. The film is about guilt that does not resolve, isolation that is
-          partly deserved, and the enormous difficulty of being forgiven — and
-          then of accepting it, which turns out to be the harder half.
-
-work spiderverse
-  name    Into the Spider-Verse
-  from    2018
-  emblem  glitch
-  line    identity, expectation, and taking the leap
-  body    On the surface a superhero film. Underneath, a film about being the
-          wrong version of the thing you are supposed to be, and finding out
-          that is the point. Also the most formally inventive animation in
-          twenty years, which is not nothing.
-
-work the-bear
-  name    The Bear
-  from    2022 —
-  emblem  knife
-  line    craft as both the wound and the cure
-  body    Obsession with getting something right, in a kitchen full of grief
-          and people who cannot talk to each other. It is the most accurate
-          thing on television about caring enormously about work and being bad
-          at the human parts, and it does not pretend those are unrelated.
-
-work haikyuu
-  name    Haikyuu!!
-  from    Haruichi Furudate
-  emblem  ball
-  line    the joy is in getting better, not in winning
-  body    A sports story where the rival is never the villain — the best moments
-          are two people making each other better across a net. Losing is
-          allowed to be sad and also not the end of anything. Improvement is
-          treated as its own reward, which is rarer than it sounds.
+  line    A clerk finds out he is dying and it frees him. Thirty years of
+          shuffling paper, then he gets a playground built and sits in it.
 
 work one-piece
   name    One Piece
-  from    Eiichiro Oda
+  from    Oda
   emblem  strawhat
-  line    absurd, enormous, and completely sincere
-  body    A thousand episodes about refusing to let the world make you smaller.
-          Chosen family, ridiculous jokes, and a dream stated so plainly that
-          irony cannot get a grip on it. It is the least embarrassed piece of
-          art I love.
+  line    The most direct version. A boy wants to be free, the world is
+          arranged to stop him, and a thousand episodes later nobody has quit.
 
-# ── what it adds up to ────────────────────────────────────────────────────
+work the-bear
+  name    The Bear
+  from    2022
+  emblem  knife
+  line    A kitchen full of grief trying to get one plate right. Everyone in it
+          is working their way out from under something.
 
-thread freedom
-  name  Freedom
-  body  Snufkin leaving in spring, Luffy sailing wherever he likes, Miles
-        deciding what the mask means, Bourdain going somewhere without
-        sanitising it. Not freedom *from* people — freedom that still has
-        people in it.
+work silent-voice
+  name    A Silent Voice
+  from    Yamada, 2016
+  emblem  notebook
+  line    Whether you get to be free of something you did. He is not let off,
+          and still has to find a way to live in the same town.
 
-thread connection
-  name  Connection
-  body  In all of these, the relationships are not the subplot. They are the
-        plot. A Silent Voice, Ted Lasso, One Piece, The Bear, the Little
-        Prince and his rose — take the relationships out and there is nothing
-        left standing.
-
-thread kindness
-  name  Kindness with weight
-  body  Not nice characters. Iroh has buried a son, Ted is coming apart, Miles
-        pays for every right decision. Their kindness counts precisely because
-        it is chosen against something, which is the difference between a
-        virtue and a personality trait.
-
-thread purpose
-  name  Purpose
-  body  Ikiru asks it outright and the rest keep circling it: not what makes
-        someone successful, but what makes a life worth having had. Usually
-        the answer is something small, built for other people, finished.
-
-thread craft
-  name  Craft
-  body  The Bear and Haikyuu are both about becoming excellent, and neither
-        thinks excellence is about status. The process is what changes the
-        person. That is also, more or less, why this whole thing is written in
-        Rust instead of being a web page.
-
-thread earnestness
-  name  Earnestness
-  body  The common thread, and maybe the whole list. Every one of these is
-        willing to be sincere without hiding behind irony first. They are
-        funny, absurd and often sad, and they still say plainly that
-        friendship and dreams and food and small human moments matter.
-
-close Snufkin's freedom, the Prince's attention, Iroh's patience, Ted's
-      decency, Miles's nerve, Bourdain's curiosity. That is a better
-      description of what I am aiming at than "likes Linux and maps" — though
-      I do like Linux and maps.
+close People and things that remind me of kindness and freedom. That is the
+      whole list.

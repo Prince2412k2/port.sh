@@ -133,6 +133,22 @@ def render(f):
 
 EMBLEMS = {}
 
+# Snufkin, as a bust, for the landing page. The silhouette is the whole
+# likeness: soft pointed hat, pipe, coat. No face, because at this size a face
+# is four pixels of guesswork and the outline already says who it is.
+EMBLEMS["snufkin"] = ((150, 178, 132), render(union(
+    ellipse(17, 6.6, 5.0, 4.6),
+    tri(13.8, 7.5, 17.6, 1.6, 20.4, 7.5),
+    ellipse(17, 10.6, 13.5, 1.9),
+    disc(17, 14.6, 4.3),
+    rect(15, 17.5, 19, 19.5),
+    # Shoulders: the bottom half of a wide ellipse, so the coat falls away
+    # rather than sitting on a shelf.
+    sub(ellipse(17, 31, 13.5, 12), rect(0, 0, 34, 19)),
+    seg(20.6, 15.4, 25.8, 13.4, 0.9),
+    disc(26.9, 12.6, 1.7),
+)))
+
 # Snufkin: the hat, and the line he walks off along.
 EMBLEMS["hat"] = ((150, 178, 132), render(union(
     # The crown is a cone with the point rounded off. A true apex lands on one
