@@ -71,6 +71,8 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
         ("1", "experience", "five places, flown between"),
         ("2", "projects", "nine of them, and how they work"),
         ("3", "skills", "the tools, and where they came from"),
+        ("4", "taste", "what I think is worth building for"),
+        ("5", "ask", "put a question to the resident agent"),
     ] {
         put(f, y, vec![
             Span::styled(format!("{key}  "), Style::default().fg(ACCENT)),
@@ -88,7 +90,15 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
         }
         links.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
     }
-    put(f, y, links);
+    // The contact row is the one line that must not wrap or clip, and three
+    // links do not fit the prose measure. It gets the rest of the frame.
+    if y < area.y + area.height {
+        let lw = (area.x + area.width).saturating_sub(x).saturating_sub(1);
+        f.render_widget(
+            Paragraph::new(Line::from(links)),
+            Rect { x, y, width: lw, height: 1 },
+        );
+    }
 }
 
 /// Every key in the app, in one place, because three embedded renderers means

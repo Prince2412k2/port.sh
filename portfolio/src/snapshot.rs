@@ -17,6 +17,8 @@ pub struct Opts {
     /// Seconds of animation to run before drawing, stepped at a fixed 1/60 so
     /// the same command always produces the same pixels.
     pub at: Option<f64>,
+    /// Rows into a scrolling section.
+    pub scroll: Option<u16>,
 }
 
 pub fn render(o: &Opts) -> std::io::Result<()> {
@@ -49,6 +51,9 @@ pub fn render(o: &Opts) -> std::io::Result<()> {
         }
     }
 
+    if let Some(n) = o.scroll {
+        shell.set_scroll(n);
+    }
     // Two passes: hover and the pick buffer it reads from are one frame apart.
     term.draw(|f| shell.render(f)).unwrap();
     term.draw(|f| shell.render(f)).unwrap();

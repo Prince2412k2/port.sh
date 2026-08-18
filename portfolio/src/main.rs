@@ -1,9 +1,16 @@
 //! An interactive portfolio, served over SSH.
 
+mod acp;
 mod about;
+mod ask;
+mod context;
+mod emblems;
 mod home;
+mod json;
+mod page;
 mod paint;
 mod shell;
+mod taste;
 mod snapshot;
 
 use std::io::{self, Write};
@@ -45,6 +52,7 @@ fn main() -> io::Result<()> {
                     plain: false,
                     section: None,
                     at: None,
+                    scroll: None,
                 });
             }
             "--plain" => {
@@ -56,6 +64,16 @@ fn main() -> io::Result<()> {
                 let v = args.next().and_then(|v| v.parse().ok());
                 if let Some(s) = shot.as_mut() {
                     s.at = v;
+                }
+            }
+            "--emblems" => {
+                print!("{}", emblems::sheet());
+                return Ok(());
+            }
+            "--scroll" => {
+                let v = args.next().and_then(|v| v.parse().ok());
+                if let Some(s) = shot.as_mut() {
+                    s.scroll = v;
                 }
             }
             "--section" => start = args.next(),
