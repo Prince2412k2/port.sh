@@ -1,22 +1,3 @@
-mod app;
-mod canvas;
-mod data;
-mod geo;
-mod home;
-mod place;
-mod labels;
-mod mvt;
-mod pmtiles;
-mod raster;
-mod relief;
-mod scene;
-mod snapshot;
-mod style;
-mod terrain;
-mod tiles;
-mod tour;
-mod ui;
-mod view;
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -29,8 +10,9 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::App;
-use crate::tiles::Source;
+use termap::app::App;
+use termap::tiles::Source;
+use termap::{canvas, snapshot, style, ui};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 

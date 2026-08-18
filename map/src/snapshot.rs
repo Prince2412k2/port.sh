@@ -124,7 +124,9 @@ fn run_to_rest(app: &mut App) {
     }
 }
 
-fn plain(buf: &Buffer) -> String {
+/// Public so the portfolio can print its own frames without a third copy of an
+/// ANSI writer existing.
+pub fn plain(buf: &Buffer) -> String {
     let mut s = String::new();
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
@@ -135,7 +137,7 @@ fn plain(buf: &Buffer) -> String {
     s
 }
 
-fn ansi(buf: &Buffer) -> String {
+pub fn ansi(buf: &Buffer) -> String {
     let mut s = String::new();
     let mut last: Option<(Color, Color, Modifier)> = None;
 

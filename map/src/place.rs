@@ -31,7 +31,8 @@ pub struct Place {
 /// into the binary. The disk path wins so the sheet can be edited and reloaded
 /// without a rebuild; the embedded copy means a bare binary still has a tour.
 pub fn load() -> Vec<Place> {
-    let disk = std::fs::read_to_string("data/places.txt").ok();
+    let disk = crate::paths::data_file("places.txt")
+        .and_then(|p| std::fs::read_to_string(p).ok());
     let src = disk.as_deref().unwrap_or(include_str!("../data/places.txt"));
     match parse(src) {
         Ok(v) => v,

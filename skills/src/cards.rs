@@ -404,12 +404,12 @@ mod tests {
         // Whatever is showing, the frame is the same frame — otherwise the tool
         // strip and the caption below it move every time you page.
         let ps = crate::data::parse(include_str!("../data/projects.txt")).unwrap();
-        let heights: Vec<u16> = ps
-            .iter()
-            .map(|p| {
-                mark_h(&View { projects: &ps, at: 0, scroll: 0, t: 0.0 })
-                    + marks::find(&p.mark).unwrap().art.rows * 0
-            })
+        // Ask for each project in turn. The previous version of this asked for
+        // project 0 every time and added a term multiplied by zero, so it
+        // compared a value with itself and would have passed whatever the
+        // layout did.
+        let heights: Vec<u16> = (0..ps.len())
+            .map(|at| mark_h(&View { projects: &ps, at, scroll: 0, t: 0.0 }))
             .collect();
         assert!(heights.windows(2).all(|w| w[0] == w[1]), "{heights:?}");
     }

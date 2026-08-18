@@ -26,11 +26,20 @@ pub fn render(f: &mut Frame, app: &mut App) {
     .areas(area);
 
     tabs(f, head, app);
-    match app.tab {
-        Tab::Skills => skills(f, body, app),
-        Tab::Projects => projects(f, body, app),
-    }
+    render_body(f, body, app);
     status(f, foot, app);
+}
+
+/// Draw the current tab's body and nothing else — no tab bar, no status line.
+///
+/// The portfolio has its own rail across the top and its own footer, and two
+/// competing sets of chrome is the thing that makes a combined app read as
+/// three apps in a trench coat.
+pub fn render_body(f: &mut Frame, area: Rect, app: &mut App) {
+    match app.tab {
+        Tab::Skills => skills(f, area, app),
+        Tab::Projects => projects(f, area, app),
+    }
 }
 
 fn tabs(f: &mut Frame, area: Rect, app: &App) {

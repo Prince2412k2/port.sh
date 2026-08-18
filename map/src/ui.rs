@@ -23,7 +23,29 @@ const PANEL_W: u16 = 26;
 const PANEL_MIN_TOTAL_W: u16 = 96;
 
 pub fn render(f: &mut Frame, app: &mut App) {
-    let area = f.area();
+    render_in(f, f.area(), app)
+}
+
+/// Draw only the map — no header, no status line, no side panel.
+///
+/// For an embedder that has its own chrome. The alternative, letting this
+/// crate draw its header inside someone else's layout, produces two title bars
+/// and two footers, which is precisely how a combined app announces that it is
+/// three apps in a trench coat.
+pub fn render_map_only(f: &mut Frame, area: Rect, app: &mut App) {
+    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    map_view(f, area, app);
+    if app.show_help {
+        help(f, area);
+    }
+}
+
+/// Draw the whole map UI into `area` rather than the whole frame.
+///
+/// The portfolio embeds this below its own section rail. Header and status stay
+/// with it: they are the map's instruments — zoom, mode, what is under the
+/// pointer — and belong to the view, not to the shell around it.
+pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
     Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
 
     let [head, body, foot] = Layout::vertical([

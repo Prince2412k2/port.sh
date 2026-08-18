@@ -44,19 +44,19 @@ impl Source {
             terrain: None,
             overlays: Vec::new(),
         };
-        for c in ["data/india.tmhg", "data/terrain.tmhg"] {
-            if Path::new(c).exists() {
-                match crate::terrain::Terrain::open(Path::new(c)) {
+        for c in ["india.tmhg", "terrain.tmhg"].iter().filter_map(|n| crate::paths::data_file(n)) {
+            {
+                match crate::terrain::Terrain::open(Path::new(&c)) {
                     Ok(t) => {
                         src.terrain = Some(t);
                         break;
                     }
-                    Err(e) => eprintln!("termap: {c}: {e}"),
+                    Err(e) => eprintln!("termap: {}: {e}", c.display()),
                 }
             }
         }
-        for c in ["data/states.tmap", "data/buildings.tmap"] {
-            if let Ok(text) = std::fs::read_to_string(c) {
+        for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
+            if let Ok(text) = std::fs::read_to_string(&c) {
                 let feats = crate::data::parse_features(&text);
                 if !feats.is_empty() {
                     src.overlays.push(Rc::new(Tile::new(feats)));
@@ -114,17 +114,15 @@ impl Backend {
         // With no explicit path, look for a basemap before falling back to a
         // .tmap. TERMAP_BASEMAP lets the archive live outside the project.
         if path.is_none() {
-            let env = std::env::var("TERMAP_BASEMAP").ok();
-            let candidates = env
+            let env: Option<std::path::PathBuf> =
+                std::env::var_os("TERMAP_BASEMAP").map(Into::into);
+            let found = ["india.pmtiles", "basemap.pmtiles"]
                 .iter()
-                .map(String::as_str)
-                .chain(["data/india.pmtiles", "data/basemap.pmtiles"]);
-            for c in candidates {
-                if Path::new(c).exists() {
-                    match Tiled::open(Path::new(c)) {
-                        Ok(t) => return Backend::Tiled(t),
-                        Err(e) => eprintln!("termap: {c}: {e}"),
-                    }
+                .filter_map(|n| crate::paths::data_file(n));
+            for c in env.into_iter().filter(|p| p.exists()).chain(found) {
+                match Tiled::open(&c) {
+                    Ok(t) => return Backend::Tiled(t),
+                    Err(e) => eprintln!("termap: {}: {e}", c.display()),
                 }
             }
         }

@@ -1,0 +1,15 @@
+# One workspace, three crates, one binary that matters.
+#
+# `map` and `skills` were built as standalone apps and still run as their own
+# binaries — that is how each was developed and how each is debugged. They are
+# libraries here as well so `portfolio` can drive both renderers without a
+# second copy of eight thousand lines of them existing.
+
+[workspace]
+resolver = "2"
+members = ["map", "skills", "portfolio"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

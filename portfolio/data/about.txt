@@ -1,0 +1,32 @@
+# about
+#
+# The landing section. Same grammar as everywhere else in this project: two
+# spaces starts a key, four or more continues the previous value.
+#
+# DRAFT. The facts here are the ones the repositories and git config could
+# actually support — name, handle, city, employer. The pitch and the contact
+# lines are a starting point in your voice, not a claim I can source, and they
+# are the first thing anyone reads. Edit them.
+
+  name      Prince Patel
+  role      SDE 1
+  where     Gateway Corp · Ahmedabad, India
+  handle    Prince2412k2
+
+  pitch     I build systems software and the tools that make it usable —
+            network isolation that holds under a threat model, clock sync
+            that stays frame-accurate across devices, map pipelines, and a
+            lot of terminal interfaces. Mostly Go, Rust and Python, mostly
+            close to the kernel or close to the pixels.
+
+  now       Multi-armed bandits for notification timing, at work. Vector
+            tiles and stylised cartography, not at work.
+
+# Contact. Left deliberately incomplete — put the address you actually want
+# on a public server here. Two were visible from this machine and I am not
+# going to guess which is yours to publish:
+#   prince.patel@thegatewaycorp.co.in   (git config)
+#   jaydip.meghapara@thegatewaydigital.com
+  email     you@example.com
+  github    github.com/Prince2412k2
+  ssh       ssh <this-host>

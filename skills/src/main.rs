@@ -1,14 +1,3 @@
-mod app;
-mod canvas;
-mod cards;
-mod data;
-mod grid;
-mod logos;
-mod marks;
-mod scene;
-mod snapshot;
-mod tile;
-mod ui;
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -21,7 +10,8 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::App;
+use skysheet::app::App;
+use skysheet::{logos, marks, snapshot, ui};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 

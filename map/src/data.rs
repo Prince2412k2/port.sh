@@ -4,9 +4,11 @@
 //! the renderer has no JSON or vector-tile dependency; swapping in a real
 //! pmtiles/MVT source later means replacing `MapData::load` and nothing else.
 //!
-//!     # termap 1
-//!     F <layer> <rank> <closed> <npts> <name>
-//!     <lon> <lat> <lon> <lat> ...
+//! ```text
+//! # termap 1
+//! F <layer> <rank> <closed> <npts> <name>
+//! <lon> <lat> <lon> <lat> ...
+//! ```
 
 use crate::geo::lonlat_to_world;
 
