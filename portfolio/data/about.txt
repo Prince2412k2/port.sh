@@ -22,11 +22,8 @@
   now       Multi-armed bandits for notification timing, at work. Vector
             tiles and stylised cartography, not at work.
 
-# Contact. Left deliberately incomplete — put the address you actually want
-# on a public server here. Two were visible from this machine and I am not
-# going to guess which is yours to publish:
-#   prince.patel@thegatewaycorp.co.in   (git config)
-#   jaydip.meghapara@thegatewaydigital.com
-  email     you@example.com
+# Contact. This is a public server, so the address here is the personal one
+# rather than either of the work addresses this machine is signed in to.
+  email     prince240102@gmail.com
   github    github.com/Prince2412k2
   ssh       ssh <this-host>
