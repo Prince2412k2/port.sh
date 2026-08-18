@@ -41,10 +41,9 @@ place knowledge-high
   zoom     13.8
   tilt     46
   bearing  -14
-  note     A small town two hours out of Ahmedabad, and the first place I
-           started pulling things apart to find out how they worked. Computers,
-           machines, anything with a cover that came off. None of it was
-           coursework.
+  note     A small town two hours out of Ahmedabad, and where I started taking
+           things apart to see how they worked. Computers, machines, anything
+           with a cover that came off. None of it was coursework.
 
 place mrias
   name     Manjushree Research Institute
@@ -57,9 +56,9 @@ place mrias
   tilt     44
   bearing  9
   note     I started college on a completely different path. It took a year to
-           admit that the thing I actually wanted to do was the thing I had
-           been doing for fun the whole time, and to start over. Worth having
-           on the map: the route was not straight.
+           admit that the thing I wanted to do was the thing I had been doing
+           for fun the whole time, and to start again. It is on the map because
+           the route was not straight.
 
 place silver-oak
   name     Silver Oak University
@@ -72,8 +71,8 @@ place silver-oak
   tilt     50
   bearing  -21
   note     Where I fell for Linux and the shell. The degree said AI and machine
-           learning; the education was Python, the terminal, and how the
-           machine underneath actually works. Graduated May 2025 with a 9.1.
+           learning. What I actually learned was Python, the terminal, and how
+           the machine underneath works. Graduated May 2025 with a 9.1.
 
 place innoventa
   name     Innoventa Technologies
@@ -85,10 +84,10 @@ place innoventa
   zoom     14.5
   tilt     52
   bearing  16
-  note     Built a GenAI book-reading application end to end — content in one
+  note     Built a GenAI book-reading application end to end. Content in one
            side, illustrated picture books with generated audio narration out
-           the other. My first look at a generative pipeline that had to hold
-           together for someone other than me.
+           the other. The first generative pipeline I had built that had to hold
+           together for somebody other than me.
 
 place gateway
   name     Gateway Corp
@@ -100,7 +99,7 @@ place gateway
   zoom     14.4
   tilt     54
   bearing  -7
-  note     AI-driven developer tooling and internal infrastructure, with the
-           emphasis on production rather than demo. Currently building a
-           notification system on multi-armed bandits — learning the timing
-           and strategy that actually lands, per user, instead of guessing it.
+  note     AI-driven developer tooling and internal infrastructure, aimed at
+           production rather than demos. Currently building a notification
+           system on multi-armed bandits, so it learns the timing that actually
+           lands for each person instead of guessing at it.
