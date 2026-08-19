@@ -38,6 +38,11 @@ USER portfolio
 # baked: the India archive is 1.6 GB and does not belong in an image.
 ENV TERMAP_DATA=/app/data
 
-EXPOSE 2222
-ENTRYPOINT ["/usr/local/bin/portfolio", "--serve", "--ssh-addr", "0.0.0.0", \
-            "--ssh-port", "2222", "--host-key", "/app/keys/host_key"]
+# The image is both services. ENTRYPOINT is the binary alone and the flags
+# come from `command:` in docker-compose.yml, so the ssh and web containers
+# are the same image started two different ways -- rather than two images, or
+# one image with a wrapper script branching on an environment variable.
+EXPOSE 2222 8080
+ENTRYPOINT ["/usr/local/bin/portfolio"]
+CMD ["--serve", "--ssh-addr", "0.0.0.0", "--ssh-port", "2222", \
+     "--host-key", "/app/keys/host_key"]

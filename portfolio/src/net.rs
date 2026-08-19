@@ -19,36 +19,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::cursor::Hide;
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
-use ratatui::layout::Rect;
-use ratatui::{Terminal, TerminalOptions, Viewport};
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, Pty};
-use std::io::Write as _;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::Duration;
 
-use crate::shell::Shell;
-use crate::wire::{Decoder, DISABLE_MOUSE, ENABLE_MOUSE};
+use crate::session;
 
 /// Concurrent sessions. Without a ceiling, opening connections is a free way
 /// to grow the process without bound -- each session is a `Shell`, a decoder
 /// and a couple of channels, not large, but not nothing at a thousand of them.
 const MAX_SESSIONS: usize = 128;
-
-/// Same default as the local terminal path: no keystroke for this long ends
-/// the session, so an abandoned tab does not hold a slot forever.
-fn idle_limit() -> Duration {
-    let secs = std::env::var("PORTFOLIO_IDLE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(900);
-    Duration::from_secs(secs)
-}
 
 pub async fn serve(addr: &str, port: u16, host_key: &Path) -> anyhow::Result<()> {
     let key = load_or_create_host_key(host_key)?;
@@ -290,32 +272,8 @@ impl Handler for SessionHandler {
     }
 }
 
-type Term = Terminal<CrosstermBackend<ChannelWriter>>;
-
-/// An `io::Write` sink that ships bytes down an SSH channel, so ratatui's own
-/// crossterm backend can render straight into the client's terminal. There is
-/// no OS pty here for it to write to instead.
-struct ChannelWriter {
-    tx: UnboundedSender<Vec<u8>>,
-    buf: Vec<u8>,
-}
-
-impl std::io::Write for ChannelWriter {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        if self.buf.is_empty() {
-            return Ok(());
-        }
-        let payload = std::mem::take(&mut self.buf);
-        self.tx
-            .send(payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
-    }
-}
-
+/// Bridge one SSH channel to a session. The loop itself lives in `session`,
+/// shared with the web transport -- this only moves bytes.
 async fn run_session(
     handle: russh::server::Handle,
     channel: ChannelId,
@@ -326,75 +284,26 @@ async fn run_session(
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let out_handle = handle.clone();
     tokio::spawn(async move {
-        while let Some(bytes) = out_rx.recv().await {
-            if out_handle.data(channel, bytes::Bytes::from(bytes)).await.is_err() {
+        while let Some(frame) = out_rx.recv().await {
+            if out_handle.data(channel, bytes::Bytes::from(frame)).await.is_err() {
                 break;
             }
         }
     });
 
-    let backend = CrosstermBackend::new(ChannelWriter { tx: out_tx.clone(), buf: Vec::new() });
-    let options = TerminalOptions {
-        viewport: Viewport::Fixed(Rect::new(0, 0, cols.max(20), rows.max(6))),
-    };
-    let mut terminal: Term = Terminal::with_options(backend, options)?;
-
-    // Everything here is a plain ANSI write, never a call that would ask the
-    // *server's* controlling terminal something -- there is no such thing on
-    // this end, and asking would either error or describe the wrong machine.
-    execute!(
-        terminal.backend_mut(),
-        EnterAlternateScreen,
-        Hide,
-        Clear(ClearType::All),
-    )?;
-    terminal.backend_mut().write_all(ENABLE_MOUSE)?;
-    terminal.backend_mut().flush()?;
-
-    let mut shell = Shell::new();
-    let mut decoder = Decoder::default();
-    let idle_after = idle_limit();
-    let mut last_input = Instant::now();
-
-    terminal.draw(|f| shell.render(f))?;
-
-    loop {
-        let wait = Duration::from_millis(shell.frame_ms());
-        let mut ticker = interval(wait);
-        ticker.tick().await; // the first tick fires immediately; skip it
-
-        tokio::select! {
-            got = wire.recv() => match got {
-                Some(Wire::Bytes(bytes)) => {
-                    last_input = Instant::now();
-                    for ev in decoder.feed(&bytes) {
-                        match ev {
-                            crossterm::event::Event::Key(k) => shell.on_key(k),
-                            crossterm::event::Event::Mouse(m) => shell.on_mouse(m),
-                            _ => {}
-                        }
-                    }
-                }
-                Some(Wire::Resize(c, r)) => {
-                    terminal.resize(Rect::new(0, 0, c.max(20), r.max(6)))?;
-                }
-                Some(Wire::Hangup) | None => break,
-            },
-            _ = ticker.tick() => {}
+    let (in_tx, in_rx) = unbounded_channel::<session::In>();
+    tokio::spawn(async move {
+        while let Some(msg) = wire.recv().await {
+            let translated = match msg {
+                Wire::Bytes(b) => session::In::Bytes(b),
+                Wire::Resize(c, r) => session::In::Resize(c, r),
+                Wire::Hangup => session::In::Hangup,
+            };
+            if in_tx.send(translated).is_err() {
+                break;
+            }
         }
+    });
 
-        if shell.quit || last_input.elapsed() > idle_after {
-            break;
-        }
-        let now = Instant::now();
-        shell.tick(wait.as_secs_f64());
-        let _ = now;
-        terminal.draw(|f| shell.render(f))?;
-    }
-
-    let w = terminal.backend_mut();
-    w.write_all(DISABLE_MOUSE)?;
-    execute!(w, LeaveAlternateScreen)?;
-    terminal.flush()?;
-    Ok(())
+    session::run(out_tx, in_rx, cols, rows).await
 }

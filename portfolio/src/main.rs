@@ -11,7 +11,9 @@ mod json;
 mod net;
 mod page;
 mod paint;
+mod session;
 mod shell;
+mod web;
 mod wire;
 mod taste;
 mod snapshot;
@@ -36,6 +38,9 @@ fn main() -> io::Result<()> {
     let mut shot: Option<snapshot::Opts> = None;
     let mut start: Option<String> = None;
     let mut serve = false;
+    let mut web = false;
+    let mut web_addr = "0.0.0.0".to_string();
+    let mut web_port: u16 = 8080;
     let mut ssh_addr = "0.0.0.0".to_string();
     let mut ssh_port: u16 = 2222;
     let mut host_key: Option<String> = None;
@@ -54,6 +59,10 @@ fn main() -> io::Result<()> {
                 println!("  --ssh-port PORT          bind port for --serve (default 2222)");
                 println!("  --host-key PATH          where the SSH host key lives, generated on first run");
                 println!("                           (default $PORTFOLIO_HOST_KEY or ./data/ssh_host_key)");
+                println!();
+                println!("  --web                    run the web terminal instead (same app, no shell)");
+                println!("  --web-addr ADDR          bind address for --web (default 0.0.0.0)");
+                println!("  --web-port PORT          bind port for --web (default 8080)");
                 return Ok(());
             }
             "--snapshot" => {
@@ -90,6 +99,9 @@ fn main() -> io::Result<()> {
                 }
             }
             "--serve" => serve = true,
+            "--web" => web = true,
+            "--web-addr" => web_addr = args.next().unwrap_or(web_addr),
+            "--web-port" => web_port = args.next().and_then(|v| v.parse().ok()).unwrap_or(web_port),
             "--ssh-addr" => ssh_addr = args.next().unwrap_or(ssh_addr),
             "--ssh-port" => ssh_port = args.next().and_then(|v| v.parse().ok()).unwrap_or(ssh_port),
             "--host-key" => host_key = args.next(),
@@ -101,6 +113,13 @@ fn main() -> io::Result<()> {
     if let Some(mut o) = shot {
         o.section = start.or(o.section);
         return snapshot::render(&o);
+    }
+
+    if web {
+        let rt = tokio::runtime::Runtime::new()?;
+        return rt
+            .block_on(web::serve(&web_addr, web_port))
+            .map_err(|e| io::Error::other(e.to_string()));
     }
 
     if serve {

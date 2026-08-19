@@ -167,7 +167,12 @@ impl Shell {
     /// between fluid and unusable, and half the frames are not worth it.
     pub fn frame_ms(&self) -> u64 {
         if self.booting() {
-            return 30;
+            // The opening is a full screen of braille that changes everywhere
+            // at once, so every frame is close to a full repaint -- measured
+            // over a WebSocket, 30 ms frames cost ~1 MB for 2.4 seconds. The
+            // motion is slow swell, which reads the same at half that rate,
+            // and this is the very first thing anyone downloads.
+            return 60;
         }
         if !self.animating() {
             return 120;

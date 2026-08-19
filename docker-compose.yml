@@ -1,11 +1,18 @@
-# ssh -p 2222 <your-host>
+# Two ways in, one program:
+#
+#   ssh -p 2222 <your-host>     the terminal-native version
+#   http://<your-host>:8080     the same thing in a browser
 #
 #   docker compose up -d --build
 #
-# No username needed -- the binary speaks SSH itself now, so there is no OS
-# account for one to name. Published on 2222 for now rather than 22 so this
-# never has to fight whatever the host's own sshd is doing; move it later by
-# changing the left side of the port mapping below.
+# No username needed for ssh -- the binary speaks SSH itself, so there is no
+# OS account for one to name. Published on 2222 rather than 22 so this never
+# has to fight whatever the host's own sshd is doing; move it later by
+# changing the left side of the port mapping.
+#
+# Two services from one image. They are separate containers on purpose: a
+# crash or a restart on one transport does not take the other down with it,
+# and each gets its own resource ceiling rather than sharing one.
 
 services:
   portfolio:
@@ -13,6 +20,8 @@ services:
       context: .
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    command: ["--serve", "--ssh-addr", "0.0.0.0", "--ssh-port", "2222",
+              "--host-key", "/app/keys/host_key"]
     ports:
       - "2222:2222"
 
@@ -69,6 +78,50 @@ services:
     healthcheck:
       # The portfolio prints plain text when there is no terminal, which makes
       # it its own health check.
+      test: ["CMD-SHELL", "/usr/local/bin/portfolio | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  # The same binary and the same image, serving the same sessions to a
+  # browser instead of an SSH client. No pty, no subprocess, no shell -- the
+  # far end of that WebSocket is the identical `Shell` the SSH path drives.
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    command: ["--web", "--web-addr", "0.0.0.0", "--web-port", "8080"]
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # No host key here: nothing on this path is authenticated, so there is
+      # nothing to persist between restarts.
+      - ./map/data/india.pmtiles:/app/data/india.pmtiles:ro
+      - ./map/data/india.tmhg:/app/data/india.tmhg:ro
+      - ./map/data/states.tmap:/app/data/states.tmap:ro
+      - ./portfolio/data/about.txt:/app/data/about.txt:ro
+      - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
+      - ./map/data/places.txt:/app/data/places.txt:ro
+
+    environment:
+      TERMAP_DATA: /app/data
+      # A browser tab left open in the background answers everything and would
+      # otherwise hold its session indefinitely.
+      # PORTFOLIO_IDLE_SECS: "900"
+
+    cpus: 1.5
+    mem_limit: 512M
+    pids_limit: 256
+
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    healthcheck:
       test: ["CMD-SHELL", "/usr/local/bin/portfolio | grep -q ."]
       interval: 60s
       timeout: 10s

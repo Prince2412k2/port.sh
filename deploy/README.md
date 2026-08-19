@@ -2,12 +2,54 @@
 
 ```bash
 docker compose up -d --build
-ssh -p 2222 your-host
 ```
 
-No username needed. There is no OS account to name — the binary speaks SSH
-itself, so a login name is just a string in the handshake, and any one (or
-none at all) is accepted.
+Two ways in, one program:
+
+```bash
+ssh -p 2222 your-host          # terminal-native
+open http://your-host:8080     # the same thing, in a browser
+```
+
+No username needed for ssh. There is no OS account to name — the binary
+speaks SSH itself, so a login name is just a string in the handshake, and any
+one (or none at all) is accepted.
+
+Two containers from one image, started with different flags. Separate on
+purpose: a crash or restart on one transport does not take the other down,
+and each gets its own resource ceiling.
+
+## The web terminal
+
+A browser opens a WebSocket, gets its own session, and renders the ANSI
+frames with xterm.js. **It runs the same session code the SSH path does** —
+see `session::run`, which neither transport appears in — so the two cannot
+drift apart as the app changes.
+
+There is no pty and no subprocess. The far end of that socket is a `Shell`
+struct drawing frames into a buffer, nothing more:
+
+| | |
+|---|---|
+| shell access | none — there is no shell to escape from, no process to exec |
+| what the server accepts | key and mouse bytes, via the same `wire::Decoder` SSH uses |
+| resize | an out-of-band `r<cols>x<rows>` text message, kept off the input path |
+| per visitor | one `Shell` on one thread, not one OS process |
+
+That last row matters at scale. The obvious way to build this (a real pty
+plus a subprocess per browser tab, the ttyd pattern) gives every visitor
+their own full copy of the basemap and terrain. This design does not: one
+process serves everyone, so a memory optimisation benefits every visitor at
+once rather than being multiplied by them.
+
+### Shaders, later
+
+xterm.js renders through its WebGL addon into a `<canvas>`, which is the
+right surface for a post-processing pass — CRT curvature, bloom, scanlines,
+phosphor persistence. The client already loads `WebglAddon` and falls back
+to the canvas renderer if WebGL is unavailable, so the hook is in place; a
+shader pass would sample that canvas as a texture rather than touching any
+of the server code.
 
 Published on **2222** for now rather than 22, so this never has to fight
 whatever the host's own sshd is doing. Move it to 22 later by changing the
@@ -35,6 +77,7 @@ reach. The image runs one already-unprivileged process, with:
 | | |
 |---|---|
 | filesystem | fully read-only, no `tmpfs` anywhere |
+| web transport | no pty, no subprocess, no shell — see above |
 | capabilities | all dropped, none re-added |
 | account | a system user with `nologin`, never used to log in |
 | password / forwarding / sftp | never implemented — there is no code path for them |
