@@ -15,6 +15,13 @@
 //! fps that is ~136 KB/s for as long as somebody leaves the tab open. Bounded
 //! to the seconds after an arrival it is a few hundred KB and then silence.
 //! The same rule governs the field behind it.
+//!
+//! **How big the picture is depends on the window.** Every plate is baked at
+//! two sizes and `portraits::fit` picks the largest this screen can hold, so a
+//! maximised terminal gets a picture two to three times the area an 80-column
+//! one does. That is also why the loop's *duration* is derived from the plate
+//! rather than fixed — see `paint::lively_for`. Otherwise turning up with a
+//! big window would silently cost three times as much per arrival.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -26,21 +33,20 @@ use crate::paint::{self, wrap, ACCENT, DIM, FAINT, FG};
 use crate::portraits::{self, Portrait};
 use crate::taste::{Entry, Sheet};
 
-/// How long after arriving at a work its plate keeps looping.
-///
-/// Three passes of an eighteen-frame loop at six frames a second. The plates
-/// are large because they are meant to be looked at, and a 64x24 one costs
-/// ~100 KB/s while it runs -- about half its cells change per step and no
-/// frame rate makes that free. So it runs for long enough to read the motion
-/// and then holds. Turn this up and the number that grows is what every
-/// visitor downloads; turn it to 0 and the room is a wall of stills.
-pub const LIVELY: f64 = 9.0;
-
 /// Works per second while sliding. One beat, not a scroll.
 const SLIDE: f64 = 3.2;
 
 /// Room between the plate and the terminal's edges.
 const PAD: u16 = 2;
+
+/// Rows the room needs for everything that is not the picture: the mount above
+/// and below it, the title, the blank line, a line or two of quote, and the
+/// index along the bottom.
+///
+/// Used to decide which bake of a plate fits, which has to happen before the
+/// quote is wrapped — the wrap measure comes from the plate's width, so asking
+/// for the exact caption height first would be circular. An allowance it is.
+const CHROME: u16 = 10;
 
 pub struct Museum {
     works: Vec<Entry>,
@@ -100,27 +106,41 @@ impl Museum {
     }
 
     /// True while anything on this screen is still moving.
-    pub fn moving(&self) -> bool {
-        self.sliding() || self.fresh < self.lively_for()
+    ///
+    /// Takes the body rect because how long a plate loops for depends on which
+    /// bake of it is on screen, and that depends on the size of the window.
+    pub fn moving(&self, area: Rect) -> bool {
+        self.sliding() || self.fresh < self.lively_for(area)
     }
 
     pub fn sliding(&self) -> bool {
         (self.pos - self.sel as f64).abs() > 0.001
     }
 
-    /// How long this work's plate should keep looping.
+    /// How long this work's plate should keep looping, at the size it is drawn.
     ///
     /// A still has nothing to loop, so it settles the moment it arrives and
     /// the screen goes quiet — no reason to keep repainting a photograph.
-    fn lively_for(&self) -> f64 {
-        match self.plate(self.sel) {
-            Some(p) if p.frames.len() > 1 => LIVELY,
-            _ => 0.0,
-        }
+    fn lively_for(&self, area: Rect) -> f64 {
+        self.plate_at(self.sel, area).map_or(0.0, paint::lively_for)
     }
 
+    /// The plate for work `i`, ignoring what size it is drawn at.
+    ///
+    /// For the questions every bake of it answers the same way: is there a
+    /// picture, what colour is it. Layout must use `plate_at` instead.
     fn plate(&self, i: usize) -> Option<&'static Portrait> {
         self.works.get(i).and_then(|e| portraits::find(&e.id))
+    }
+
+    /// The largest bake of work `i` that this screen can carry, if any.
+    fn plate_at(&self, i: usize, area: Rect) -> Option<&'static Portrait> {
+        let e = self.works.get(i)?;
+        portraits::fit(
+            &e.id,
+            area.width.saturating_sub(PAD * 2 + 4),
+            area.height.saturating_sub(CHROME),
+        )
     }
 
     pub fn tick(&mut self, dt: f64) {
@@ -183,14 +203,19 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
     let e = &m.works[i];
     let quote = format!("\u{201c}{}\u{201d}", e.quote);
 
+    // Resolved once. Every measurement below is against the bake that is going
+    // to be drawn, and asking twice would let the caption be laid out for one
+    // size and the picture drawn at another.
+    let plate = m.plate_at(i, area);
+
     // Measured against the plate rather than the terminal: a line the width of
     // a wide screen is one the eye cannot track back from, and the caption
     // reads as belonging to the picture when it shares its edges.
-    let pw = m.plate(i).map_or(40, |p| p.cols);
+    let pw = plate.map_or(40, |p| p.cols);
     let measure = pw.max(40).min(area.width.saturating_sub(PAD * 2));
     let lines = wrap(&quote, measure as usize);
 
-    let art_h = m.plate(i).map_or(0, |p| p.rows);
+    let art_h = plate.map_or(0, |p| p.rows);
     // title, blank, quote, blank, index
     let text_h = 2 + lines.len() as u16 + 2;
     let total = art_h + text_h;
@@ -215,7 +240,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
     // picture and the caption, and a photograph competing with a line drawing
     // for the same cells reads as a rendering fault rather than as depth.
     {
-        let mw = measure.max(m.plate(i).map_or(0, |p| p.cols)) + 4;
+        let mw = measure.max(plate.map_or(0, |p| p.cols)) + 4;
         let x = centre + dx - mw as f64 / 2.0;
         let y0 = top.saturating_sub(1);
         let h = (total + 3).min((area.y + area.height).saturating_sub(y0));
@@ -233,8 +258,9 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
 
     // A work with no picture is hung as wall text rather than as a gap: the
     // quote is the exhibit either way, and an empty frame reads as a bug.
-    // Only A Silent Voice is in this state, for want of a file in assets/.
-    if m.plate(i).is_none() {
+    // Two ways to end up here: a work whose image is not in assets/, and a
+    // terminal too small for even the smallest bake of one that is.
+    if plate.is_none() {
         let x = centre + dx - measure as f64 / 2.0;
         if x >= area.x as f64 {
             let rule = "\u{2500}".repeat(measure as usize / 3);
@@ -245,14 +271,14 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
         }
     }
 
-    if let Some(p) = m.plate(i) {
+    if let Some(p) = plate {
         let x = centre + dx - p.cols as f64 / 2.0;
         // The blitter takes unsigned screen coordinates and draws a whole
         // plate, so a half-off-screen one is dropped rather than wrapped
         // around into a very large u16.
         if x >= area.x as f64 && x + p.cols as f64 <= (area.x + area.width) as f64 {
             let frame = if i == m.sel {
-                paint::portrait_loop(p, m.fresh, m.fresh < m.lively_for())
+                paint::portrait_loop(p, m.fresh, m.fresh < paint::lively_for(p))
             } else {
                 p.frames[0]
             };
@@ -314,7 +340,7 @@ fn field(f: &mut Frame, area: Rect, m: &Museum) {
     let (sw, sh) = (canvas.sw as f64, canvas.sh as f64);
 
     // Frozen with the plate, so the whole screen goes quiet together.
-    let t = if m.moving() { m.t } else { 0.0 };
+    let t = if m.moving(area) { m.t } else { 0.0 };
 
     const LINES: usize = 7;
     for i in 0..LINES {
@@ -359,6 +385,15 @@ mod tests {
     fn sheet() -> Sheet {
         taste::parse(include_str!("../data/taste.txt"))
     }
+
+    /// A maximised terminal on a normal monitor: room for the large bake of
+    /// every plate.
+    const BIG: Rect = Rect { x: 0, y: 0, width: 200, height: 60 };
+    /// A default xterm. Too short for the small bake and its caption both.
+    const SMALL: Rect = Rect { x: 0, y: 0, width: 80, height: 24 };
+    /// Wide and shallow: the snapshot size, and the awkward case — plenty of
+    /// columns for the large bake and nowhere near the rows for it.
+    const WIDE: Rect = Rect { x: 0, y: 0, width: 180, height: 48 };
 
     #[test]
     fn the_wall_holds_every_entry_from_both_halves_of_the_sheet() {
@@ -420,13 +455,13 @@ mod tests {
         for _ in 0..600 {
             m.tick(1.0 / 60.0);
         }
-        assert!(!m.moving(), "a photograph is still asking for frames");
+        assert!(!m.moving(BIG), "a photograph is still asking for frames");
 
         m.go(animated);
         for _ in 0..30 {
             m.tick(1.0 / 60.0);
         }
-        assert!(m.moving(), "an animation settled immediately");
+        assert!(m.moving(BIG), "an animation settled immediately");
     }
 
     /// `--snapshot --scroll N` has to show work N, not whatever the wall was
@@ -450,9 +485,109 @@ mod tests {
             .find(|&i| m.plate(i).is_some_and(|p| p.frames.len() > 1))
             .expect("no animated plate");
         m.go(animated);
-        for _ in 0..((LIVELY as usize + 2) * 60) {
+        for _ in 0..((paint::LIVELY as usize + 2) * 60) {
             m.tick(1.0 / 60.0);
         }
-        assert!(!m.moving(), "still looping after {LIVELY}s");
+        let ceiling = paint::LIVELY;
+        assert!(!m.moving(BIG), "still looping after {ceiling}s");
+    }
+
+    /// The whole point of baking each plate twice. A wide window has to
+    /// actually reach the large bake, or the second bake is dead weight in the
+    /// binary.
+    #[test]
+    fn a_big_window_gets_a_bigger_plate_than_a_small_one() {
+        let s = sheet();
+        let m = Museum::new(&s);
+
+        for i in 0..m.len() {
+            let (Some(big), Some(small)) = (m.plate_at(i, BIG), m.plate_at(i, SMALL)) else {
+                continue;
+            };
+            assert!(
+                big.cols as u32 * big.rows as u32 > small.cols as u32 * small.rows as u32,
+                "{} is the same size on a 200x60 terminal as on an 80x24 one",
+                m.works[i].id,
+            );
+        }
+    }
+
+    /// Rows are the scarce dimension, and this is the case that catches a large
+    /// bake being chosen on columns alone: 180x48 has columns to spare and four
+    /// rows too few, so it must come back with the small one rather than a
+    /// picture whose bottom is off the screen.
+    #[test]
+    fn a_wide_but_shallow_window_falls_back_rather_than_overflowing() {
+        let s = sheet();
+        let m = Museum::new(&s);
+        for i in 0..m.len() {
+            if let Some(p) = m.plate_at(i, WIDE) {
+                assert!(
+                    p.rows <= WIDE.height - CHROME,
+                    "{} chose a {}-row plate for a {}-row window",
+                    m.works[i].id,
+                    p.rows,
+                    WIDE.height,
+                );
+            }
+        }
+    }
+
+    /// A windowed browser or a tmux pane has to keep its pictures.
+    ///
+    /// This is why there is a bake below the one that used to be the only one:
+    /// at 36 rows the room has 26 left after the caption, the old plates were
+    /// 32, and the four upright works quietly became wall text on a size of
+    /// terminal plenty of people actually use.
+    #[test]
+    fn every_work_still_has_a_picture_on_a_merely_ordinary_terminal() {
+        let s = sheet();
+        let m = Museum::new(&s);
+        let area = Rect { x: 0, y: 0, width: 130, height: 36 };
+        for i in 0..m.len() {
+            assert!(
+                m.plate_at(i, area).is_some(),
+                "{} has no picture at 130x36",
+                m.works[i].id,
+            );
+        }
+    }
+
+    /// Past a point there is genuinely no room, and then the quote is the
+    /// exhibit on its own. The room is built around the line under the picture,
+    /// so dropping the line to make space for the picture has it backwards.
+    #[test]
+    fn a_tiny_window_keeps_the_quote_and_drops_the_picture() {
+        let s = sheet();
+        let m = Museum::new(&s);
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        assert!(
+            (0..m.len()).all(|i| m.plate_at(i, area).is_none()),
+            "something still claimed to fit in 20 rows",
+        );
+    }
+
+    /// Nothing is ever scaled, so a bake that does not fit is a bake drawn off
+    /// the side of the screen. Whatever comes back has to fit what was asked
+    /// for, at every size.
+    #[test]
+    fn a_chosen_bake_always_fits_what_was_measured_for_it() {
+        let s = sheet();
+        let m = Museum::new(&s);
+        for height in 12..=72u16 {
+            for width in [40, 60, 80, 100, 130, 176, 200, 240] {
+                let area = Rect { x: 0, y: 0, width, height };
+                for i in 0..m.len() {
+                    let Some(p) = m.plate_at(i, area) else { continue };
+                    assert!(
+                        p.cols + PAD * 2 + 4 <= width && p.rows + CHROME <= height,
+                        "{} chose {}x{} for a {width}x{height} room",
+                        m.works[i].id,
+                        p.cols,
+                        p.rows,
+                    );
+                }
+            }
+        }
     }
 }

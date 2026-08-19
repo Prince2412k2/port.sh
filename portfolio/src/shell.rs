@@ -213,18 +213,19 @@ impl Shell {
             || match self.section {
                 Section::Experience => self.map.animating(),
                 Section::Projects | Section::Skills => self.sheet.moving(),
-                Section::Taste => self.museum.moving(),
+                Section::Taste => self.museum.moving(self.body),
                 // Only while the tide is running. Idle, the screen is static
                 // and the stream still gets polled on the slow heartbeat --
                 // asking for 40 frames a second to render a blinking caret is
                 // how a portfolio ends up warming someone's laptop.
                 Section::Ask => self.ask.busy(),
-                Section::Home => self.since < crate::museum::LIVELY && self.home_plate_moves(),
+                // Both halves of this come from the bake actually on screen: a
+                // window too narrow for the portrait has nothing animating at
+                // all, and a wider one that earns the large bake pays for it in
+                // seconds rather than in bandwidth.
+                Section::Home => home::plate(self.body, &self.about)
+                    .is_some_and(|p| self.since < crate::paint::lively_for(p)),
             }
-    }
-
-    fn home_plate_moves(&self) -> bool {
-        crate::portraits::find("snufkin-home").is_some_and(|p| p.frames.len() > 1)
     }
 
     /// True while the opening is still on screen.

@@ -33,11 +33,30 @@ ASSETS = ROOT / "assets"
 # the page instead of sitting on a black tile of its own.
 BG = "#08090b"
 
-# The set asked for. `stipple` and `dot` are separate classes in chafa; there
-# is no `dot-stipple`. Sextants need a font with the 1FB00 block -- which is
-# the trade for this much detail per cell, and every modern terminal font has
-# had them for years.
-SYMBOLS = "sextant+ascii+braille+border+dot+stipple"
+# Which symbol classes chafa may choose from, per plate. `stipple` and `dot`
+# are separate classes in chafa; there is no `dot-stipple`. Sextants need a
+# font with the 1FB00 block -- which is the trade for this much detail per
+# cell, and every modern terminal font has had them for years.
+#
+# A still gets coverage classes only. Sextants, braille and the two dither
+# classes all answer the same question -- how much of this cell is ink, and
+# where in the cell is it -- which is the question a photograph is asking.
+# ASCII answers a different one, and a face assembled out of `%` and `#` reads
+# as ASCII art: a medium of its own, and not the one the rest of this room is
+# in. It was 5-7% of the ink on the photographs, which is little enough to
+# lose and quite enough to notice.
+STILL = "sextant+braille+border+dot+stipple"
+
+# The same, plus ASCII, for anything that moves.
+#
+# Not a bandwidth decision, though it looks like one: measured over both GIFs,
+# keeping ASCII means 24% fewer cells change between frames -- the glyphs are
+# large flat shapes, so they survive a step where a sextant would be re-picked
+# -- but each cell that does change costs a little more, and the two effects
+# cancel to within a few percent of each other on the wire. What is left is
+# that the objection to ASCII is that you can read it, and at six frames a
+# second nobody is reading it.
+MOTION = "sextant+ascii+braille+border+dot+stipple"
 
 MAX_FRAMES = 18
 
@@ -59,21 +78,52 @@ MAX_FRAMES = 18
 FULL = "full"
 QUANTISED = "256"
 
-# id, source file, columns, rows, colours.
+# The sizes each plate is baked at, largest first.
 #
-# Sizes are generous on purpose: this is a museum wall now, not a contact
-# sheet, and the whole point of sextants is that detail survives being small
-# enough to fit. Each plate is baked at exactly the size it is drawn -- there
-# is no resampling a sextant, so a second size means a second bake.
+# A size here is a bounding box, not a grid: chafa fits the source's aspect
+# ratio inside it, so a tall photograph binds on rows and a wide GIF binds on
+# columns. `--size 112x52` gets 74x52 out of Bourdain and 112x31 out of the
+# One Piece loop.
+#
+# Three of them, because a plate cannot be resampled at runtime -- a sextant is
+# not a pixel and there is nothing to interpolate -- so the only way to have a
+# large picture on a large terminal and any picture at all on a small one is to
+# bake each size and pick. `fit` in the generated file does the picking, and
+# this is the whole reason assets/ is committed rather than just the output.
+#
+# The bound that matters is rows, not columns, and not for aesthetic reasons: a
+# terminal has columns to spare and never has rows. The museum needs about ten
+# of them for the mount, the caption and the index, so a 40-row plate wants a
+# 50-row window.
+#
+# - The large tier is for a maximised browser on a 1080p screen, which has the
+#   rows for it. Bounding it at 52 rather than 40 would look generous and
+#   select almost never: the upright photographs would come out 52 rows and ask
+#   for a 62-row terminal before they could be seen at all.
+# - The middle tier is what every plate used to be, full stop.
+# - The small tier exists because the middle one is already 32 rows, which is
+#   more than a 36-row window has after the caption. Without it a windowed
+#   browser or a tmux pane got no picture at all for the four upright works --
+#   the tiers have to degrade as well as upgrade, and a small picture beats a
+#   caption on an empty wall.
+WALL = [(112, 40), (64, 32), (48, 24)]
+
+# Home hangs its portrait beside a text block about 80 columns wide with the
+# section's furniture either side, so it has far less to spend than a museum
+# wall and gets its own set of bounds. Wider than the largest of these and the
+# quietest screen in the app stops being the quietest.
+BESIDE_TEXT = [(72, 36), (52, 26), (40, 20)]
+
+# id, source file, colours, symbol classes, size bounds.
 PLATES = [
-    ("snufkin-home", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 52, 26, QUANTISED),
-    ("snufkin", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 64, 32, QUANTISED),
-    ("one-piece", "onepeace.gif", 64, 32, QUANTISED),
-    ("bourdain", "bourdain.jpeg", 64, 32, FULL),
-    ("iroh", "iroh.png", 64, 32, FULL),
-    ("ted", "ted.jpg", 64, 32, FULL),
-    ("miles", "miles.jpeg", 64, 32, FULL),
-    ("little-prince", "llprince.jpeg", 64, 32, FULL),
+    ("snufkin-home", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", QUANTISED, MOTION, BESIDE_TEXT),
+    ("snufkin", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", QUANTISED, MOTION, WALL),
+    ("one-piece", "onepeace.gif", QUANTISED, MOTION, WALL),
+    ("bourdain", "bourdain.jpeg", FULL, STILL, WALL),
+    ("iroh", "iroh.png", FULL, STILL, WALL),
+    ("ted", "ted.jpg", FULL, STILL, WALL),
+    ("miles", "miles.jpeg", FULL, STILL, WALL),
+    ("little-prince", "llprince.jpeg", FULL, STILL, WALL),
 ]
 
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
@@ -108,10 +158,10 @@ def coalesce(path: Path, into: Path) -> list:
     return sorted(into.glob("f-*.png"))
 
 
-def render(src: str, cols: int, rows: int, colours: str) -> str:
+def render(src: str, cols: int, rows: int, colours: str, symbols: str) -> str:
     """One frame of ANSI from chafa."""
     return subprocess.run(
-        ["chafa", "-f", "symbols", "-c", colours, "--symbols", SYMBOLS,
+        ["chafa", "-f", "symbols", "-c", colours, "--symbols", symbols,
          "--size", f"{cols}x{rows}", "--bg", BG, "-t", "1", str(src)],
         capture_output=True, text=True, check=True,
     ).stdout
@@ -253,8 +303,14 @@ def main() -> None:
     out.append("//! GENERATED by portfolio/scripts/portraits.py -- do not edit.")
     out.append("//!")
     out.append("//! Full-colour art baked from assets/ with chafa, one static array per")
-    out.append("//! plate. Animated sources keep several frames; still ones keep one, and")
+    out.append("//! frame. Animated sources keep several frames; still ones keep one, and")
     out.append("//! nothing here decodes an image at runtime.")
+    out.append("//!")
+    out.append("//! Every plate appears more than once, at a different size each time, and")
+    out.append("//! `fit` picks the largest one a given rect can hold. The sizes are baked")
+    out.append("//! rather than scaled because there is no scaling a sextant: the glyph is")
+    out.append("//! chosen for the pixels it covers, so a different size is a different")
+    out.append("//! choice of glyph and a second run of chafa.")
     out.append("//!")
     out.append("//! Distinct from emblems.rs, which stores coverage rather than colour so a")
     out.append("//! drawing can be tinted against the page. These are photographs; there is")
@@ -291,12 +347,15 @@ def main() -> None:
     out.append("")
 
     made = []
-    for pid, name, cols, rows, colours in PLATES:
+    for pid, name, colours, symbols, bounds in PLATES:
         path = ASSETS / name
         if not path.exists():
             print(f"skipping {pid}: no {path}", file=sys.stderr)
             continue
 
+        # Coalesced once and rendered at every size, rather than once per size.
+        # Rebuilding 359 One Piece frames twice is most of this script's
+        # runtime for a result that cannot differ.
         with tempfile.TemporaryDirectory() as tmp:
             files = coalesce(path, Path(tmp))
             total = len(files)
@@ -305,48 +364,80 @@ def main() -> None:
             else:
                 n = min(total, MAX_FRAMES)
                 picks = sorted({round(k * (total - 1) / (n - 1)) for k in range(n)})
-            sheets = [parse(render(files[i], cols, rows, colours)) for i in picks]
 
-        shape, frames = None, []
-        for idx, (w, h, flat) in zip(picks, sheets):
-            if not flat:
-                continue
-            # Frames of one animation must agree, or the blitter would need a
-            # size per frame. chafa fits to the aspect ratio of each frame
-            # independently, and a GIF whose frames differ in size would
-            # otherwise produce a ragged array.
-            if shape is None:
-                shape = (w, h)
-            elif (w, h) != shape:
-                print(f"{pid}: frame {idx} came out {w}x{h}, want {shape[0]}x{shape[1]}",
-                      file=sys.stderr)
-                continue
-            frames.append(flat)
+            # The plate's colour comes from the largest tier and is then shared
+            # by all of them. It is the same photograph either way, and the
+            # museum blends these across a slide -- a tint that shifted when
+            # the terminal was resized would change the colour of the room.
+            rgb = None
+            for cols, rows in bounds:
+                sheets = [parse(render(files[i], cols, rows, colours, symbols))
+                          for i in picks]
 
-        if not frames:
-            print(f"skipping {pid}: chafa produced nothing", file=sys.stderr)
-            continue
+                shape, frames = None, []
+                for idx, (w, h, flat) in zip(picks, sheets):
+                    if not flat:
+                        continue
+                    # Frames of one animation must agree, or the blitter would
+                    # need a size per frame. chafa fits to the aspect ratio of
+                    # each frame independently, and a GIF whose frames differ
+                    # in size would otherwise produce a ragged array.
+                    if shape is None:
+                        shape = (w, h)
+                    elif (w, h) != shape:
+                        print(f"{pid} {cols}x{rows}: frame {idx} came out {w}x{h}, "
+                              f"want {shape[0]}x{shape[1]}", file=sys.stderr)
+                        continue
+                    frames.append(flat)
 
-        w, h = shape
-        sym = pid.upper().replace("-", "_")
-        for k, flat in enumerate(frames):
-            out.append(f"static {sym}_{k}: [Cell; {len(flat)}] = [{cells(flat)}];")
-        joined = ",".join(f"&{sym}_{k}" for k in range(len(frames)))
-        out.append(f"static {sym}_F: [&[Cell]; {len(frames)}] = [{joined}];")
-        out.append("")
-        rgb = tint(frames[0])
-        made.append((pid, sym, w, h, rgb))
-        print(f"{pid}: {w}x{h}, {len(frames)} frame(s) from {total}, "
-              f"-c {colours}, tint {rgb}", file=sys.stderr)
+                if not frames:
+                    print(f"skipping {pid} at {cols}x{rows}: chafa produced nothing",
+                          file=sys.stderr)
+                    continue
 
+                w, h = shape
+                if rgb is None:
+                    rgb = tint(frames[0])
+                sym = f"{pid.upper().replace('-', '_')}_{w}X{h}"
+                for k, flat in enumerate(frames):
+                    out.append(f"static {sym}_{k}: [Cell; {len(flat)}] = [{cells(flat)}];")
+                joined = ",".join(f"&{sym}_{k}" for k in range(len(frames)))
+                out.append(f"static {sym}_F: [&[Cell]; {len(frames)}] = [{joined}];")
+                out.append("")
+                made.append((pid, sym, w, h, rgb))
+                print(f"{pid}: {w}x{h} (bound {cols}x{rows}), {len(frames)} frame(s) "
+                      f"from {total}, -c {colours}, tint {rgb}", file=sys.stderr)
+
+    # Ordered largest first within each plate, which is the order `fit` walks.
     out.append(f"pub static PORTRAITS: [Portrait; {len(made)}] = [")
     for pid, sym, w, h, rgb in made:
         out.append(f'    Portrait {{ id: "{pid}", cols: {w}, rows: {h}, '
                    f"tint: ({rgb[0]}, {rgb[1]}, {rgb[2]}), frames: &{sym}_F }},")
     out.append("];")
     out.append("")
+    out.append("/// The largest bake of `id` that fits in `cols` x `rows`.")
+    out.append("///")
+    out.append("/// `None` when even the smallest does not fit, which is a caller's cue to")
+    out.append("/// hang the caption on its own rather than to draw a picture off the side")
+    out.append("/// of the screen. A plate cannot be scaled -- a sextant is not a pixel --")
+    out.append("/// so this picks between bakes instead of resizing one.")
+    out.append("pub fn fit(id: &str, cols: u16, rows: u16) -> Option<&'static Portrait> {")
+    out.append("    PORTRAITS")
+    out.append("        .iter()")
+    out.append("        .filter(|p| p.id == id && p.cols <= cols && p.rows <= rows)")
+    out.append("        .max_by_key(|p| p.cols as u32 * p.rows as u32)")
+    out.append("}")
+    out.append("")
+    out.append("/// The smallest bake of `id`, whatever the terminal is.")
+    out.append("///")
+    out.append("/// For the questions that are about the plate rather than about the size it")
+    out.append("/// is drawn at: whether this work has a picture at all, what colour it is,")
+    out.append("/// and whether it moves. Every tier of a plate shares those answers.")
     out.append("pub fn find(id: &str) -> Option<&'static Portrait> {")
-    out.append("    PORTRAITS.iter().find(|p| p.id == id)")
+    out.append("    PORTRAITS")
+    out.append("        .iter()")
+    out.append("        .filter(|p| p.id == id)")
+    out.append("        .min_by_key(|p| p.cols as u32 * p.rows as u32)")
     out.append("}")
 
     out.append("")

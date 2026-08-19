@@ -19,21 +19,104 @@ const MEASURE: u16 = 62;
 /// Between the portrait and the text.
 const GAP: u16 = 5;
 
+/// The contact row: whichever links exist, joined by a dot.
+///
+/// Built in one place because two things need it — the row itself, and the
+/// layout that has to leave room for the row — and a layout that measured the
+/// links separately from the way they are drawn would be one edit away from
+/// disagreeing with itself.
+fn contact_row(a: &About) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, s) in [&a.github, &a.email, &a.ssh].iter().filter(|s| !s.is_empty()).enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
+        }
+        spans.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
+    }
+    spans
+}
+
+fn row_width(spans: &[Span]) -> u16 {
+    spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16
+}
+
+/// How wide the text beside the portrait needs to be.
+///
+/// The prose sets to `MEASURE`, but the contact row is one line that must not
+/// wrap or clip, and three links do not fit a reading measure. So the block is
+/// as wide as its widest line and the paragraph is simply narrower than the
+/// block it sits in.
+///
+/// This exists because it went wrong: with the portrait at its old size the
+/// contact row happened to fit in what was left over, and the moment the
+/// picture got bigger the ssh line lost its last few characters off the right
+/// of the frame.
+fn text_width(a: &About) -> u16 {
+    MEASURE.max(row_width(&contact_row(a)))
+}
+
+/// Which bake of the portrait this screen can hang beside the text, if any.
+///
+/// The text block and the margins come first: whatever is left over is what
+/// the picture may have, and if that is not enough for even the smallest bake
+/// there is no picture. Dropped rather than squeezed — half a drawing beside a
+/// narrowed column is worse than no drawing.
+///
+/// Shared with `shell`, which needs the same answer to decide whether this
+/// section is still animating. Two independent guesses would let the loop stop
+/// while the plate was still asking for frames.
+pub fn plate(area: Rect, a: &About) -> Option<&'static crate::portraits::Portrait> {
+    crate::portraits::fit(
+        "snufkin-home",
+        area.width.saturating_sub(text_width(a) + GAP + 8),
+        area.height.saturating_sub(2),
+    )
+}
+
+/// Where the two columns of this screen sit.
+///
+/// Worked out in one place so the test below can check the result rather than
+/// re-deriving it, which is the only way that check is worth anything.
+struct Columns {
+    /// The portrait's width, or zero when there is no room for one.
+    art: u16,
+    /// Left edge of the portrait, and of the whole block.
+    art_x: u16,
+    /// Left edge of the text.
+    text_x: u16,
+    /// What the prose wraps to.
+    measure: u16,
+    /// What the contact row has, which is the rest of the frame.
+    contact: u16,
+}
+
+fn columns(area: Rect, a: &About) -> Columns {
+    let art = plate(area, a).map_or(0, |p| p.cols);
+    let gap = if art > 0 { GAP } else { 0 };
+    let room = area.width.saturating_sub(8 + art + gap);
+    let measure = MEASURE.min(room);
+    // Centred on the block's widest line rather than on the paragraph, so the
+    // contact row gets the columns it needs instead of whatever the prose left
+    // behind.
+    let block = art + gap + measure.max(text_width(a).min(room));
+    let art_x = area.x + (area.width.saturating_sub(block)) / 2;
+    let text_x = art_x + art + gap;
+    Columns {
+        art,
+        art_x,
+        text_x,
+        measure,
+        contact: (area.x + area.width).saturating_sub(text_x).saturating_sub(1),
+    }
+}
+
 pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     if area.width < 24 || area.height < 8 {
         return;
     }
-    let face = crate::portraits::find("snufkin-home");
-    // The portrait is dropped rather than shrunk on a narrow terminal: half a
-    // drawing beside a squeezed column is worse than no drawing.
-    let aw = match face {
-        Some(m) if area.width >= m.cols + MEASURE + GAP + 8 => m.cols,
-        _ => 0,
-    };
-    let w = MEASURE.min(area.width.saturating_sub(8 + aw + GAP));
-    let block = aw + if aw > 0 { GAP } else { 0 } + w;
-    let x0 = area.x + (area.width.saturating_sub(block)) / 2;
-    let x = x0 + aw + if aw > 0 { GAP } else { 0 };
+    let face = plate(area, a);
+    let c = columns(area, a);
+    let (aw, x0, x, w) = (c.art, c.art_x, c.text_x, c.measure);
 
     let pitch = wrap(&a.pitch, w as usize);
     let now = wrap(&a.now, w as usize);
@@ -45,8 +128,10 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
         if let Some(m) = face {
             // Loops while somebody is arriving and then holds. See the note
             // in museum.rs: a looping plate is ~136 KB/s for as long as the
-            // tab is open, and this is the first screen anybody sees.
-            let frame = crate::paint::portrait_loop(m, t, t < crate::museum::LIVELY);
+            // tab is open, and this is the first screen anybody sees. How long
+            // it runs comes from the size of the bake, so a wide window buys a
+            // bigger picture rather than a dearer one.
+            let frame = crate::paint::portrait_loop(m, t, t < crate::paint::lively_for(m));
             crate::paint::portrait(f, area, x0, y, frame, m.cols);
         }
     }
@@ -103,20 +188,14 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     }
 
     y += 1;
-    let mut links: Vec<Span> = Vec::new();
-    for (i, s) in [&a.github, &a.email, &a.ssh].iter().filter(|s| !s.is_empty()).enumerate() {
-        if i > 0 {
-            links.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
-        }
-        links.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
-    }
+    let links = contact_row(a);
     // The contact row is the one line that must not wrap or clip, and three
-    // links do not fit the prose measure. It gets the rest of the frame.
+    // links do not fit the prose measure. It gets the rest of the frame, and
+    // `columns` is what guarantees the rest of the frame is enough.
     if y < area.y + area.height {
-        let lw = (area.x + area.width).saturating_sub(x).saturating_sub(1);
         f.render_widget(
             Paragraph::new(Line::from(links)),
-            Rect { x, y, width: lw, height: 1 },
+            Rect { x, y, width: c.contact, height: 1 },
         );
     }
 }
@@ -176,4 +255,67 @@ pub fn help(f: &mut Frame, area: Rect) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), popup);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::about;
+
+    fn shipped() -> About {
+        about::parse(include_str!("../data/about.txt"))
+    }
+
+    /// The contact row is the one line on this screen that must not clip, and
+    /// it is the last thing to get columns — so it is what breaks when the
+    /// portrait grows. It did break: raising the portrait to its larger bake
+    /// took the closing bracket off `ssh -p 2222 <this-host>` and nothing
+    /// failed. Whenever a portrait is drawn at all, the row it shares the frame
+    /// with has to fit.
+    #[test]
+    fn a_portrait_is_never_wide_enough_to_clip_the_contact_row() {
+        let a = shipped();
+        // Measured off the row itself, not off the layout's opinion of it —
+        // asking `text_width` how much room the row needs would make this test
+        // agree with any answer that function gave, including a wrong one.
+        let need = row_width(&contact_row(&a));
+        assert!(need > MEASURE, "the shipped links now fit a reading measure, \
+                                 so this test no longer proves anything");
+        for width in 24..=320u16 {
+            let c = columns(Rect { x: 0, y: 0, width, height: 50 }, &a);
+            if c.art == 0 {
+                continue; // no picture is the escape hatch, and it is allowed
+            }
+            assert!(
+                c.contact >= need,
+                "at {width} columns the portrait is {} wide and leaves the \
+                 contact row {} for {need}",
+                c.art,
+                c.contact,
+            );
+        }
+    }
+
+    /// And the picture has to actually appear once there is room, or the second
+    /// bake is dead weight in the binary.
+    #[test]
+    fn the_portrait_grows_with_the_window_and_leaves_when_it_cannot_fit() {
+        let a = shipped();
+        let wide = columns(Rect { x: 0, y: 0, width: 220, height: 50 }, &a);
+        let narrow = columns(Rect { x: 0, y: 0, width: 96, height: 50 }, &a);
+        assert!(wide.art > 0, "no portrait on a 220-column terminal");
+        assert_eq!(narrow.art, 0, "a 96-column terminal still tried to hang one");
+
+        // The prose keeps its measure whatever the picture does: it is a
+        // reading column, not a leftover.
+        assert_eq!(wide.measure, MEASURE);
+    }
+
+    /// A short window has no room for the portrait's rows however wide it is.
+    #[test]
+    fn a_shallow_window_drops_the_portrait_too() {
+        let a = shipped();
+        let c = columns(Rect { x: 0, y: 0, width: 240, height: 14 }, &a);
+        assert_eq!(c.art, 0, "hung a portrait in 14 rows");
+    }
 }

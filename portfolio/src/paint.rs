@@ -25,6 +25,51 @@ pub const CYAN: Color = Color::Rgb(110, 224, 255);
 /// read as choppier for it.
 pub const PORTRAIT_FPS: f64 = 6.0;
 
+/// The longest a plate ever loops for after somebody arrives at it.
+///
+/// Bounded motion is the rule this project has broken and re-measured twice,
+/// so the thing held constant is not the duration but what one arrival costs
+/// to download. `lively_for` divides this budget by the size of the plate:
+/// nine seconds is what the middle tier gets, and it is the ceiling rather
+/// than the setting.
+pub const LIVELY: f64 = 9.0;
+
+/// Short of this a loop is over before it has registered as motion, so a plate
+/// too large to afford its share of the budget gets this much anyway and costs
+/// what it costs. At 6 fps it is eighteen frames: one whole pass.
+const LIVELY_MIN: f64 = 3.0;
+
+/// The plate the budget was set against, in cells: 64x24 for `LIVELY` seconds.
+///
+/// Measured over a real WebSocket at 176x44, that arrival is ~130 KB/s while
+/// the loop runs and 1.2 MB by the time it settles. The same walk onto the
+/// 104x40 bake at 200x56 runs at ~285 KB/s and stops after three seconds:
+/// 1.0 MB, which is 0.84x the cost of the smaller picture for 2.7x the cells.
+/// Both go quiet at 0.2 KB/s afterwards. That is the whole point of deriving
+/// the duration rather than fixing it — turning up with a big window buys a
+/// bigger picture and not a longer download.
+const LIVELY_CELLS: f64 = 64.0 * 24.0;
+
+/// How long this plate should keep looping after somebody arrives at it.
+///
+/// Zero for a photograph: there is nothing to loop, and repainting a still
+/// image at six frames a second is bandwidth spent to show somebody exactly
+/// what they are already looking at.
+///
+/// Otherwise the budget above, divided by how much of the screen the plate
+/// covers. A cell costs roughly the same wherever it is, so a plate with three
+/// times the cells costs three times as much a second and gets a third as long
+/// — which keeps the megabyte-per-arrival figure roughly flat across the tiers
+/// instead of letting it scale with whatever size terminal somebody turned up
+/// with.
+pub fn lively_for(p: &portraits::Portrait) -> f64 {
+    if p.frames.len() <= 1 {
+        return 0.0;
+    }
+    let cells = p.cols as f64 * p.rows as f64;
+    (LIVELY * LIVELY_CELLS / cells.max(1.0)).clamp(LIVELY_MIN, LIVELY)
+}
+
 /// Which frame is showing at `t`, looping while `alive` and holding after.
 ///
 /// The museum wants a loop for as long as somebody has just arrived at a work
