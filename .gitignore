@@ -1,5 +1,6 @@
 # Build output.
 target/
+__pycache__/
 
 # Snapshots. Every rendering decision in here was checked by dumping a frame to
 # PNG (see map/scripts/ansi2png.py); none of those frames are source.
