@@ -62,7 +62,9 @@ pub enum Sent {
     Ok,
     Empty,
     TooLong(usize),
-    Unwritable(String),
+    /// Could not be saved. Carries nothing: the reason is already in the
+    /// container's log, and there is nothing the visitor could do with it.
+    Unwritable,
 }
 
 /// Append one message. `who` may be empty; `from` is the transport's idea of
@@ -93,16 +95,29 @@ pub fn leave(who: &str, body: &str, from: &str) -> Sent {
     let p = path();
     if let Some(dir) = p.parent() {
         if !dir.as_os_str().is_empty() && !dir.exists() {
-            return Sent::Unwritable(format!("{} does not exist", dir.display()));
+            eprintln!("portfolio: {} does not exist, message not saved", dir.display());
+            return Sent::Unwritable;
         }
     }
     match OpenOptions::new().create(true).append(true).open(&p) {
         Ok(mut f) => match writeln!(f, "{line}") {
             Ok(()) => Sent::Ok,
-            Err(e) => Sent::Unwritable(e.to_string()),
+            Err(e) => unwritable(&p, e),
         },
-        Err(e) => Sent::Unwritable(e.to_string()),
+        Err(e) => unwritable(&p, e),
     }
+}
+
+/// Report a message that could not be saved.
+///
+/// The visitor is told plainly that it did not save and pointed at the email
+/// address; the reason goes to stderr, which is the container's log. They
+/// cannot act on an errno and the operator cannot act on anything else --
+/// and a message box that has quietly stopped accepting messages is exactly
+/// the failure worth being loud about.
+fn unwritable(p: &std::path::Path, e: std::io::Error) -> Sent {
+    eprintln!("portfolio: cannot write {}: {e}", p.display());
+    Sent::Unwritable
 }
 
 #[cfg(test)]
@@ -142,7 +157,7 @@ mod tests {
         // A missing directory is reported rather than swallowed, so the
         // visitor is told their message did not go anywhere.
         std::env::set_var("PORTFOLIO_MESSAGES", "/nope/definitely/not/here/m.jsonl");
-        assert!(matches!(leave("", "hello", "ssh"), Sent::Unwritable(_)));
+        assert!(matches!(leave("", "hello", "ssh"), Sent::Unwritable));
 
         std::env::remove_var("PORTFOLIO_MESSAGES");
         let _ = std::fs::remove_dir_all(&dir);

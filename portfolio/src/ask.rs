@@ -187,7 +187,7 @@ impl Ask {
                  email address on the home page.",
                 crate::reach::MAX_LEN
             ),
-            Sent::Unwritable(_) => "That did not save -- the message box is not \
+            Sent::Unwritable => "That did not save -- the message box is not \
                                     reachable from here. The email address on the \
                                     home page still works."
                 .to_string(),
