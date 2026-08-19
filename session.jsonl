@@ -1,0 +1,3643 @@
+╭─── Claude Code v2.1.234 ─────────────────────────────────────────────────────╮
+│                                    │ Tips for getting started                │
+│          Welcome back JD!          │ Run /init to create a CLAUDE.md file w… │
+│                                    │ ─────────────────────────────────────── │
+│               ▐▛███▜▌              │ What's new                              │
+│              ▝▜█████▛▘             │ Added the optional `CLAUDE_CODE_PROJEC… │
+│                ▘▘ ▝▝               │ Added the `selection:clear` keybinding… │
+│                                    │ Added a GitLab merge request badge to … │
+│   Opus 5 · Claude Team · Gateway   │ /release-notes for more                 │
+│        ~/projects/terminal         │                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+  ⎿  SessionStart:startup hook error
+  ⎿  Failed with non-blocking status code: Traceback (most recent call last):
+
+❯ okay im trying to make a terminal based portfolio/resume which will be        
+  interective and used over ssh domain.                                         
+  i wanted to use an actual map to show landmarks for experience and studies.   
+  also about me. which is built.                                                
+                                                                                
+  now i want to focus on making the skills and project part.                    
+                                                                                
+  we are making these as seprate apps then we will combine them.                
+                                                                                
+  you have all the porject details @topics.md and also have gh                  
+  ⎿  Read topics.md (89 lines)
+
+  Listed 2 directories, ran 9 shell commands (ctrl+o to expand)
+
+● Before I write code — I dug through what's here. Findings first:
+
+  What exists
+  - map/ — the built Rust/ratatui app. 5.2k lines, braille subpixel canvas with
+  coverage+depth, PMTiles streaming, 2.5D relief. canvas.rs, raster.rs,
+  labels.rs are explicitly documented as map-agnostic and reusable.
+  - projects/ skills/ experience/ archive/ rickroll/ — all empty.
+  - ~/projects/ssh/ — a prior Go/bubbletea SSH resume server (sshd with rate
+  limiting, guestbook, themes, boot animation, -shot frame renderer). Its
+  resume.json is placeholder data ("Devon Null"), and it already has
+  skills/projects sections.
+
+  Two problems that block real content
+  1. topics.md is corrupted — entries 4–8 have text dropped mid-sentence (e.g.
+  "text, im small phone-facing web app lets you push to any machine from a 
+  browser. Each machine runsthe Tailscale interface"). Looks like a
+  column-truncation. Only netjail, watch-party, and logify survived intact.
+  2. gh is unauthenticated (token no longer valid) and the sandbox proxy is
+  breaking TLS anyway. Local clones exist for netjail, gitswitch, 
+  coolify-logs/logify, watch_party — the other four (clip, Noter, vcs,
+  stylized-maps) aren't on this machine.
+
+  So I can derive real numbers for half the projects locally; the rest needs
+  either ! gh auth login from you or a fixed topics.md.
+
+  Four decisions I don't want to guess at:
+
+● User declined to answer questions
+  ⎿  · What stack for the skills and projects apps? (Rust + ratatui 
+     (Recommended) / Go + bubbletea / Rust apps, keep Go SSH host)
+     · What should the skills app actually be? (Constellation graph / Commit 
+     timeline / Treemap by real LOC / Skill tree (RPG))
+     · What should the projects app be? (Browser + bespoke diagram / 
+     Architecture from source / Card gallery + detail)
+     · Where should the content come from? (Fix topics.md, hand-author a 
+     TOML/JSON / Derive from local clones / GitHub API / Placeholder now, wire 
+     real data later)
+
+● Got it — Rust + ratatui is locked in.
+
+  What would you like to clarify before we settle the rest?
+
+  For context on where I'm coming from with the other three:
+
+  - Skills — my hesitation is that every option I listed is a chart. The map
+  app's whole thesis is "the rendering does real work, and the data is honest."
+  A skills chart with self-assessed levels would be the one slop-shaped thing in
+  an otherwise rigorous portfolio. So I leaned toward things derived from git
+  rather than typed by hand. If you already have a picture in your head, that
+  beats any of my four.
+  - Projects — the bespoke-diagram option is genuinely 8 separate small builds.
+  Worth knowing whether you want that scale or a browser that ships this week.
+  - Data — this one's a real blocker, not a preference: topics.md is missing
+  whole clauses for clip / Noter / gitswitch / vcs / stylized-maps, gh won't
+  authenticate, and only 4 of the 8 repos are on this machine. Whatever we build
+  needs something to read.
+
+  Ask away — or tell me which part you already have a strong opinion on and I'll
+  re-ask only around the gaps.
+
+✻ Brewed for 2m 52s
+
+❯ ---                                                                           
+                                                                                
+  ### 1. netjail — `github.com/Prince2412k2/netjail`                            
+  **Run any command with only its network sandboxed.**                          
+                                                                                
+  A Linux sandbox that isolates what a process can reach on the network while   
+  leaving everything else untouched — same filesystem, same `$HOME`, same       
+  binaries, same user. No container, no VM, no volume mounts, no copied files.  
+  Enforcement is a real network namespace with a veth pair and nftables         
+  default-drop, plus a local filtering proxy that can allow or refuse           
+  **individual HTTPS paths**, not just whole hosts. Includes a DNS proxy, CA    
+  injection into the system trust path, and blocking of the host daemon sockets 
+  that would otherwise bypass the namespace.                                    
+                                                                                
+  Go · 16,700 LOC · 28 packages · 6,100 lines of tests (37%) · design doc with  
+  threat model, 16k-word manual, installer, systemd units                       
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 2. watch-party — *private*                                                
+                                                                                
+  **Self-hosted synchronized movie nights, frame-accurate across devices.**     
+                                                                                
+  A watch-party platform over a Jellyfin media library: a web client and a      
+  native Flutter desktop app (macOS/Windows/Linux) stay in sync to within ~120  
+  ms p95 while playing the same title, with LiveKit voice chat and a Servarr    
+  integration (Sonarr/Radarr/qBittorrent/TMDB) for pulling in titles that       
+  aren't in the library yet.                                                    
+                                                                                
+  The interesting part is the sync engine. One pure decision core is mirrored   
+  in JavaScript and Dart and held equivalent by generated JSON conformance      
+  vectors run in both CIs. On top of it: a monotonic clock with                 
+  outlier-rejected, uncertainty-weighted offset estimation and a Theil–Sen skew 
+  term; a PI rate controller on a certainty-gated error so it can't chase       
+  noise it can't measure; cost-modeled seeks executed as aim-ahead rendezvous   
+  plans to avoid HLS chase loops; and a graduated stall ladder instead of a     
+  binary freeze. Drift and rate-flutter targets are stated as SLOs and asserted 
+  by a scenario test harness.                                                   
+                                                                                
+  Dart + JavaScript/TypeScript · ~115k LOC · 471 commits · 152 test files ·     
+  scenario harness with 11 suites                                               
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 3. logify + coolify_logs — `github.com/Prince2412k2/logify` ·             
+  `github.com/Prince2412k2/coolify_logs`                                        
+                                                                                
+  **Live container logs from a Coolify host, in your terminal.**                
+                                                                                
+  Two halves of one tool. **coolify_logs** is the gateway that runs on the      
+  Docker host: a FastAPI service exposing REST and WebSocket endpoints for live 
+  container logs, with an admin UI for issuing API keys and scoping which       
+  containers each key can see, plus a browser UI for viewing them. **logify**   
+  is the client — a Go TUI that browses projects and streams logs, shipped as a 
+  single static binary with one-line installers for macOS, Linux, and Windows.  
+                                                                                
+  Go + Python · 4 tagged releases · CI · Docker Compose · reverse-proxy docs    
+  for Coolify, Nginx, and Traefik                                               
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 4. clip — `github.com/Prince2412k2/clip`                                  
+                                                                                
+  **Copy on one machine, paste on another — over your own tailnet.**            
+                                                                                
+  A targeted cross-platform clipboard for a personal Tailscale fleet. Copy      
+  something on your laptop and it lands on a *selected* target machine's        
+  clipboard: text, images, or files up to 20 MB. A small phone-facing web app   
+  lets you push to any machine from a browser. Each machine runs a daemon that  
+  binds only to the Tailscale interface — never `0.0.0.0` — so Tailscale's      
+  encryption and ACLs *are* the trust boundary, with no application-level auth  
+  to get wrong.                                                                 
+                                                                                
+  Two correctness invariants are stated up front and unit-tested: content       
+  received and written to the clipboard is never echoed back (no A→B→A loop),   
+  and identical repeats are deduped by content hash.                            
+                                                                                
+  Go, stdlib only, no cgo · single static binary · spec, plan, and design docs  
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 5. Noter — `github.com/Prince2412k2/Noter`                                
+                                                                                
+  **A terminal notepad that keeps its own history.**                            
+                                                                                
+  A quick-access note-taking TUI built on Python curses and DuckDB, using your  
+  own `$EDITOR` (nvim) for actual editing rather than reimplementing one. Every 
+  change is committed to git behind the scenes, so notes have a real dated      
+  version history you can browse from inside the app, and it fires native       
+  system notifications.                                                         
+                                                                                
+  Python · curses + DuckDB · git-backed versioning · screenshots in the README  
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 6. gitswitch — `github.com/Prince2412k2/gitswitch`                        
+                                                                                
+  **Stop committing with your work email on personal projects.**                
+                                                                                
+  Manages multiple git identities and their SSH keys. Profiles live as TOML in  
+  `~/.config/git_conf/`; pick one interactively and it rewrites the current     
+  repo's local `.git/config` and sets `core.sshCommand` so the right key is     
+  used per repo. Solves the specific problem of having two GitHub accounts on   
+  one machine.                                                                  
+                                                                                
+  Go · v1.0.0 tagged · interactive TUI forms                                    
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 7. vcs — `github.com/Prince2412k2/vcs`                                    
+                                                                                
+  **Git, rebuilt from scratch in Python, to find out how it actually works.**   
+                                                                                
+  A working toy version-control system implementing the real plumbing: `init`,  
+  `commit`, `log`, `checkout`, `merge`, `reset`, and `cat-file`.                
+  Content-addressed object store, no network, no libraries doing the hard part. 
+  Written after reading the Git internals docs, as a way to stop treating git   
+  as a black box.                                                               
+                                                                                
+  Python · pip-installable · deliberately not for production                    
+                                                                                
+  ---                                                                           
+                                                                                
+  ### 8. stylized-maps — `github.com/Prince2412k2/stylized-maps`                
+                                                                                
+  **A custom vector-tile pipeline for stylized maps of India.**                 
+                                                                                
+  An end-to-end map asset pipeline: OSM extracts through Planetiler (with       
+  custom Java profiles) into vector tiles against a versioned normalized        
+  schema, served by a TypeScript API with an OpenAPI spec, rendered by a web    
+  client with hand-built cartographic styling. Ships with a resource-governed   
+  build CLI (`map-assets start/pause/resume`, with auto/full/manual CPU and RAM 
+  profiles) because the full build is heavy. Production deployment via Docker   
+  Compose behind Caddy.                                                         
+                                                                                
+  Python + TypeScript + Java · in progress                                      
+                                                                                
+  ---                                                                           
+                                                                                
+  i want to have skills its terminal art, and how where i got tht skill from.   
+  make it interactive.                                                          
+
+● Fixed content saved first.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 8 entries are now intact in topics.md (corrupt version backed up to
+  scratchpad).
+
+  Now — "terminal art + where I got the skill from + interactive" is a much
+  better brief than any of my four chart options. Three things I need pinned
+  down:
+
+● User answered Claude's questions:
+  ⎿  · What form should the terminal art take? → Constellation sky
+     · When someone selects a skill, what does "where I got it from" show? → A 
+     short story per skill
+     · Who writes the skill list? → I draft it, you cut it
+
+● Locked: Rust + ratatui · constellation sky · a story per skill · I draft the 
+  inventory.
+
+  Reading the modules I'll be building on so the sky matches the map's rendering
+  exactly.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Everything I need. Building now — starting with the crate and the content
+  file.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+● Now the Rust source. Starting with the canvas — a trimmed sibling of the
+  map's, so the two merge cleanly later.
+
+  Read 4 files, ran 1 shell command (ctrl+o to expand)
+
+● Now the drawing module — the actual art.
+
+  Searched for 2 patterns, read 4 files, ran 7 shell commands (ctrl+o to expand)
+
+● All 30 tests pass. Now the part that actually matters — what it looks like.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Too noisy — the dust is drowning the actual sky. Let me isolate.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Structure's there but the sky's collapsed into itself and the stars are blobs.
+  Fixing the five things that are wrong.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Two real bugs surfaced: the dust doesn't thin when you zoom in, and --focus
+  fits against a viewport that doesn't exist yet. Fixing both properly.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The framing rule needs real numbers, not a guess. Adding a layout inspector —
+  the user will need it anyway when they move anchors around.
+
+  Ran 1 shell command (ctrl+o to expand)
+● The inspector shows the real problem: small projects are mostly made of shared
+  stars, so their anchors don't describe them. Two fixes.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Found it: two-project stars sit exactly halfway between anchors, so they
+  belong to neither neighbourhood. The sheet already says the first-listed
+  project is where the story happened — the layout should respect that.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The two-project stars are still stretching the box. Making the focus box
+  robust to outliers instead of bounding them.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Found it — the fit padding was eating half the vertical space, so every fit
+  was height-starved.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The layout is right — the label rule was wrong. Focusing a project has to name
+  that project's skills; that's the whole point.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Let me actually look at it in colour rather than guessing from glyphs.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Now I can see it — everything's too dark, the sky reads as empty. Rebalancing
+  the fog and the faint tints.
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● Good. Fixing the panel gutter, the dead code, and making the dust band
+  actually read as a band.
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● The band reads now. Checking the remaining screens.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Real bug: --find returns 0 matches — the snapshot was faking a keypress
+  instead of setting the query. Fixing that and the narrow overlay sizing.
+
+  Ran 1 shell command (ctrl+o to expand)
+● Search matches stories by substring, so "go" ranks "defaults go wrong"
+  alongside the Go star. Ranking the results.
+
+  Read 2 files, ran 7 shell commands (ctrl+o to expand)
+
+● Help reads well. Now the README, in the same voice as the map's.
+
+  Ran 10 shell commands (ctrl+o to expand)
+
+● One real robustness gap: in search mode any modified key types into the query,
+  so Ctrl-C can't get you out.
+
+  Read 1 file, ran 7 shell commands (ctrl+o to expand)
+
+● Let me ground the years in the actual repos rather than my guesses.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Real dates: everything is 2026, not 2025 — my years were wrong. Correcting
+  from the actual git history where it exists.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The skills app is built and working: skills/ — skysheet, 3,642 lines of Rust,
+  37 tests, clippy clean.
+
+  What it does
+
+  Nine constellations (one per project, termap included), 59 stars (one per
+  skill). Selecting a star opens its story in a side panel. Star positions
+  aren't typed in — every star is sprung toward the anchor of each project
+  claiming it and repelled by every other star, then run to rest. Go sits 
+  between netjail, clip, logify and gitswitch with four dashed lines still 
+  reaching back to them. That's the provenance argument made structurally rather
+  than in a caption.
+
+  Brightness is 0.16 + 0.19·(projects−1) + 0.15·(load-bearing) — a count off the
+  sheet, checkable against the repos. Nothing in the render is a self-assessed
+  score.
+
+  1–9 focus a project · n/p walk · / search (ranked: exact name beats prose, so
+  "go" finds Go, not every algorithm) · esc backs out one layer at a time ·
+  drag/wheel/click.
+
+  Things that fought back
+
+  - Two-project skills settled exactly halfway between anchors — inside neither
+  figure, so focusing a project put its most important skill off-screen. The
+  sheet already names where the story happened; the spring now leans 2.6:1
+  toward it.
+  - Focus framed the gaps, not the figure. Bounding-boxing everything a project
+  claims zooms out until its eight real skills are a smudge. It's now a
+  percentile radius over what that project taught, with shared skills left
+  hanging off the edge, lines pointing at them.
+  - Fit padding was in subpixels but sized like cells, eating half the vertical
+  space, so every fit was height-starved. That was the actual cause of several
+  "the layout is wrong" symptoms.
+  - --find returned 0 matches — the snapshot path was faking a keypress instead
+  of setting the query.
+  - Search accepted chords as text, so Ctrl-C typed itself into the query
+  instead of quitting.
+
+  Verified interactively by driving a real pty key-by-key (search, focus, walk,
+  pan/zoom, all exit clean).
+
+  Two things you need to correct
+
+  The stories are drafts. About half restate something your documents actually
+  say — nftables' docker socket, watch-party's certainty-gated error, every
+  termap entry. The rest (dns-proxy, webrtc, all of logify's and Noter's, the
+  shared spine like go/python/testing) are plausible reconstructions I invented.
+  They're flagged as such at the top of data/skills.sky.
+
+  Your years were 2025 in my first draft; they're all 2026. I pulled real dates
+  from the clones on this machine — netjail Jul 2026, gitswitch Apr 2026,
+  watch-party Jun–Aug 2026 (471 commits, matching topics.md exactly), logify
+  Mar–Jun 2026. clip, Noter, vcs and stylized-maps aren't checked out here, so
+  those years are still guesses.
+
+  Editing data/skills.sky is the whole content workflow — 2-space indent starts
+  a key, 4+ continues it. skysheet --layout netjail shows where every star
+  drifted and why, so you can tune the at anchors without guessing.
+
+  I have not started the projects app yet — say the word and I'll pick up the
+  concept question for it.
+
+✻ Crunched for 47m 17s
+
+※ recap: You're building a terminal SSH portfolio; the skills app (a constellation sky in Rust) is now done and working. Next: decide the concept for the projects app so I can start building it. (disable recaps in /config)
+
+❯ okay we can merge project and skills                                          
+                                                                                
+  also we dont need side bar.                                                   
+  we can click on project and then it will show in the main window, we will     
+  zoom into tht project and fade bits of the window and show our project name   
+  and description.                                                              
+                                                                                
+  and skills surrounding them.                                                  
+
+● Good — that's a better shape than the sidebar. Merging them into one app, with
+  the sky itself as the reading surface.
+
+  Three things have to change together: the sheet needs the project copy, the
+  layout needs to leave a hole for it, and the panel has to go.
+
+  Ran 3 shell commands (ctrl+o to expand)
+● The ring works. Now making it elliptical to match a terminal's aspect — a
+  wide, short project card wants a wide, short ring around it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the reading surface. Writing the card module and tearing out the sidebar.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Now replacing ui.rs — the sidebar goes, the sky becomes the whole window.
+
+  Ran 5 shell commands (ctrl+o to expand)
+
+● Two real regressions from the merge. Fixing both.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Working. Three fixes: lang duplicates stats, the sky goes too empty when
+  zoomed in, and the focused project's own label competes with its card.
+
+  Read 2 files, ran 4 shell commands (ctrl+o to expand)
+
+● The names drifted off their constellations — with rings, a project's name
+  belongs in the hole in the middle. And the anchors are now spread far wider
+  than the rings need.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The names want to sit dead-centre in their ring, and the placer can't do that.
+  Drawing them directly instead — there are only nine, and they're the most
+  important text on the screen.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Rings now read as rings, with each project's name centred in its own. Checking
+  the opened view.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Small projects come out lopsided — the ring angle is hashed, so three stars
+  can land in one arc. Seeding by position within the project instead.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+❯ something like this [Image #2]                                                
+  ⎿  [Image #2]
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ where the empty part will be the consilation of that project. with its skils  
+
+● That's clearer — text in the corner, the constellation gets the open space.
+  Reworking the composition.
+
+  Ran 2 shell commands (ctrl+o to expand)
+❯ also a bit of fade                                                            
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Matches the sketch. Nudging the figure to sit better in the L-shaped free
+  area, and deepening the fade as you asked.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The ring is lopsided — shared skills are allotted ring slots then dragged
+  away, leaving gaps. Dealing slots only to the skills a project has to itself.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Narrow terminals need a different call — the description alone fills the
+  screen. Making the card responsive and the framing three-way.
+
+  Read 1 file, ran 7 shell commands (ctrl+o to expand)
+
+● The short skill card leaves most of the frame free, but the framing only ever
+  looked sideways. Preferring the space below when there's more of it.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● One inconsistency worth fixing: walking to a skill can select a star that's
+  off-frame, and the camera never re-frames when the text block changes shape.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Tests green. Rewriting the README — the merge changed most of its claims.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Merged. One app now — skysheet covers both projects and skills, sidebar gone.
+
+  How it works now
+
+  Whole sky → nine constellations, each project's name set dead centre of its
+  own ring. Hovering a name shows its one-liner in the status bar; clicking it
+  opens the project.
+
+  Project open → the camera flies in and offsets the constellation, so the
+  description sets in the top-left corner and the ring of skills sits in the
+  space left over. The sky fades out under the text on a four-step ramp — a hard
+  edge would read as a box, and the whole point is that there is no panel.
+
+  Skill open → same frame, the description swaps for that skill's story, and its
+  own star lights cyan on the ring so you can see which one you're reading.
+
+  esc backs out one layer at a time: query → skill → project → sky.
+
+  What the merge forced
+
+  Your sketch changed the geometry, not just the layout:
+
+  - Rings. The layout springs now have a rest length, so a project is a ring
+  rather than a blob. It's an ellipse (~42×25) because a terminal and a
+  paragraph are both far wider than they are tall — a circle sized to clear text
+  horizontally is twice as tall as the frame.
+  - Only exclusive skills get ring slots. Dealing a slot to a shared skill
+  leaves a gap where it gets dragged away from, and the ring comes out as an arc
+  with bites missing. Those seed at their own centre of gravity and end up
+  outside the figure with a line still reaching back.
+  - Names became the click target. A star is two subpixels across and its label
+  is fifteen cells; asking someone to hit the star is asking them to hit the
+  wrong thing.
+  - The camera is placed by the typography. It picks whichever arm of the
+  L-shaped free space is bigger — beside the text on a wide terminal, below it
+  when the block is short, overlapping (pushed down-right) when neither fits.
+
+  Three real bugs surfaced on the way: walking to a skill could select a star
+  that was off-frame (nothing lit up — now the camera nudges the minimum amount
+  after framing); the framing never updated when the text block changed shape
+  between a 16-row project and a 7-row story; and the per-skill year field said
+  "2026" 59 times, so it's gone.
+
+  Also dropped lang — stats already began with the languages, and two fields
+  saying the same thing will eventually disagree.
+
+  45 tests, clippy clean, verified key-by-key through a real pty at 130×38 and
+  82×24.
+
+  Two things for you:
+
+  1. projects/ is still an empty directory and projects now live in skills/.
+  Want me to rename it to something neutral like sky/?
+  2. The stories are still my drafts — roughly half restate what your documents
+  say, the rest are reconstructions. Flagged at the top of data/skills.sky.
+
+✻ Worked for 12m 24s
+
+※ recap: Goal: build a terminal SSH portfolio; the merged projects-and-skills app (skysheet) is done and tested. Next: decide whether to rename the skills/ directory now that projects live there, then move on to remaining sections. (disable recaps in /config)
+
+❯ give me list of skills we showed here                                         
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 59, grouped by the project whose story tells how the skill was learned.
+  also: means another project claims it too — those are the stars pulled off the
+  ring with lines reaching back. Every one is starred (*), i.e. marked
+  load-bearing where it was learned.
+
+  termap — 12
+  Rust · subpixel rendering · ordered dithering · z-buffering · oblique &
+  perspective projection · Web Mercator (also stylized-maps) · PMTiles · vector
+  tiles (also stylized-maps) · heightmaps & hillshading · label placement ·
+  hand-parsed binary formats (also vcs) · terminal UI design (also logify, 
+  Noter, gitswitch)
+
+  netjail — 11
+  network namespaces (also clip) · veth pairs · nftables · DNS proxying · CA
+  injection · path-level filtering · threat modelling (also clip) · systemd
+  units (also logify) · Go (also clip, logify, gitswitch) · technical writing
+  (also termap, clip) · testing discipline (also watch-party, clip)
+
+  watch-party — 9
+  clock synchronization · Theil–Sen estimation · PI control · conformance
+  vectors · pure decision cores · adaptive streaming · WebRTC / LiveKit ·
+  SLO-driven testing (also netjail) · Flutter / Dart
+
+  logify — 7
+  FastAPI · WebSockets · Docker API · scoped API keys · reverse proxies (also 
+  stylized-maps) · shipping binaries (also clip, gitswitch, netjail) · Docker &
+  Compose (also stylized-maps, netjail)
+
+  stylized-maps — 6
+  Planetiler profiles · versioned tile schemas · OpenAPI · resource-governed
+  builds · cartographic styling (also termap) · TypeScript (also watch-party)
+
+  Noter — 5
+  curses · DuckDB · $EDITOR handoff · desktop notifications · Python (also vcs, 
+  logify, stylized-maps)
+
+  vcs — 3
+  content-addressed storage · three-way merge · git internals (also gitswitch, 
+  Noter)
+
+  gitswitch — 3
+  git config internals · SSH key management · interactive forms (also logify, 
+  Noter)
+
+  clip — 3
+  Tailscale as trust boundary · cross-platform clipboard · stated invariants
+  (also watch-party)
+
+  The brightest stars are the ones several projects lean on — Go (4 projects),
+  terminal UI design (4), Python (4), shipping binaries (4), technical writing
+  (3), testing discipline (3), Docker & Compose (3), git internals (3).
+
+  Two gaps worth your judgement: clip, vcs and gitswitch have only three own 
+  skills each, so their rings are sparse — if there's more in those repos worth
+  naming, they'd fill out. And there's no skill covering anything you did before
+  these nine projects, so the sky currently says your career started in 2026.
+
+✻ Baked for 51s
+
+※ recap: You're building a terminal portfolio served over SSH; the merged projects-and-skills app (skysheet) is done and working, with 59 skills across 9 projects. Next: decide whether to rename skills/ to sky/, or fill out the sparse clip, vcs and gitswitch skill lists. (disable recaps in /config)
+❯ okay we want to convert them into priamary and secondary skills               
+                                                                                
+  #primary                                                                      
+  Rust(ai)  · vector tiles · Go · systemd · nftables · WebRTC · LiveKit ·       
+  Flutter(AI)  FastAPI · WebSockets · Docker API · Docker · Docker Compose ·    
+  Planetiler(AI) · OpenAPI · TypeScript · curses · DuckDB · Python · Git · SSH  
+  · Tailscale                                                                   
+  Linux , coolify, Crewai, AWS, Postgress etc.                                  
+                                                                                
+  #secondary                                                                    
+  Rendering · distributed synchronization · networking · systems programming ·  
+  streaming · cartography · security isolation · storage design · API design ·  
+  testing · TUI design · deployment                                             
+                                                                                
+  we want to make primary bigger and add their logos in tui art. also a mark to 
+  show we used ai if we did                                                     
+  seondary will be smaller skills you can add more smaller skills               
+                                                                                
+  anything that has a icon is a primary skill                                   
+
+● Big change, and mostly clear. Two decisions I shouldn't guess at, because they
+  change the data model rather than the styling.
+
+  One I'm deciding myself: logos as hand-drawn braille bitmaps, not Nerd Font
+  glyphs. The app already requires the braille block; Nerd Font private-use
+  glyphs are far less universal, and a portfolio served over SSH to strangers
+  can't assume them. Bitmaps also let logos resolve at close zoom and collapse
+  to plain stars when pulled back — same "mode follows zoom" rule the rest of
+  the app uses.
+
+● User declined to answer questions
+  ⎿  · AWS, Postgres, CrewAI and Coolify aren't used by any of the nine 
+     projects. Every star currently has to belong to one — that's what the 
+     geometry is claiming. Where do these hang? (A "work" constellation / Real 
+     project entries / Unattached cluster / Leave them out)
+     · How should the two tiers read in the sky? (Primaries ring, secondaries 
+     inside (Recommended) / One ring, two sizes / Secondaries only when open)
+     · How should the "we used AI here" mark look? (A tag on the label / A mark 
+     on the logo / Stated in the story)
+
+● Unattached cluster noted for the orphans.
+
+  What would you like to clarify?
+
+  Context on where I'm coming from with the other two, in case it helps you aim:
+
+  - Two tiers — my worry is that the ring currently has a hole in the middle
+  that's empty once the description moved to the corner. Secondaries could fill
+  it, which would make the "these tools add up to these capabilities" reading
+  spatial rather than just a size difference. But that's a guess about what you
+  want the inner space doing.
+  - AI mark — the real question underneath is how much you want to say. A tag
+  marks the fact; a sentence in the story marks the division of labour. Those
+  read very differently to someone deciding whether to hire you, and I'd rather
+  you pick than me.
+
+  Two more things I noticed while costing this out, which you may want to fold
+  into the answer:
+
+  1. Your primary list has ~28 entries and the secondary list ~12. With the nine
+  projects that's roughly 40 stars against the current 59 — so this isn't an
+  addition, it's a replacement. A lot of the existing stars (Theil–Sen 
+  estimation, subpixel rendering, ordered dithering, path-level filtering,
+  three-way merge…) collapse into the secondary concepts. I want to check you
+  mean to lose that specificity — those are the ones that read as "this person
+  actually did the hard thing," and distributed synchronization says less than
+  Theil–Sen estimation does.
+  2. Some primaries have no recognisable logo — curses, WebSockets, systemd,
+  OpenAPI, Docker API, vector tiles, CrewAI, Coolify. I can draw a geometric
+  mark for those, but they'll read as invented glyphs sitting next to real ones
+  (Rust, Docker, Python, Postgres, Tux). Worth deciding whether those stay
+  primary without a real logo, or drop to secondary.
+
+✻ Sautéed for 2m 5s
+
+❯ okay we want to change the whole thing.                                       
+                                                                                
+  more sirections. i dont like the consilation. give me ideas                   
+
+● Right — scrapping it. Before I sketch: the constellation's real failures were
+  that positions were arbitrary (a force simulation, not information), it was
+  hard to scan, and it had nowhere good to put a logo. Here are four directions
+  that fix all three.
+
+● User declined to answer questions
+  ⎿  · Which direction should replace the constellation? (Circuit board / 
+     Inventory grid / Stack diagram / Timeline)
+     · What was actually wrong with the constellation? Picking the fix matters 
+     more than picking the replacement. (Positions meant nothing / Too sparse / 
+     hard to scan / Wrong register / Nowhere for the logos)
+
+● What would you like to clarify?
+
+  Meanwhile — you asked for ideas and I gave you a four-option picker, which
+  isn't the same thing. Here's a wider spread, in prose, so you can point at
+  what appeals rather than pick from a menu.
+
+  The real choice underneath is what decides where a thing sits on screen.
+  That's what the constellation got wrong — a force simulation looks organic but
+  nothing is anywhere for a recoverable reason. Every idea below is named by
+  its organising principle:
+
+  Layout = the machine
+  - Circuit board. Skills are chips; the logo is the silkscreen marking, which
+  is what a chip really carries. Projects are copper traces routed through the
+  chips they used — select one and its trace energises, the rest goes dark.
+  - Rack elevation. A 42U rack, each tool a labelled unit. Projects are cable
+  runs down the side. Fits how much of your work is actually infrastructure.
+  - Motherboard / block diagram. Buses between subsystems; secondary skills are
+  the buses, primaries the components on them.
+
+  Layout = the stack
+  - Layer cake. Metal → kernel → runtime → service → client. A project is a
+  vertical slice showing how far down it reaches. Answers a question nothing
+  else here does: how deep you go.
+  - OSI-style column. Same idea, narrower, more literal for the networking work.
+
+  Layout = the inventory
+  - Tile grid, grouped by family. Every logo as a tile: languages, infra, data,
+  web. Selecting a project lights its tiles. Dense, instantly scannable, nothing
+  simulated.
+  - Pegboard / toolwall. Same information, workshop framing — tools hung with
+  their outlines painted behind them.
+  - Package manifest. The whole portfolio rendered as cargo tree / a lockfile:
+  projects as root packages, skills as dependencies. Expand and collapse.
+  Extremely developer-native, very flat.
+
+  Layout = time
+  - Commit timeline. One lane per tool, shaded by intensity per month, project
+  bars underneath. Honest about gaps — though I only have 4 of your 9 repos
+  locally, so most of it would be hand-typed.
+  - Git graph. Projects as branches, skills as tagged commits where they first
+  appear.
+
+  Layout = the thing itself
+  - Nine bespoke diagrams. Each project drawn as what it actually is — netjail
+  as a packet crossing a veth into an nftables drop, watch-party as two players
+  drifting and a PI controller pulling them back. Most memorable by a distance;
+  roughly nine separate builds.
+
+  If it helps me aim: was the problem the metaphor (too whimsical), the
+  scannability (too sparse, couldn't find anything), the arbitrariness
+  (positions meant nothing), or that a star field simply has nowhere to put a
+  logo? Those point at different answers — the first says go literal, the second
+  says go dense, the third says make position mean something, the fourth says
+  build the whole thing around the grid of marks.
+
+✻ Churned for 2m 30s
+
+❯ scanibility and also too close to our map idea                                
+
+● That's the useful diagnosis. Both point the same way: kill the camera.
+
+  The constellation was a pan/zoom braille canvas with collision-placed labels
+  over a dark field — that's structurally the same program as the map, which is
+  why it felt like a repeat, and it's also why it didn't scan: anything with a
+  viewport hides most of itself by definition. A portfolio with two sections
+  that both pan and zoom has one idea, not two.
+
+  So: a fixed board. No camera, no panning, no zoom, nothing off-screen.
+  Everything visible at once, aligned to a grid, findable by eye in a second.
+  The braille canvas survives, but only inside 12×12 tiles as logo art — a
+  completely different register from terrain.
+
+   skysheet   28 tools · 12 disciplines · 9 projects                    netjail
+
+   netjail                      LANGUAGES                    SYSTEMS
+   ─────────────────            ┌──────┬──────┬──────┐
+  ┌──────┬──────┬──────┐
+   Run any command with         │ ▟▙   │ ▗▄▖  │ ▄▄▄  │      │ ▛▀▜  │  ▄▖  │ ▟▀▙
+  │
+   only its network             │ ██▛  │ ▐█▌ᵃⁱ│ ▀█▀  │      │ ▙▄▟  │ ▝▀▘  │ ▜▄▛
+  │
+   sandboxed.                   │ Go   │ Rust │Python│      │Linux │ nft
+  │systemd│
+                                ├──────┼──────┼──────┤
+  ├──────┼──────┼──────┤
+   A Linux sandbox that         │ ▄▄▄  │ ▗▖▗▖ │ ░░░  │      │ ▚▞▚  │ ▗▄▄  │ ░░░
+  │
+   isolates what a process      │ ▀█▀  │ ▝▛▜▘ │ ░░░  │      │ ▞▚▞  │ ▝▀▀  │ ░░░
+  │
+   can reach on the network     │  TS  │ Dart │ …    │      │ SSH  │Tailsc│  …
+  │
+   while leaving everything     └──────┴──────┴──────┘
+  └──────┴──────┴──────┘
+   else untouched …             lit = netjail uses it       dim = it does not
+
+   Go · 16,700 LOC · 28 pkg      networking · security isolation · systems
+   Jul–Aug 2026                  programming · testing · deployment · TUI design
+
+  Why this fixes both complaints. Scannability is the whole design: a fixed grid
+  grouped by family, so finding "does he know Postgres" is one saccade instead
+  of a hunt. And it's the opposite program from the map — the map's thesis is
+  there is more than fits, so you move the window; this one's is there is 
+  exactly this much, and here it all is.
+
+  The interaction is a two-way filter. Click a project → its tiles stay lit, the
+  rest dim, description in the corner. Click a tile → the projects that used it
+  stay lit, the rest dim, and the skill's story goes in the corner. That's the
+  provenance, shown as a filter instead of as geometry — which is more legible
+  than the springs ever were, and it can't be arbitrary.
+
+  Three calls I'll take unless you say otherwise:
+
+  - Icon = primary, exactly as you said. Tiles have logos; the secondary
+  disciplines are the text band at the bottom, no tiles. The ones with no real
+  logo (curses, WebSockets, Docker API, OpenAPI, vector tiles) get a typographic
+  monogram rather than an invented mark, so they don't sit next to Tux
+  pretending to be brands.
+  - AI mark = a small ᵃⁱ in the tile's corner, explained once in the help. It
+  survives monochrome and doesn't touch the name.
+  - AWS, Postgres, CrewAI get a DAY JOB group. They light for no project, and
+  the group header says so — which is your "unattached cluster", but legible
+  instead of floating.
+
+  The cost is real and worth stating: ~28 logo bitmaps to draw by hand, and the
+  current 59 stories mostly don't survive — your primary list is tools, and
+  stories like Theil–Sen estimation and ordered dithering become the secondary
+  disciplines. I'd keep those as the disciplines' stories so the specific work
+  isn't lost, because "distributed synchronization" says far less about you than
+  "Theil–Sen because least squares chases the outliers" does.
+
+  Want me to start building this, or is there something in the sketch you'd move
+  first?
+
+✻ Sautéed for 1m 10s
+
+❯ how about this.                                                               
+                                                                                
+  top right corner we show a caresol. showing a faded project card before this  
+  and after this.                                                               
+  beneath the caresol we show a scrolling icon of the primary skills. used.     
+                                                                                
+  left out space will have a beautiful and well designed expliantion of how it  
+  works. we focus on the enginering part.                                       
+                                                                                
+  we will have another tab with a infinte grid of skills when i hover on the    
+  skills they raise in a 2.5d with neigbours raising less making it look like   
+  magnet pulling paper up. grid will move around a bit.                         
+
+● Now I've got it, and it's a better design than mine — the carousel gives
+  projects a spine, and the magnet grid is the thing that makes skills worth
+  looking at rather than a list.
+
+  Let me restate so we're building the same thing:
+
+  - Projects tab — carousel top-right (prev/next ghosted either side), the
+  current project's primary-skill logos scrolling beneath it, and the whole
+  left-and-bottom given over to a properly designed explanation of how that 
+  project works, engineering-first.
+  - Skills tab — an infinite grid of skill tiles on a tilted plane. Hovering
+  lifts a tile, neighbours lift less on a falloff, the whole sheet drifts
+  slowly. Magnet under paper.
+
+  Two risks worth naming now: the grid animates, which costs bandwidth on every
+  frame over SSH (I'll keep the drift slow and small, and it can be a toggle),
+  and the engineering explanations are nine hand-built pieces — that's the bulk
+  of the work and the actual portfolio.
+
+  The riskiest unknown is whether a logo is even legible in 12×12 braille
+  subpixels. Proving that first, because if it isn't, the icon strip and the
+  grid both change.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 12×12 is too coarse — only Tailscale and Docker survive. Testing a larger
+  tile.
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ we dont just want to use braile we want actual pixel/ascci art                
+
+● Right — braille dots are the wrong medium for a logo. Real pixel art means
+  half-block cells (▀) with a foreground and background colour, which gives a
+  true 2× vertical colour bitmap. Let me check the preview tool handles
+  backgrounds before I commit to it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● It handles backgrounds. Prototyping the real technique — half-block cells with
+  fg+bg, which is a true colour bitmap at 2× vertical resolution.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● That settles it — pixel art works, and it's more portable than the braille the
+  map uses (▀ ships in every font; the braille block doesn't). Fixing the
+  broken ones and testing the fallback for tools with no real logo.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+● Technique proven. 16×16 half-block pixel art, one cell = two pixels, fg + bg 
+  per cell. More portable than the braille the map uses — ▀ ships in every
+  monospace font.
+
+  First pass, 13 marks: Rust, Go, Python, Docker, Tux and Tailscale read 
+  immediately. Flutter and DuckDB are close. TypeScript, Postgres, Git, AWS and 
+  the monogram need redrawing — the lesson is that letterforms are the hard part
+  at this size: two big letters (GO) work, three small ones (aws, TS inside a
+  square) turn to mush. So AWS wants its smile-arrow, not its text, and the
+  no-logo fallback wants one big letter, not three.
+
+  That's craft, not risk — and it's exactly what the --snapshot → PNG loop is
+  for.
+
+  What I'd build next, in order:
+
+  1. Tab shell — projects / skills, no camera anywhere.
+  2. Skills tab first, because it's the novel one: infinite tile grid on a
+  tilted plane, hover lifts a tile with a falloff onto its neighbours, slow idle
+  drift. This reuses termap's oblique projection and z-buffer for something
+  that isn't a map at all. I can prove the magnet effect quickly.
+  3. Projects tab — carousel with ghosted prev/next, logo strip beneath,
+  engineering explanation filling the left and bottom.
+  4. Logos — ~28 marks, iterated against renders.
+
+  One thing I want to settle before I start, because it's most of the work and I
+  can't fake it:
+
+  The engineering explanations. "Focus on the engineering" means each project
+  needs a designed piece — the mechanism, drawn, not a paragraph restated. For
+  netjail that's the packet crossing a veth into a default-drop and the proxy
+  refusing a path; for watch-party it's two clients drifting and the PI
+  controller pulling them back without chasing noise. Nine of those is the real
+  portfolio and the bulk of the build.
+
+  Do you want me to draft all nine from what's in topics.md for you to correct —
+  same as I did with the skill stories, knowing a chunk will be inference — or
+  do you want to write the engineering beats yourself for a couple of projects
+  first, so I can match your voice and level of detail before I do the rest?
+
+✻ Brewed for 3m 45s
+
+❯ we can also try getting actuall logos and running them through chafa          
+
+● Better idea than hand-drawing — real marks, accurate colours. Let me check
+  what's actually available here.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● chafa, ImageMagick and Pillow are all here. No icon set locally though —
+  checking whether I can actually fetch one.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● raw.githubusercontent.com is reachable. Simple-icons is the right source — and
+  importantly its icons are monochrome silhouettes with a declared brand hex,
+  which is better than full-colour art at this size: one alpha channel means I
+  can dim, tint and light them for the 2.5D lift. Testing the whole chain.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● ImageMagick has no SVG delegate here — it silently produced an empty alpha.
+  Checking for a rasteriser before I write one.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● svglib is available. Testing the full chain: SVG → alpha bitmap → half-block
+  cells.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● svglib works. Now the real test: how small can these go and stay readable?
+  Rendering an antialiased alpha mask into half-block cells at three sizes.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Much better than anything I'd draw by hand. Real marks, antialiased, accurate
+  colour.
+
+  Findings:
+  - 24×24 px (24 cols × 12 rows) — everything reads perfectly. This is the hero
+  size.
+  - 16×16 (16 cols × 8 rows) — still solid: Rust's gear, the Docker whale, Tux,
+  the Git diamond, DuckDB, Flutter, TS all survive. This is the strip/grid size.
+  - 12×12 — Go and Docker turn to mush. That's the floor.
+
+  One correction to your suggestion, and I think it matters: I'd skip chafa in
+  the actual pipeline. Chafa bakes colours into ANSI, which is right for a
+  static image but wrong here — the tiles have to dim when a project doesn't use
+  them, and shade as they lift under the cursor in the skills grid. Baked ANSI
+  can't do either.
+
+  Instead: simple-icons SVG → svglib raster at 256px → downsample to a greyscale
+  alpha mask + the brand hex. One channel plus one colour means the renderer
+  can light, dim and tint them freely. Half-block cells with fg = top pixel, bg
+  = bottom pixel, both pre-blended against the background — which is what you're
+  looking at above.
+
+  That runs as a build-time script (scripts/logos.py, same shape as the map's
+  dem2hgt.py), emitting a Rust table. The binary stays self-contained with no
+  runtime dependency on svglib or chafa, and the SVGs get vendored into
+  assets/logos/.
+
+  Two things I noticed that'll need per-icon attention: Go renders with a stray 
+  bar on the left (svglib mishandling part of that path), and Tailscale's 
+  bottom-right dot drops out at small sizes. Both fixable, but it confirms each
+  icon needs eyeballing rather than trusting the batch.
+
+  Worth knowing: simple-icons files are CC0, and the marks are trademarks used
+  nominatively to say "I used this" — normal for a portfolio, no issue.
+
+  I fetched these into scratchpad for the test; for the real thing they get
+  vendored.
+
+  Still open from before, and it's the thing that decides the bulk of the work:
+  the nine engineering explanations. Do you want me to draft them from topics.md
+  for you to correct, or do you want to write the beats for one or two so I can
+  match your level of detail first?
+
+✻ Crunched for 3m 20s
+
+❯ can we edit the logos fix the blurr                                           
+
+● Yes — the blur is my downsampling, not the source. LANCZOS rings and leaves
+  grey fringes. Let me compare four ways of getting from vector to pixels.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Clear winner: area-average downsample + a contrast curve on the alpha. LANCZOS
+  rings (that yellow halo round DuckDB), box alone stays soft, hard threshold
+  destroys Python and Docker. Contrast keeps the antialiasing that carries shape
+  while snapping the edges.
+
+  One more gain available — simple-icons ship with built-in padding, so ~10% of
+  every tile is wasted border. Trimming to the ink and refitting buys real
+  resolution.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+❯ we can use this and brail together to get the perfect look                    
+
+● That's the right instinct, and it's exactly what chafa does internally: pick
+  the best glyph per cell from a symbol set by minimising error against the
+  source. The map already has this idea — canvas.rs has braille and quadrant
+  families competing for a cell.
+
+  Braille buys 2×4 sub-cell precision but is dotted, so it can't fill; blocks
+  fill solidly but are coarse. Searching both (plus quadrants and eighth-blocks)
+  picks whichever actually wins per cell.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+● Tested it properly, and the data says the opposite of what we both expected —
+  worth showing:
+
+  Blocks-only glyph search (row 1) is a big jump. Adding quadrants and
+  eighth-blocks to the search gives sub-cell precision with solid fill: Postgres
+  finally reads as an elephant, Go's wordmark is clean, Rust's gear is sharp.
+  Even at 12×6 cells (row 3) almost everything survives.
+
+  Adding braille (rows 2 and 4) makes it worse. Look at Rust's outline, Tux's
+  belly, Postgres's edges — braille gets selected at the boundaries and leaves
+  dotted fringes on what should be solid edges. It's the same thing the map's
+  README already worked out from the other side: "braille is dotted by
+  construction — a braille road always reads as a dotted trail rather than a
+  line." Braille wins for texture; it loses for marks, because it physically
+  cannot fill a cell.
+
+  So the answer to the blur is the glyph search, not braille:
+
+  - Supersample → area-average → per-cell least-squares fit across space, █,
+  half-blocks, all ten quadrants, and both eighth-block ramps.
+  - Braille stays in the app for what it's good at (the map's terrain, any
+  texture), and stays out of the logos.
+  - 16×8 cells for the carousel strip and hero, 12×6 for a dense grid — both
+  hold up.
+
+  It also stays cheap at runtime: the script bakes glyph + fg alpha + bg alpha
+  per cell, not baked colours, so the app can still dim a tile that a project
+  doesn't use and shade one that's lifting under the cursor. That was the whole
+  reason to avoid chafa's baked ANSI, and it survives.
+
+  One caveat on the evidence: the preview renders braille from DejaVu Sans
+  rather than a mono face, so braille looks slightly worse here than it would in
+  your terminal — but the dotted-fringe problem is geometry, not the preview.
+
+  Pipeline settled. Still blocked on the same thing before I can build the
+  projects tab: do you want me to draft the nine engineering explanations from 
+  topics.md for you to correct, or will you write the beats for one or two first
+  so I can match your level?
+
+✻ Crunched for 3m 47s
+
+❯ okay now lets move forward                                                    
+
+● Moving. Taking the default on the explanations: I'll draft all nine from
+  topics.md and flag them as drafts, same as the skill stories.
+
+  First job is the logo pipeline, properly — vendored assets, a real script, a
+  generated Rust table. Let me find out which of your ~28 tools actually have
+  marks.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● 28 vendored. AWS is absent from simple-icons entirely (trademark request), so
+  it joins SSH, systemd, nftables, curses and WebSockets in needing a monogram.
+  Grabbing the official brand colours.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 29 matched with official brand colours. Note several are black (Rust 
+  #000000, OpenJDK, Tailscale #242424) — a black mark on a black terminal is not
+  brand-faithful, it's invisible, so the script lifts luminance while keeping
+  hue. Writing the real pipeline now.
+
+  Read 1 file (ctrl+o to expand)
+
+● 37 marks, 146 KB of generated Rust, 6 seconds. Now proving the generated data
+  renders — adding a dev flag that prints the sheet from the Rust side, not from
+  Python.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Bug, and an instructive one: everything's stretched into ovals. A terminal
+  cell is 1×2, so an array of subsamples isn't square on screen — I was
+  preserving the array aspect instead of the screen aspect, which doubles every
+  logo's height.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Two errors — the script rewrites src/logos.rs wholesale, so it wiped the
+  contact-sheet function I appended. It belongs in the generated output, not
+  bolted on after.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Correct now. Tux, the Postgres elephant, Duke, the Git diamond, DuckDB,
+  Traefik, qBittorrent, radarr — all reading. The monograms (AWS, NFT, PLT, SYS,
+  MVT, WS) read as deliberate labels rather than fake brands, which is what I
+  wanted.
+
+  Two per-icon fixes and the warnings, then I'll take stock.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The logo pipeline is done and working end to end. 45 tests pass, clippy clean,
+  no warnings.
+
+  What exists now:
+
+  ┌──────────────────┬───────────────────────────────────────────────────────┐
+  │                  │                                                       │
+  ├──────────────────┼───────────────────────────────────────────────────────┤
+  │ assets/logos/    │ 29 vendored SVGs + brand colours, 136 KB              │
+  ├──────────────────┼───────────────────────────────────────────────────────┤
+  │ scripts/logos.py │ the pipeline — rasterise, trim, fit, per-cell glyph   │
+  │                  │ search                                                │
+  ├──────────────────┼───────────────────────────────────────────────────────┤
+  │ src/logos.rs     │ 37 generated marks at two sizes, 160 KB               │
+  ├──────────────────┼───────────────────────────────────────────────────────┤
+  │ skysheet --logos │ contact sheet, so a mark that came out as mush is     │
+  │                  │ visible immediately                                   │
+  └──────────────────┴───────────────────────────────────────────────────────┘
+
+  The two bugs worth recording, because both are the kind that look like art
+  problems and aren't:
+
+  The first was cell aspect. A terminal cell is roughly 1×2, so a grid of
+  subsamples isn't square on screen. I was preserving the array aspect, which
+  doubled every logo's height and turned all 37 into ovals. The scale has to be
+  chosen in screen units and only then converted back to array counts.
+
+  The second: the script rewrites src/logos.rs wholesale, so the contact-sheet
+  function I'd appended by hand got silently wiped on the next run and the old
+  binary kept rendering. It now emits from the script, where it belongs.
+
+  Design decisions baked in, all reversible in the script:
+
+  - Braille excluded from the candidate set, on the evidence — it stipples where
+  a mark needs to fill.
+  - Alphas stored, not colours. Each cell is (glyph, fg_coverage, bg_coverage),
+  so the app can dim a tool a project didn't use and light one lifting under the
+  cursor, without regenerating anything. This was the reason not to use chafa's
+  baked ANSI, and it survived.
+  - Dark brand colours get lifted. Rust, OpenJDK, Tailscale and WebRTC are
+  specified near-black; rendering them faithfully on a dark terminal renders
+  them invisible. Hue is preserved where there is one, and four are overridden
+  outright.
+  - Monograms for the eight tools with no mark — AWS (simple-icons dropped it at
+  Amazon's request), SSH, systemd, nftables, curses, WebSockets, vector tiles,
+  Planetiler. They read as deliberate labels, not counterfeit brands.
+
+  One that's still weak: Go is thin at this size — the speed lines survive
+  better than the wordmark. Cropping the SVG to just the letters would fix it.
+  Everything else reads.
+
+  Next is the app itself: tab shell, then the magnet grid (the novel
+  interaction, worth proving early), then the carousel and the nine engineering
+  explanations. That's a much bigger chunk than this one — flagging it before I
+  start rather than after.
+
+✻ Sautéed for 7m 5s
+
+❯ lets start                                                                    
+
+● Starting the rebuild. Archiving what the new design doesn't keep, but
+  preserving the pieces that earned their place.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the app. Building the skills tab first — the magnet grid is the novel
+  interaction, so it's the one worth proving early.
+
+  Ran 5 shell commands (ctrl+o to expand)
+● Builds. Let me see it.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The sheet works, but it doesn't yet read as lifting — the threads that make it
+  paper are nearly invisible, so the eye sees icons brightening rather than a
+  surface bending. Strengthening the weave and the displacement.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Now it reads — the mesh visibly bulges around the pointer and the tiles ride
+  up on it. Checking the flat state and the tests.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The skills tab is real and working. All interactive paths verified through a
+  pty, 9 tests, clippy clean, no warnings.
+
+  What's on screen: an endless lattice of your tool marks lying on a tilted
+  plane, threaded together by a mesh. The pointer lifts the sheet under it —
+  neighbours ride further down the same gaussian, so it deforms as a surface
+  rather than tiles popping. Names fade in as a tile rises. Drag slides the
+  sheet; space holds it still.
+
+  Three things had to be true together or it reads as icons brightening rather
+  than paper bending:
+
+  - The sheet is drawn, not implied. The mesh threads are displaced by the same
+  field and sampled along their length — a straight line between two lifted ends
+  is a tent, not a bulge. First render had them nearly invisible and the effect
+  didn't land at all; that was the fix that made it work.
+  - Threads brighten where the sheet is steep. A fold catches light, a flat
+  expanse doesn't. That gradient is most of what sells the surface.
+  - Paint order is by lattice row, not screen row. A lifted tile is still at the
+  same depth — it just rises. Sorting by screen position would push it behind
+  the row in front of it, exactly backwards.
+
+  The bump is round in visual units, not cell units — a cell is twice as tall as
+  it is wide, so the falloff doubles vertical distance. Same class of bug as
+  the logo aspect one, and there's a test pinning it.
+
+  On the SSH cost you'd flagged: a still sheet redraws nothing and blocks on
+  input indefinitely. Only a drifting sheet has a clock, at ~11 fps, and space
+  stops it. Idle costs zero.
+
+  Structure now:
+
+  ┌──────────────────────────┬──────────────────────────────────────────────┐
+  │                          │                                              │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ grid.rs                  │ the sheet — field, lattice, weave            │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ tile.rs                  │ drawing one mark, dimmed or lit              │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ logos.rs                 │ 37 generated marks                           │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ canvas.rs                │ kept whole from termap; the projects tab     │
+  │                          │ wants its overlay paths                      │
+  ├──────────────────────────┼──────────────────────────────────────────────┤
+  │ app.rs ui.rs main.rs     │ shell                                        │
+  │ snapshot.rs              │                                              │
+  └──────────────────────────┴──────────────────────────────────────────────┘
+
+  The constellation version is preserved in archive/constellation/ — including
+  the 59 drafted skill stories and the nine projects' about/stats copy, which is
+  content I didn't want to throw away.
+
+  Projects tab is a stub saying what goes there. That's next: carousel with
+  ghosted neighbours, the tool strip beneath it, and the nine engineering
+  explanations — which remain the bulk of the work and the thing I'll be
+  drafting blind unless you'd rather write a couple first.
+
+  One thing to decide when you look at it: the lattice currently repeats all 37 
+  marks at random, so the same tool appears many times. That's what makes it
+  feel endless. The alternative is a finite board where each tool appears
+  exactly once — more honest as an inventory, less hypnotic. I built the endless
+  version because that's what you asked for, but it's a one-line change if
+  seeing it makes you want the other.
+
+✻ Baked for 6m 39s
+
+❯ okay how do i test it                                                         
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The binary's already built. Run it with:
+
+  cd ~/projects/terminal/skills
+  ./target/release/skysheet
+
+  or cargo run --release if you'd rather rebuild.
+
+  Move your mouse over the sheet — that's the whole interaction, so if nothing
+  lifts, the mouse isn't reaching it (see below). Then:
+
+  ┌──────────────┬──────────────────────────────────────────────────┐
+  │              │                                                  │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ move pointer │ lifts the sheet under it                         │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ drag         │ slides the sheet — it's endless, there's no edge │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ wheel        │ slides vertically                                │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ space        │ stop/start the drift                             │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ tab / 1 / 2  │ switch tabs (projects is still a stub)           │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ m            │ monochrome                                       │
+  ├──────────────┼──────────────────────────────────────────────────┤
+  │ q            │ quit                                             │
+  └──────────────┴──────────────────────────────────────────────────┘
+
+  Two quick sanity checks before you judge it:
+
+  ./target/release/skysheet --logos
+  All 37 marks as a contact sheet. If these look like mush rather than logos,
+  your font or colour support is the problem, not the code.
+
+  ./target/release/skysheet --snapshot 150x42 --tab skills --cursor 74,20
+  One frame to stdout, no interaction — useful for pasting somewhere or diffing
+  after a change. Add --plain for glyphs without colour.
+
+  What it needs from your terminal:
+
+  - Truecolor. Yours reports COLORTERM=truecolor, so you're fine. Without it the
+  marks will band badly.
+  - Mouse motion reporting — it enables mode 1003 (report movement even with no
+  button held). Works in most terminals; tmux needs set -g mouse on, and some
+  setups swallow motion events.
+  - A font with the braille block for the mesh threads. DejaVu Sans Mono has it;
+  JetBrains Mono and Noto Sans Mono don't and you'll see boxes instead of the
+  weave. The logos themselves only need block glyphs, which every font ships.
+
+  What to actually look for: whether it reads as paper bending or as icons 
+  brightening. That's the thing I iterated on and the thing I can't fully judge
+  from a PNG — the mesh has to make you see a surface. Also worth deciding while
+  you're in there: the lattice repeats all 37 marks at random so the same tool
+  shows up several times. That's what makes it feel endless, but a finite board
+  where each tool appears once is more honest as an inventory. One-line change
+  either way.
+
+✻ Sautéed for 41s
+
+❯ we can make them bigger and we dont neeed so show the grid layout or lines.   
+  also we want uniform movement like sliding. momentum based if i scoll in a    
+  direction it keeps the momentum.                                              
+
+● Right on both counts — and dropping the mesh means the lift has to read from
+  displacement alone, which bigger tiles actually help with.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Test correctly caught the behaviour change — with momentum, space eases the
+  sheet to a stop rather than freezing it. Rewriting it to pin the new model.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Real bug the test caught: velocity decays asymptotically, so a "held" sheet
+  creeps forever by a fraction of a cell. It needs to snap to rest.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Bigger marks, no net, and the lift now reads in how it breaks the lattice
+  rows. Verifying momentum behaves under a real pty.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Frame counting via escape codes doesn't work (ratatui diffs incrementally).
+  Measuring what actually matters for SSH instead — bytes on the wire.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● That's a number worth having: 133 KB/s while drifting — over a megabit —
+  versus 0.2 KB/s held. Smooth full-screen motion in a terminal means
+  re-emitting colour escapes for most of the screen. Let me quantify the
+  frame-rate tradeoff rather than guess.
+
+  Ran 1 shell command (ctrl+o to expand)
+● Flat across frame rates — so it isn't frame-bound, it's bound by cells changed
+  per second, which is a function of how fast the sheet slides, not how often
+  it's drawn. Testing that model.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Done — bigger marks, no grid lines, and momentum. 14 tests, clippy clean.
+
+  What changed
+
+  Tiles now use the large art (16×8 cells instead of 10×5) with the pitch
+  widened to match, and the mesh is gone. Losing the mesh costs the bend some
+  legibility — that mesh was what made it read as paper rather than icons — but
+  at this tile size the displacement is plain enough in the break it makes in
+  the lattice's own rows, and the marks get the whole frame instead of sitting
+  under a net.
+
+  Motion is now velocity-integrated rather than position-derived:
+
+  ┌──────────────┬──────────────────────────────────────────────────────────┐
+  │              │                                                          │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ resting      │ eases back to a steady drift, so it's always gently      │
+  │ slide        │ moving                                                   │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ wheel        │ a shove that adds — repeated scrolls build speed         │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ drag         │ sheet nails to the pointer, and letting go hands the     │
+  │              │ motion over                                              │
+  ├──────────────┼──────────────────────────────────────────────────────────┤
+  │ space        │ eases to a stop rather than freezing                     │
+  └──────────────┴──────────────────────────────────────────────────────────┘
+
+  Decay is exponential, so a throw sheds most of its speed early then coasts.
+  One real bug the tests caught: exponential decay never actually arrives, so a
+  "held" sheet crept a fraction of a cell forever and never stopped asking to be
+  redrawn. Velocity now snaps to rest once it's close enough.
+
+  A finding you should see, because it changes a decision
+
+  I measured what the drift costs on the wire:
+
+  ┌────────────────────────────────┬───────────────────────┐
+  │          slide speed           │ bytes to the terminal │
+  ├────────────────────────────────┼───────────────────────┤
+  │ 1.6 cells/s (what I first set) │ 134 KB/s              │
+  ├────────────────────────────────┼───────────────────────┤
+  │ 0.8 cells/s                    │ 55 KB/s               │
+  ├────────────────────────────────┼───────────────────────┤
+  │ 0.35 cells/s                   │ 24 KB/s               │
+  ├────────────────────────────────┼───────────────────────┤
+  │ held (space)                   │ 0.2 KB/s              │
+  └────────────────────────────────┴───────────────────────┘
+
+  The cost is flat across frame rate — I tried 5, 7, 11 and 17 fps and got the
+  same number. It isn't frame-bound; it's bound by cells changed per second,
+  which is a function of how far the sheet travels, not how often it's drawn.
+  Slowing the slide is the only lever, and it's linear.
+
+  I've set the resting slide to 0.8 cells/s (~55 KB/s) as a middle position, but
+  that's still ~450 kbit/s of continuous traffic for ambient motion on a
+  portfolio you plan to serve over SSH. Three ways to go, and it's your call:
+
+  1. Leave it. Fine on a LAN, unpleasant on hotel wifi.
+  2. Slow it further to ~0.35 — 24 KB/s, still visibly alive.
+  3. Default it off, so idle costs nothing and the sheet only moves when someone
+  throws it. Space already toggles this; it's a one-line change to which way it
+  starts.
+
+  I'd pick 3 — the motion is most compelling as a response to input anyway, and
+  an idle session costing zero is the right default for something strangers
+  connect to.
+
+  Next up is the projects tab: carousel with ghosted neighbours, tool strip
+  beneath, engineering explanations filling the left.
+
+✻ Sautéed for 9m 21s
+
+❯ lets start building project section.                                          
+                                                                                
+  you have gh you can look into the projects.                                   
+  for each project i want you yo make a 3d logo for terminal.                   
+  to show on the card                                                           
+
+● Two good things I can do here that I couldn't before: those repos are public,
+  so I can ground the engineering explanations in the actual code rather than
+  inferring from topics.md. Let me get the real material first.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Real material — netjail's "Why not a container" is exactly the engineering
+  beat I'd have had to invent. It points at a design doc; let me get the deep
+  content.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Superb material — netjail's design doc gives me five named containment layers,
+  a preflight that refuses to launch with no override flag, and a logging
+  guarantee that's structural (internal/events imports nothing from net/http, so
+  no type in it can hold a header). That's the engineering explanation, in your
+  words. Saved for the cards.
+
+  Now the 3D marks. Authoring at final pixel resolution and extruding, so no
+  resampling blur.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The extrusion technique works — those read as real solids with a lit edge and
+  a shaded side. The shapes are wrong though; my hand-typed ASCII masks didn't
+  draw what I intended (netjail is a pill, gitswitch is a mess).
+
+  Hand-typing pixel grids is the wrong tool. Generating the geometry instead.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Seven of nine read immediately — shield, screen-with-play, terminal,
+  clipboard, folded page, map pin, contour rings. gitswitch and vcs have
+  geometry collisions: the toggle's knob merged with its track, and the commit
+  nodes fused into a blob.
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● All nine read. Wiring them into the binary.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The nine 3D project marks are done and wired into the binary — skysheet 
+  --marks prints the contact sheet. Clean build, 14 tests, clippy clean.
+
+  How they're made. Each mark is drawn at exactly the resolution it's shown —
+  one authored pixel per half-block — so nothing is resampled and nothing needs
+  sharpening. Depth is a stack, not a projection: the face is drawn over four
+  copies of itself stepped down-right, each darker than the one in front. Two
+  details carry it — the step is one pixel on each axis, which is 45° on screen
+  because a half-block pixel is square, and the face keeps a lit rim along its
+  top-left, which is the only thing saying where the light is.
+
+  The mistake worth recording: I first typed the shapes out as ASCII grids by
+  hand, and every one came out as something other than intended — netjail read
+  as a pill, gitswitch as noise. Geometry isn't a thing to eyeball a character
+  at a time. They're now composed from a tiny shape language (disc, ring, rrect,
+  tri, shield, union, sub), which makes them correct by construction and
+  adjustable — a radius is a number rather than forty lines to retype.
+
+  Two shapes needed a second pass after that: the toggle I drew for gitswitch
+  had its knob fuse with its track into one lozenge, and vcs's commit nodes
+  touched and read as a single blob. gitswitch became a key — a hole, a shaft
+  and teeth are three features at three scales, so it survives coarse rendering,
+  and it's nearer the truth since what gitswitch swaps is which SSH key signs
+  your commits.
+
+  The other half of this turn is more valuable than the marks. Your repos are
+  public, so I pulled the real material — including netjail's 16 KB design doc.
+  That gives me your actual engineering, not my inference:
+
+  - Five named containment layers, L1–L5, two inside the namespace and three on
+  the host — "which is what makes deleting the namespace firewall insufficient."
+  - netjail run refuses to launch unless containment verifies, with no override 
+  flag — and the preflight doesn't read rules, it makes a real connection
+  attempt from inside and requires it to fail.
+  - The logging guarantee is structural, not a matter of care: internal/events
+  imports nothing from net/http, so no type in it can hold a header, a body or a
+  raw URL.
+
+  That's the engineering explanation for netjail's card, written by you. I have
+  READMEs for logify, coolify_logs, clip, Noter, gitswitch and vcs too;
+  stylized-maps has no README, so it'll need you or a look at its source.
+
+  Next: the card itself — carousel with ghosted neighbours, the tool logos
+  scrolling beneath, and these explanations filling the left.
+
+✻ Cooked for 7m 6s
+
+❯ how do i check it                                                             
+
+● Two contact sheets, both straight from the binary:
+
+  cd ~/projects/terminal/skills
+  ./target/release/skysheet --marks     # the 9 project marks
+  ./target/release/skysheet --logos     # the 37 tool logos
+
+  Pipe either to a PNG if you'd rather look at it outside the terminal:
+
+  ./target/release/skysheet --marks | python3 ../map/scripts/ansi2png.py
+  /tmp/marks.png
+
+  To change one, edit its geometry in scripts/marks.py and regenerate:
+
+  python3 scripts/marks.py && cargo build --release && ./target/release/skysheet
+  --marks
+
+  The shapes are near the bottom of that file and read like this:
+
+  MARKS["stylized-maps"] = ((140, 196, 148), render(union(
+      sub(disc(13, 9, 8), disc(13, 9, 3.4)),      # ring
+      tri(6.5, 13.5, 19.5, 13.5, 13, 21.5),       # point
+  )))
+
+  so a mark is a few numbers to nudge, not a grid to retype. The canvas is 26×22
+  and DEPTH, SIDE_NEAR/SIDE_FAR at the top control how far the extrusion throws
+  and how dark the side gets.
+
+  The app itself is unchanged from last time — ./target/release/skysheet still
+  opens on the skills sheet; the marks aren't on a card yet because the projects
+  tab is still the stub.
+
+  What I'd want your eye on: whether the emblems are the right emblems. The
+  rendering is settled, but the choices are mine — a shield for netjail, a
+  clipboard for clip, a key for gitswitch, a map pin for stylized-maps, contour
+  rings for termap. vcs and noter are the two I'm least sure of. If any of them
+  is wrong-headed, better to hear it before they're sitting on nine finished
+  cards.
+
+✻ Brewed for 14s
+
+❯ okay lets start developing projects                                           
+● Let me get the rest of the real material before writing the cards.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Real material for seven of nine. Writing the project sheet.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the parser and the card renderer.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Tests correctly caught that the app now opens on Projects, so the sheet tests
+  need to say which tab they're about.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Working. Four fixes: the status bar claims "drifting" on a tab with nothing
+  moving, the left column needs the project's name to anchor it, and the ghosts
+  are too faint to read as cards.
+
+  Read 2 files, ran 3 shell commands (ctrl+o to expand)
+
+● One bug in the narrow layout: the "more" indicator is painted over the last
+  line of text rather than below it. Reserving the row instead.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The projects tab is built and working. 20 tests, clippy clean, all interactive
+  paths verified through a pty.
+
+  What's on screen: the engineering fills the left, the card sits top-right with
+  the previous and next projects ghosted and clipped by the frame edge, and
+  that project's tool logos scroll beneath it. ←/→ move through the nine and
+  wrap; j/k read on; clicking a ghost jumps to it. Below ~104 columns the rail
+  drops and the words take the whole width — a squeezed picture of a mark isn't
+  worth two lines of explanation.
+
+  The content is yours, not my inference. Pulling the repos was the right call —
+  netjail's card now says:
+
+  ▎ Five layers, and three of them are on the host. …The last three live outside
+  ▎ the namespace, which is exactly what makes deleting the namespace's own 
+  ▎ firewall insufficient.
+  ▎
+  ▎ It refuses to start rather than trust itself. The preflight does not read 
+  ▎ the rules back — reading your own configuration proves only that you wrote 
+  ▎ it. It opens a real connection from inside the namespace and requires that 
+  ▎ connection to fail.
+  ▎
+  ▎ The log cannot hold what it must not leak. internal/events imports nothing 
+  ▎ from net/http, so no type in it is even capable of holding a header, a body 
+  ▎ or a raw URL.
+
+  Six projects are sourced from their READMEs and design docs. Three are drafts 
+  and say so on the card — watch-party (private), stylized-maps (no README),
+  Noter (README is two lines). The caveat prints in italics under the stats
+  rather than sitting quietly in a comment.
+
+  Two corrections from reading the source: the repo is clippy, not clip —
+  topics.md had it wrong. And clip's "no auth" is deliberate and documented,
+  with the cost stated plainly ("anyone on your tailnet can write to your
+  clipboard"), so the card says that rather than presenting it as pure upside.
+
+  Three bugs the work turned up:
+
+  - The app now opens on Projects, which broke six sheet tests that assumed
+  Skills — they were asserting on a tab that no longer moves. Fixed by making
+  them say which tab they're about.
+  - The status bar claimed "drifting" on a tab with nothing to drift.
+  - The "more below" indicator painted over the last line of text. Whether it's
+  needed has to be decided before layout, because it takes a row.
+
+  What I'd want you to look at: whether the beats are pitched right. Four for
+  netjail, two for gitswitch — I let the material decide rather than padding to
+  a fixed count, but you'll know if any of them says something you wouldn't. The
+  three marked drafts are the ones to correct first; stylized-maps in
+  particular I wrote from topics.md alone.
+
+✻ Worked for 7m 52s
+
+❯ no the other corner for project logo, which hovers up and down and a cursor   
+  at the bottom showing its selected.                                           
+  logos beneath should be scolling in loop.                                     
+                                                                                
+   [Image #3] here logo section is logo. we want to use the other empty space   
+  to make a animated blog showing how it works.                                 
+  not only essay. we can be much more creative                                  
+  ⎿  [Image #3]
+
+● Right — logo top-left, bobbing, with a position indicator, and the big space
+  becomes an animated demonstration rather than prose. That's the best idea in
+  this whole thread; the essay was always the weakest part.
+
+  Restructuring the layout first, then building the scene kit with netjail as
+  the exemplar.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the layout: logo top-left with a bob and a position indicator, and the big
+  space handed to the scene.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Test caught a stale assumption — the projects tab does move now. Updating it,
+  and fixing four layout problems the render shows.
+
+  Read 1 file, ran 4 shell commands (ctrl+o to expand)
+
+● Restructured to your sketch, and the essay is on its way out. 24 tests, clippy
+  clean, all paths verified through a pty.
+
+  The corner — mark in a box top-left, drifting on a 5.5s cycle, nine pips
+  underneath showing where you are (clickable). The tools loop past below it,
+  always moving now rather than only when they overflow — a strip that changes
+  character between projects for no visible reason is worse than one that just
+  runs.
+
+  The stage — netjail's mechanism, animated. Packets leave the process, all of
+  them reach policy drop, only the three redirected ports continue, and at the
+  proxy two requests to the same host get different answers: GET /v1/models ✓,
+  POST /v1/keys ✗. Five seconds of watching makes the argument the README takes
+  two paragraphs to make — and "a host allowlist cannot say this" is the whole
+  point of the project.
+
+  Below ~104 columns the diagram goes and the words stay. A mechanism drawn at
+  forty columns isn't a mechanism, it's a smudge.
+
+  Scenes are pure functions of the clock. Given t a scene draws the frame for t
+  and nothing accumulates, so it can be paused, snapshotted, resumed and diffed,
+  and two runs at the same instant are the same picture. There's a test
+  asserting exactly that, and another that every primitive clips — a diagram
+  drawn for a wide terminal must not corrupt a narrow one.
+
+  Cost, measured at 150×44: projects tab 17 KB/s against the sheet's 89. The
+  float and the loop are a few hundred cells between them; the sheet repaints
+  most of the screen.
+
+  One test earned its keep again — it asserted the projects tab was motionless,
+  which stopped being true the moment the mark started floating. Stale
+  assertion, not a bug, but it's the second time this session a test has caught
+  a behaviour change I'd otherwise have shipped without noticing.
+
+  Where this leaves things: one scene of nine. The other eight fall back to
+  prose, which is visibly the weaker thing sitting next to netjail's diagram —
+  that contrast is the argument for finishing them. The ones I can already see:
+
+  - watch-party — two playheads drifting apart, the PI controller easing them
+  together, the gate refusing to chase noise
+  - clippy — a copy propagating A→B across the tailnet with the echo visibly
+  suppressed
+  - vcs — content hashing into the object store, identical content landing on
+  the same address
+  - logify — lines streaming container → gateway → TUI, a scoped key seeing only
+  its own containers
+
+  Say the word and I'll work through them. Worth knowing they're the most
+  time-consuming thing left, and also the thing that makes this portfolio unlike
+  anyone else's.
+✻ Cooked for 6m 53s
+
+❯ /home/princepatel/projects/watch_party/logo.svg                               
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● A film reel — red disc with seven dark openings. That's a good shape for
+  extrusion, and it should be the real logo rather than my invented screen.
+  Adding an SVG path to the mark pipeline.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● All marks are 30 wide but watch-party is 15 rows to the others' 13, which
+  would make the box resize as you page through. Pinning the box to the largest
+  and centring each mark in it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Snapshots always start at the first project, which makes the other eight cards
+  unreviewable. Adding a flag for that.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+❯ we want the same kind of blogs for all projects                               
+
+● The reel works on the card. And yes — netjail's diagram makes the other eight
+  look like placeholders. Building all of them.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● All nine have diagrams now, so that test should assert the opposite — and the
+  clip and purity tests should cover every scene, not just one.
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● All nine projects now have working diagrams instead of prose. 26 tests, clippy
+  clean.
+
+  The real logo is in. watch-party's reel comes from your logo.svg, rasterised
+  and run through the same extruder — vendored to assets/marks/. The translation
+  problem is which pixels are solid: a reel is a disc with openings punched
+  through it, so keeping the red body and dropping the openings isn't losing
+  information, it is the drawing. The shape decision is made at 8× and averaged
+  down, so an edge lands on the pixel it mostly covers. Where a project has a
+  real logo it should win; an invented emblem for something that already has one
+  is a worse answer however well drawn.
+
+  That also revealed a layout bug: the reel is square where the drawn emblems
+  are wider than tall, so the box resized when you paged to it and the strip and
+  caption jumped. The box is now pinned to the largest mark with each one
+  centred in it — two rows of air for a layout that holds still.
+
+  The nine scenes, each animated and each making its project's actual argument:
+
+  ┌───────────────┬──────────────────────────────────────────────────────────┐
+  │               │                                                          │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ netjail       │ packets all reach policy drop; two requests to the same  │
+  │               │ host get different answers                               │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ watch-party   │ playheads converge, an outlier gets rejected, the        │
+  │               │ certainty gate opens before the rate moves               │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ logify        │ lines leave all three containers; db is refused at the   │
+  │               │ gateway, not at the container                            │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ clippy        │ one copy crosses to one machine; the return trip is      │
+  │               │ drawn and struck out                                     │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ stylized-maps │ the pipeline runs, pauses for a quarter of every cycle,  │
+  │               │ resumes                                                  │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ termap        │ tiles arrive on demand; 1.6 GB archive against 19 MB     │
+  │               │ resident                                                 │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ Noter         │ editor → note → commit, history growing                  │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ gitswitch     │ email and SSH key change together                        │
+  ├───────────────┼──────────────────────────────────────────────────────────┤
+  │ vcs           │ identical content lands on the same address; merge       │
+  │               │ either merges or conflicts                               │
+  └───────────────┴──────────────────────────────────────────────────────────┘
+
+  Every scene is a pure function of its clock. Given t it draws the frame for t
+  and nothing accumulates — so --project ID --at SECONDS pins any instant of any
+  animation for review or diffing. Four tests hold the line: determinism, that
+  each one actually moves, that nothing draws outside its area at any of twenty
+  sizes, and that each puts real ink on screen (otherwise a scene clipped to
+  nothing would pass the bounds test trivially).
+
+  One test earned its keep again — projects_without_a_diagram_say_so started
+  failing the moment vcs got one. Its replacement asserts the opposite and much
+  better invariant: every project must have a diagram, so nothing quietly falls
+  back to prose.
+
+  Check them with ./target/release/skysheet and ←/→, or pin one: --snapshot 
+  150x40 --tab projects --project clippy --at 3.
+
+  Two things I'd flag: the three drafts still say so on the card (watch-party,
+  stylized-maps, Noter) — their diagrams are built from topics.md, so the claims
+  need your eye even though the mechanisms look right. And the prose is now
+  unreachable on a wide terminal; the beats only appear below ~104 columns. If
+  you want the writing visible alongside the diagram rather than instead of it,
+  that's a layout decision worth making deliberately.
+
+✻ Worked for 10m 29s
+
+❯ we need to add more content in                                                
+                                                                                
+  watch-party (native apps, cache handling, livekit ).                          
+                                                                                
+  stylised maps (shading and pipelines)                                         
+                                                                                
+  netjail -> showing isolation and observibilty.                                
+
+● Adding real mechanism to those three. Rewriting them with the material they
+  were missing.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Content's right but the two columns collide — several footnotes overrun into
+  the observability half. Adding a wrapping primitive so long notes can't do
+  that, and giving each half a strict budget.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● No collisions now. Checking the other two.
+
+  Read 2 files, ran 1 shell command (ctrl+o to expand)
+
+● All three enriched. Final verification.
+
+  Ran 3 shell commands (ctrl+o to expand)
+● All three scenes now carry the material they were missing. 26 tests, clippy
+  clean, all nine cards verified through a pty.
+
+  netjail is now two halves answering two different questions — what can this 
+  process reach, and what did it try to reach.
+
+  Isolation is drawn as a stack because that's what it is: L1 and L2 inside the
+  namespace, L3–L5 on the host, with the highlight walking so all five get read
+  rather than one being the permanent subject. Observability is the half a
+  sandbox usually gets wrong — a log that records enough to be useful usually
+  records enough to be a leak. So it shows events arriving over a unix socket
+  (not a tail, so rotation can't make it miss anything), and two columns:
+  recorded against cannot exist. Not "filtered" — internal/events imports
+  nothing from net/http, so no type in it can hold a header. And
+  $XDG_RUNTIME_DIR unset means refuse to start.
+
+  watch-party now shows the three things you named, and they only make sense
+  together: web against Flutter desktop on macOS/Windows/Linux, which is why the
+  decision core exists twice and why conformance vectors have to hold the
+  copies equal. The segment buffer with the playhead inside it, and a seek
+  that's free or costs a fetch depending on where it lands — the cache is part
+  of the sync mechanism, not an implementation detail. And LiveKit as a boxed
+  second real-time system with its own waveform, "its own clock, its own jitter
+  buffer, running beside the loop, not inside it."
+
+  stylized-maps splits into PIPELINE and STYLING. The build was the engineering;
+  the styling is the point. Four layers composite bottom-up with their shading
+  ramps and the reason for each — dithered landuse reads as behind, road tiers
+  cut from the real histogram, labels dropped rather than overlapped — plus
+  hillshade driven by slope, never by height.
+
+  One bug worth recording. The first netjail rewrite had the two columns
+  overwriting each other — footnotes one word too long ran straight into the
+  observability half, and verdict markers landed on top of their own labels.
+  Hand-laid-out scenes are fine for boxes and terrible for sentences. There's
+  now a note() primitive that wraps to a column and returns the rows it used,
+  and both halves have a declared budget (L = 40, R = 36, gutter 4) that every
+  string is written to fit. That class of bug can't come back silently.
+
+  Worth flagging: those three are still the drafts. The mechanisms now look
+  right, but watch-party and stylized-maps were built from topics.md rather than
+  source — so the claims are the thing to check. --project watch-party --at 5
+  pins any instant for review.
+
+✻ Cogitated for 6m 16s
+
+❯ size and layout can be better                                                 
+                                                                                
+  [Image #5]                                                                    
+  ⎿  [Image #5]
+
+● Looking at the real terminal, the problem is clear: on a wide screen the
+  content sticks to the left edge and the diagram floats in the middle with dead
+  space on both sides and a big empty band underneath. Nothing is sized to the
+  terminal — it's just spread across it.
+
+  The fix is a max measure: cap the composition and centre it as a unit.
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Better — but the box is 36 wide inside a 52-column rail, leaving dead space
+  between it and the diagram, and the page sits low. Two adjustments.
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● The footnotes overflow — most scenes still use raw text() for sentences wider
+  than the scene's own column, so they get clipped at the stage edge. Routing
+  them all through the wrapping primitive.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All matched. But this exposes a bigger problem: at the current threshold the
+  stage is only ~48 columns while netjail's diagram needs 80 — so on mid-size
+  terminals the diagrams were being silently cropped. The layout has to ask each
+  scene how much room it needs.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The new test immediately caught a real one: logify's declared footprint is
+  smaller than what it draws. Measuring the actual sizes rather than guessing
+  again.
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Layout fixed, and it turned up a real bug along the way.
+
+  The page now has a measure. Capped at 150×34 and centred as a unit, so on your
+  230-column terminal the corner and the diagram sit next to each other with
+  balanced margins instead of the corner glued to the left edge and the diagram
+  floating in the middle. The cap never binds on a normal terminal; it's the
+  whole difference on a large one. The logo box also fills its column now rather
+  than shrink-wrapping the mark, which was leaving a strip of dead ground
+  between it and the diagram.
+
+  The bug: the footnotes were being clipped at the stage edge — "would be the
+  weake" in the clippy shot you'd have seen. Most scenes still used raw text()
+  for sentences wider than their own column. All of them now go through the
+  wrapping primitive.
+
+  And that exposed a worse one. The wide layout kicked in at 104 columns, giving
+  the stage ~48 — while netjail's diagram needs 80. Every diagram was being
+  silently cropped on mid-size terminals, which looks like a rendering fault and
+  is really a layout one. The layout now asks each scene for its footprint
+  instead of guessing:
+
+  netjail (80, 29)   watch-party (74, 27)   stylized-maps (67, 25)
+  logify  (66, 19)   clippy      (62, 16)   termap        (57, 19)
+
+  Those numbers are measured, not estimated — there's an ignored test that acts
+  as a measuring tape (cargo test measure_footprints -- --ignored --nocapture)
+  and prints the table, plus a real test asserting each scene draws identically
+  at its declared footprint as it does with room to spare. Guessed numbers here
+  are exactly how a diagram ends up cropped, so they're now checked.
+
+  Result: prose below ~122 columns, diagram above it, chosen per project rather
+  than by one global threshold — so clippy's smaller diagram appears earlier
+  than netjail's.
+
+  28 tests, clippy clean.
+
+  One thing I'd flag rather than fix unasked: netjail's diagram needs 122 
+  columns before it appears, because it's two 40-column halves side by side. On
+  a laptop-sized terminal you get the prose instead. If that matters, the fix is
+  to stack ISOLATION above OBSERVABILITY below a threshold — worth doing, but
+  it's a per-scene reflow rather than a layout tweak, so I'd rather you decide
+  whether it's worth the complexity.
+
+✻ Worked for 5m 33s
+
+❯ /compact                                                                      
+  ⎿  Compacted 
+  ⎿  Read ../topics.md (84 lines)
+  ⎿  Referenced file ../map/src/raster.rs
+  ⎿  Read ../map/scripts/ansi2png.py (107 lines)
+
+❯ okay lets make the experience section                                         
+  i want to have a zoom pann and 2.5d toggle animation on maps with given       
+  cordimates.                                                                   
+                                                                                
+  we will show on top what the location is and what it means where the map      
+  fades to nothing                                                              
+
+● I'll start by reading what the map app already gives us — the experience
+  section should build on it, not beside it.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The map already has pan, zoom and a 2.5D tilt. So this is a
+  camera-and-narration layer on top, not a new renderer. Let me read the
+  integration surface.
+
+  Read 2 files (ctrl+o to expand)
+● Now the camera and app state — this is where a flight animation has to hook
+  in.
+
+  Searched for 1 pattern, read 1 file, ran 6 shell commands (ctrl+o to expand)
+
+● There's already an experience/exp.md and a resume.json. Reading both before I
+  design anything.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● experience/exp.md has the real content — five places with coordinates. That's
+  the data. Let me confirm the crate builds and check the remaining pieces.
+
+  Searched for 1 pattern, ran 3 shell commands (ctrl+o to expand)
+
+● Everything I need is here. Writing the tour data first, from exp.md.
+
+  Listed 1 directory, ran 1 shell command (ctrl+o to expand)
+
+● The India basemap resolves, so Gujarat will render at street level. Now the
+  tour sheet:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the parser:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the flight itself — the part that has to be right:
+
+  Searched for 1 pattern, read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Now wiring it into the scene, app and UI:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the card and the fade — the part the user described as "the map fades to
+  nothing":
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the clock and the snapshot flags — the latter matter because a flight has
+  to be reviewable frame by frame:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The constant-velocity test was measuring the wrong metric — an L1 sum of pan
+  and zoom, where van Wijk's invariant is a ρ-weighted L2. Let me derive the
+  right one:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 24 pass, and the invariant holds to 1.02× — the closed form is genuinely the
+  geodesic. Now let me actually look at it:
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Card and fade both work. But the map itself is thin at z16.2 — Ahmedabad has
+  no building data (only Mumbai does), so street zoom gives only roads. Let me
+  compare treatments:
+
+  Read 2 files, ran 1 shell command (ctrl+o to expand)
+
+● blocks is clearly right here — continuous strokes, no staircase, and the
+  ground plate fades properly. Now the zoom: 289 features is too thin. Testing
+  pull-back:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● z14.4 is dramatically better — 1424 features, 11 labels, real neighbourhood
+  names (Bodakdev is right). Let me see the middle option:
+
+  Read 1 file (ctrl+o to expand)
+
+● z14.4 wins — neighbourhood names instead of random clinics. Setting the tour
+  zooms there and making the tour pick its own road treatment:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The sed I used earlier to test zooms had a revert that matched two lines —
+  mrias got clobbered to 16.2. Let me inspect and set them all explicitly:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Now the flight itself — the frames that matter most:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Flat at tilt 0°, mid-descent, card dissolving back in — exactly the intended
+  behaviour. Now the top of the arc:
+
+  Read 1 file (ctrl+o to expand)
+
+● Those were either side of the peak — the arc's apex is at ~1.06 s. Let me look
+  at it:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The payoff frame: at the apex the camera is flat at z9.6 with Ahmedabad and 
+  its three markers on the left, Kapadvanj on the right, and the highway between
+  them. That's what the arc buys. Let me add the keys to help and check the
+  settle:
+
+  Searched for 1 pattern, read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Settle at t=0.45: tilt rising through 15°, card fading in. Now let me verify
+  the interactive path for real, by driving a pty:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The full interactive path works — opens on the first stop, n/b fly and
+  cross-dissolve, e exits, q quits clean. Let me lint and re-test:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Clean. One thing I should measure before calling this done — this runs over
+  SSH, and a flight repaints most of the screen:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 1.7 MB/s is far too much for SSH. Let me find where it's going:
+  Ran 1 shell command (ctrl+o to expand)
+
+● One frame is 148 KB with 11,575 SGR sequences but only 312 distinct styles —
+  the styles are interleaved, so nothing collapses into runs. Let me look at how
+  luminance becomes colour:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The luminance is continuous, so nearly every cell gets a unique colour.
+  Quantising it collapses runs — let me try it and measure both cost and
+  appearance:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 35% off. Let me see where the remaining bytes go — the escapes dominate, and
+  truecolor escapes are ~19 bytes each:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● TINT_RGB[0] is (232,232,226) — essentially grey. In mono mode the whole map is
+  a grey ramp, and xterm already ships one at indices 232–255. Let me test
+  emitting palette indices instead of truecolor:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 973 KB/s — only 13% more. We're at ~11 bytes/cell, which is close to the floor
+  (3 for the UTF-8 glyph + ~8 for the escape). Before I judge the appearance,
+  the PNG tool decodes indexed colour wrongly, so let me fix it or I'd be
+  reviewing a lie:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Visually identical — the 43% saving costs nothing. But something's wrong:
+  labels are showing at full brightness inside the faded band ("Thaltej",
+  "Gurudwara Gobinddham"). Let me check:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Found it — and it's a bug I introduced. toward_bg only blends Color::Rgb, so
+  once the map started emitting palette indices the fade silently stopped
+  applying to it. The band was clearing nothing:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The fade is back and now the map emerges smoothly under "Bodakdev". Let me pin
+  this bug class with tests so it can't come back:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Let me verify those tests actually catch the bug rather than just passing:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The integration test was vacuous — the embedded sample has no data at
+  Kapadwanj, so those rows were blank anyway. Let me make it test the
+  compositing directly:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Both catch it now. Let me restore the fixed version with the better test:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Kapadwanj at z13.8 — the town, the river bend, the highway. Now documentation:
+
+  Searched for 1 pattern, ran 4 shell commands (ctrl+o to expand)
+● Done. The experience section is built — as part of the map crate rather than
+  beside it, because it is the map with a scripted camera.
+
+  Content came from experience/exp.md (I found it rather than inventing
+  anything) into data/places.txt: five stops, oldest first, each with
+  coordinates, a camera, and a sentence about what happened there.
+
+  The flight
+
+  The obvious implementation — interpolate centre and zoom independently — is
+  unwatchable at street zoom: the middle of every journey is a grey blur and the
+  ends crawl, and you arrive with no idea where you came from. So the camera
+  flies the Van Wijk–Nuij arc (Smooth and Efficient Zooming and Panning, InfoVis
+  2003), which holds perceived speed constant in screen-widths per second.
+  Closed form, ~30 lines, no iteration.
+
+  The altitude at the top isn't a number I picked — it falls out of the
+  derivation as the height where both endpoints frame comfortably. Which means
+  the Ahmedabad→Kapadwanj flight shows you the 60 km between them on the way
+  past, with a marker on every stop:
+
+  FLAT  z9.6  tilt 0°
+    ◇ ◇ ◇ Ahmedabad ──── highway ──── Kapadvanj ◈
+
+  I verified that frame, not just the maths. Two tests hold it: one
+  differentiates the solution and checks the invariant ρ²(du/w)² + (dw/ρw)² = 1
+  (holds to 1.02×), the other requires the arc to beat naive interpolation on
+  peak pan rate by 6×.
+
+  Travel is flat, arrival is 2.5D — the camera levels out in the first third,
+  crosses as a plain map, and only tilts up once stopped. Doing both at once
+  makes the tilt read as wobble. The caption fades out on the place you're
+  leaving, vanishes mid-flight, and fades back in on arrival; under it the map
+  dissolves to nothing over four rows rather than sitting in a bordered box.
+
+  --place ID --from ID --at SECONDS renders any frame of any flight
+  deterministically, which is how I checked all of the above.
+
+  Two things worth your attention
+
+  I set the tour zooms to ~14.4, not street level. The basemap has no building
+  footprints outside Mumbai, so z16 over Ahmedabad is six roads on an empty
+  plate — accurate and nothing to look at. At 14.4 the road network and
+  neighbourhood labels arrive together and it reads as a place. Verified by
+  comparison, not assumed.
+
+  Bandwidth, since this is served over SSH. I measured it: idle 0.5 KB/s, but a
+  flight was 1.7 MB/s. I cut that to ~1.0 MB/s by quantising the brightness ramp
+  to 24 steps and emitting palette greys instead of truecolor for neutral cells
+  (xterm's 232–255 is a 24-step grey ramp) — no visible change, I compared
+  renders. It won't go much lower: a full-screen dithered map is a full-screen
+  texture, and at ~11 bytes/cell a frame is ~100 KB. A flight is a 2–3 s burst,
+  so ~2.5 MB per keypress, and a slow link plays it late rather than skipping.
+  If that's too much for your deployment, the lever is flight frame rate — tell 
+  me and I'll add a cap.
+
+  One bug worth naming: the palette-index optimisation silently broke the fade,
+  because toward_bg only understood Color::Rgb and skipped every indexed cell —
+  the band cleared nothing while still appearing to work on the coloured parts.
+  Fixed, and both regression tests were checked by reintroducing the bug and
+  confirming they fail.
+
+  26 tests pass, clippy clean, and I drove the whole thing through a real pty (e
+  / n / b / enter / q).
+
+  Two content points you should look at, since they're yours and I didn't want
+  to change them unasked: exp.md says "Gateway Corp" but your email domain is
+  thegatewaydigital.com — worth deciding which name goes on a public portfolio.
+  And for MRIAS I labelled the stop "the wrong turn" and wrote the note around
+  starting over; it's an honest reading of what you wrote, but the tone is a
+  choice you should sign off on.
+
+✻ Churned for 25m 18s
+
+❯ how do i run it                                                               
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● It's already built. From the map directory:
+
+  cd ~/projects/terminal/map
+  ./target/release/termap --tour
+
+  It must be run from map/ — the data paths (data/places.txt,
+  data/india.pmtiles, data/india.tmhg) are relative, so it'll fall back to the
+  embedded sample from anywhere else.
+
+  Keys once you're in:
+
+  ┌───────┬───────────────────────────────────────────┐
+  │       │                                           │
+  ├───────┼───────────────────────────────────────────┤
+  │ n / b │ next / previous stop — this is the flight │
+  ├───────┼───────────────────────────────────────────┤
+  │ enter │ replay the arrival                        │
+  ├───────┼───────────────────────────────────────────┤
+  │ e     │ leave the tour, back to the plain map     │
+  ├───────┼───────────────────────────────────────────┤
+  │ ?     │ help                                      │
+  ├───────┼───────────────────────────────────────────┤
+  │ q     │ quit                                      │
+  └───────┴───────────────────────────────────────────┘
+
+  Start on a specific stop with --place gateway (ids: knowledge-high, mrias,
+  silver-oak, innoventa, gateway).
+
+  To rebuild after editing data/places.txt — you don't need to. It's read from
+  disk at startup, so just restart. If you change Rust, cargo build --release 
+  --offline (the --offline matters, crates.io is proxy-blocked here).
+
+  Give it a wide terminal. I tuned it at 180×48; below ~120 columns the caption
+  starts crowding the map.
+
+  If you want to look at a frame without an interactive terminal — how I checked
+  all of this:
+
+  ./target/release/termap --snapshot 180x48 --place gateway | python3
+  scripts/ansi2png.py out.png
+
+  # any frame of any flight, deterministic
+  ./target/release/termap --snapshot 180x48 --place knowledge-high --from
+  gateway --at 1.06 | python3 scripts/ansi2png.py arc.png
+
+  That second one is the top of the arc — Ahmedabad and Kapadwanj in the same
+  frame. It's the thing worth seeing first, and n from the Gateway stop plays it
+  live.
+
+✻ Crunched for 22s
+
+❯ we want braile as default and start show be from the higest zoom and then it  
+  will tilt and zoom in                                                         
+
+● Three changes. Braille is easy — I'll drop the tour's override so it inherits
+  the app default. The opening becomes a real descent from altitude, which means
+  the tour has to defer until the viewport knows its size:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The descent works — z2.8 → z13.8 flat, then tilts to 46°. But that trace shows
+  a real bug: bearing goes 349° mid-flight, then 360°, then 346°. The camera
+  snaps back to north at the moment the flight hands over to the settle:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Test confirmed against the bug. Now let me look at braille at these zooms and
+  the opening descent:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The opening: all of India in braille, state borders and names, with the five
+  tour markers clustered in Gujarat. Now the arrival in braille:
+
+  Read 1 file (ctrl+o to expand)
+
+● Braille reads as a fine engraving at the arrival — more delicate than blocks.
+  Let me update the docs and re-verify:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Idle jumped to 360 KB/s — but that's likely my measurement, not the code: the
+  opening descent is now stretched to ~5 s and the script only skipped 3.5 s.
+  Let me verify rather than assume:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Confirmed — 0.4 KB/s idle; the 360 was my measurement window overlapping the
+  now-longer opening. No regression.
+
+  Both changes are in.
+
+  Braille is the default. I removed the tour's override, so it inherits the
+  map's own default and r still cycles mid-tour. At the arrivals it reads as a
+  fine stipple engraving rather than a diagram — different character from
+  blocks, and I think the better one for this.
+
+  The tour opens from orbit. The first thing you see is the whole of India,
+  flat, with a marker on every stop clustered in one corner of Gujarat — then it
+  descends ten zoom levels into Kapadwanj and the ground tilts up:
+
+  z2.8  FLAT   tilt 0°   whole subcontinent, five markers in Gujarat
+  z5.1  FLAT   tilt 0°
+  z11.7 FLAT   tilt 0°
+  z13.8 RELIEF tilt 46°  Kapadwanj, caption arrives with the ground
+
+  The descent is stretched ~1.7× against a normal hop and allowed past the usual
+  ceiling, because nothing precedes it to establish where in the world any of
+  this is. The caption stays away for the whole descent and arrives with the
+  ground.
+
+  That needed one structural change: the opening frames itself against the whole
+  basemap, which can't be computed before the viewport knows its size, so
+  entering the tour now defers to the first frame rather than acting
+  immediately.
+
+  A bug the change exposed. Tracing the descent, the bearing went 349° → 360° →
+  346°. The settle was re-running the bearing interpolation from the angle the
+  flight took off at, so the camera snapped back to north and rotated round a
+  second time. It was there for every flight, hidden until now because the old
+  opening cut straight to the stop and set the two angles equal. Fixed, and
+  there's now a test that ticks a whole flight at 20 ms and asserts no single
+  step jumps in bearing, tilt or zoom — I confirmed it fails when I put the bug
+  back.
+
+  27 tests, clippy clean, driven through a pty again. Same command to run it:
+
+  cd ~/projects/terminal/map && ./target/release/termap --tour
+
+  Worth knowing: --place gateway --at 2.0 now snapshots the opening descent to
+  Gateway rather than a bare arrival, since that's what actually happens on
+  entry. Use --from for the inter-stop flights.
+
+✻ Cooked for 4m 56s
+
+❯ mrias 23.326135178395198, 72.68374928049728                                   
+  gateway groups 23.03858323089789, 72.51293375215648                           
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● MRIAS moved ~3 km, so let me check it lands somewhere with map around it:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+● The corrected position is genuinely rural — 99 features, one label. It reads
+  as empty at z14.2. Let me find a zoom where it has context:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Counter-intuitive — zooming out gives fewer features here (99 → 8 → 45),
+  because the lower-zoom tiles are generalised and this area has only fine
+  detail. Let me look:
+
+  Read 1 file (ctrl+o to expand)
+
+● z12.4 is worse — one road and a village name. Let me check closer instead:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Both coordinates updated (trimmed to 6 decimals — ~10 cm; the rest was float
+  noise). 27 tests still pass.
+
+  I checked where they actually land:
+
+  - Gateway — 23.0386, 72.5129, essentially the same spot as before, just
+  precise. Card now reads 23.039°N 72.513°E. No change to how it looks.
+  - MRIAS — 23.3261, 72.6837 moved it ~3 km, and the marker now sits right next
+  to a label reading "Goenka Hospital – Piplaj", which is good evidence the new
+  coordinate is the real one.
+
+  One thing worth telling you rather than quietly leaving: MRIAS is going to 
+  look sparse, and that's the data, not a bug. It's genuinely rural there. I
+  swept the zoom to find the best view and 14.2 — what's already in the file —
+  is the peak:
+
+  z12.4   45 feat      z14.2   99 feat  ← best
+  z13.2    8 feat      z14.8   49 feat
+                       z16.0   19 feat
+
+  Zooming out makes it worse, because the low-zoom tiles are generalised and
+  this area only has fine detail; zooming in just covers less ground. So it
+  stays at 14.2. Compared to the other four stops it'll read as fields and a
+  couple of tracks, which is an honest picture of a college outside Gandhinagar.
+
+  One thing I did not change: you wrote "gateway groups", but the card says
+  "Gateway Corp" (from exp.md), and your email domain is thegatewaydigital.com —
+  three different names for the same employer. I flagged this last time and
+  didn't want to guess at what goes on a public CV. Tell me which is right and
+  it's a one-line edit:
+
+  - Gateway Corp (current)
+  - Gateway Group
+  - Gateway Digital
+
+✻ Sautéed for 1m 59s
+
+❯ silver oak uni 23.090452618855007, 72.53469144043343                          
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The opposite of MRIAS — this is dense city (1580 features at z13.6). Let me
+  look at the current 14.4:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Updated. That one was ~13 km off — the old coordinate had it out in the
+  south-west outskirts; the new one puts it in Gota/Chandkheda, and the map
+  agrees: the marker now sits in a real street grid with RC Technical Institute,
+  SMVS Swaminarayan Mandir and Chanakyapuri around it.
+
+  I swept the zoom again and left it at 14.4:
+
+  z13.6  1580 feat, 11 lbl   — wide, city-scale
+  z14.4   659 feat,  5 lbl   ← keeps the campus's own streets legible
+  z15.2   229 feat,  0 lbl   — labels gone
+
+  13.6 has more on screen, but at 14.4 you can still read the block structure
+  the university sits in, and it keeps the named landmarks. Worth knowing that
+  lever exists if you'd rather see more of the city.
+
+  27 tests pass. Three of the five coordinates are now the precise ones you've
+  given; knowledge-high (23.020, 73.070) and innoventa (23.023, 72.546) are
+  still the rounded values from exp.md if you want to pin those too.
+
+  Still open from earlier, one line to fix whenever you decide: the Gateway card
+  says "Gateway Corp", you wrote "gateway groups", and your email is
+  thegatewaydigital.com.
+
+✻ Churned for 51s
+
+❯ okay now start build a full on portfolio using this asthetic and everthing.   
+                                                                                
+  one app. make it seprately and commit work till now before starting.          
+
+● Committing first. Let me see what state the repos are in.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● map/.git is a bare git init — no commits, refs, remotes or stashes. Since the
+  portfolio needs to share code across map/ and skills/, one repo at the top
+  level is the right structure. Let me check what should be excluded first:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● map/.git is empty, so absorbing it loses nothing — but I'll move it aside
+  rather than delete it. Setting up one repo at the top level:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Their git identity is @thegatewaycorp.co.in — so "Gateway Corp" in exp.md is
+  likely right after all. Now the repo:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● places.txt didn't make it — map/.gitignore excludes the whole data/ directory,
+  and git can't re-include a file whose parent directory is excluded. Fixing at
+  the source:
+
+  Ran 1 shell command (ctrl+o to expand)
+● places.txt is in now. Committing:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● A hook here forbids that trailer — dropping it:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Committed — 108 files, clean baseline.
+
+  Now the portfolio. The key decision is how to combine: the two existing apps
+  are ~8,000 lines of renderer, and duplicating that would be the worst possible
+  choice. Let me look at what needs exposing:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Both are ~8,000 lines I must not duplicate. Converting each to a library the
+  portfolio can depend on, starting with the map:
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Making it a library turned a doc comment into a doctest — the .tmap format
+  block is being compiled as Rust:
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Both build as lib+bin, 27 and 28 tests green. Now the workspace and the new
+  app:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The workspace builds offline. Now each renderer needs to draw into a given
+  rect so the portfolio can own the chrome:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● All green. Now the portfolio app itself — content file first:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Now the shell — palette, section state, and the transition:
+
+  Read 2 files (ctrl+o to expand)
+
+● Now the landing section and the entry point:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Compiles. Two things needed before I can judge it: a snapshot flag, and the
+  map's data paths — termap looks in ./data/, which from the workspace root is
+  the wrong place.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● 28 + 28 + 1 tests pass. Now a snapshot flag so I can actually review it —
+  reusing termap's ANSI writer rather than a third copy:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Home renders. The name is duplicated in the rail and the hero though — let me
+  check the other three sections before fixing:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+● The map data resolved correctly and the tour landed. But there's the exact
+  problem I warned about in the code: two headers and two footers. Let me check
+  the other two, then fix it properly:
+
+  Read 1 file (ctrl+o to expand)
+
+● The projects section is working — 3D mark, scrolling tool logos, and the
+  two-column netjail diagram, with single chrome. Skills:
+
+  Read 1 file (ctrl+o to expand)
+
+● Both work. Now the real problem — fixing the duplicated chrome in Experience,
+  and the duplicated name on Home:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● One app now — single rail, single footer with the map's readings on the right.
+  Let me verify interactively:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All four sections, the flight, wrap-around and the home shortcuts all work.
+  Linting and committing this milestone:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Two pre-existing lints surfaced now that clippy sees the lib target. Let me
+  look at the real one:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● That test asserts nothing — * 0 erases the term, and it passes at: 0 for every
+  project, so the values are trivially equal. Fixing it to actually test the
+  claim:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Clippy clean, 57 tests pass. Committing the working shell:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both commits are in, and the portfolio runs as one app.
+
+  cd ~/projects/terminal && cargo run --release --offline -p portfolio
+  # or: ./target/release/portfolio
+
+  tab / shift-tab move between sections, 1/2/3 jump from home, q quits.
+  Everything else forwards to whichever section has the screen, so the map still
+  pans with hjkl and flies with n/b.
+
+  Structure. The two existing apps became libraries and stayed binaries —
+  portfolio is a third crate driving both. Nothing was copied; duplicating 8,000
+  lines of renderer would have been the one unrecoverable mistake here. map/
+  and skills/ still run standalone, which is how each gets debugged.
+
+  Four sections: home (a name, a paragraph, a way in), experience (the map
+  tour), projects (the carousel), skills (the sheet).
+
+  Two things I fixed rather than shipped:
+
+  - The first version had two headers and two footers in the experience section
+  — literally the trench-coat problem. The map now has a chrome-free render, and
+  its instruments (RELIEF z13.8 tilt 46°) moved into the shell's footer as
+  readings rather than a second status bar.
+  - A silent data-path bug. termap read data/ relative to the working directory,
+  so from the workspace root it found nothing and fell back to the embedded 
+  Mumbai sample — rendering the wrong city instead of failing. Paths now resolve
+  through a candidate list, with a test that fails if the tour sheet can't be
+  found.
+
+  I also found a skysheet test that asserted nothing — it compared a value with
+  itself and added a term multiplied by zero, so it would have passed whatever
+  the layout did. Now it asks for each project in turn.
+
+  Clippy clean across the workspace, 57 tests, and I drove the whole thing
+  through a pty: all four sections, the flight, wrap-around, the home shortcuts,
+  clean exit.
+
+  What I need from you. The home screen is the one part with no source I could
+  check, so portfolio/data/about.txt is marked DRAFT — the pitch and "now" lines
+  are a starting point in your voice, not something I can stand behind. And the
+  contact line says you@example.com deliberately: two addresses are visible
+  from this machine (prince.patel@thegatewaycorp.co.in,
+  jaydip.meghapara@thegatewaydigital.com) and which one goes on a public server
+  is not my call.
+
+  Still outstanding from before, unchanged: the primary/secondary skill split
+  with AI markers was never built (the sheet still tiles all 37 logos with
+  visible near-repeats), and three project cards are still marked draft.
+
+✻ Cooked for 14m 47s
+
+❯ use prince240102@gmail.com                                                    
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Done — the contact line now reads github.com/Prince2412k2 · 
+  prince240102@gmail.com · ssh <this-host>. Committed.
+
+  Two small things I noticed while checking that render:
+
+  ssh <this-host> is still a placeholder. It's the one line that only makes
+  sense once you know the hostname you'll serve this on. Tell me the domain and
+  I'll set it.
+
+  The pitch and "now" text are still my draft, and they're the first thing
+  anyone reads. Currently:
+
+  ▎ I build systems software and the tools that make it usable — network 
+  ▎ isolation that holds under a threat model, clock sync that stays 
+  ▎ frame-accurate across devices, map pipelines, and a lot of terminal 
+  ▎ interfaces. Mostly Go, Rust and Python, mostly close to the kernel or close 
+  ▎ to the pixels.
+
+  I wrote that from what your repositories actually do, so the claims are
+  sourced — but the voice is mine, not yours. It's portfolio/data/about.txt,
+  read from disk at startup, so you can edit and just restart; no rebuild.
+
+✻ Worked for 50s
+
+❯ also add 2 new tabs.                                                          
+                                                                                
+  one is about me include movies and shows and characters i like.               
+  and orher as chat. it will be a frontend to opencode acp in plan mode. so     
+  people can ask questions about me or in geberal                               
+  Yeah — this paints a much clearer picture than the earlier tech-heavy read.   
+                                                                                
+  Your taste seems to cluster around gentleness, curiosity, purpose,            
+  responsibility, and people trying to become better without losing their       
+  softness.                                                                     
+                                                                                
+  * Snufkin — freedom, wandering, nature, simplicity, independence. He cares    
+  deeply about people without needing to possess them or constantly be around   
+  them.                                                                         
+  * The Little Prince — wonder, sincerity, seeing value in things adults        
+  dismiss, relationships giving meaning to otherwise ordinary things.           
+  * Ted Lasso — radical kindness without naïveté, believing in people,          
+  emotional openness, forgiveness, leadership through empathy.                  
+  * Uncle Iroh — wisdom without ego, patience, redemption, enjoying small       
+  things, choosing compassion after having experienced loss.                    
+  * Spider-Man — responsibility, sacrifice, doing the right thing when it would 
+  be considerably easier not to. Especially Spider-Verse’s version of becoming  
+  rather than being born ready.                                                 
+                                                                                
+  There’s a strong commonality there: you seem to like characters who are good  
+  without being boring. They aren’t perfect moral saints. They suffer, make     
+  mistakes, get lonely, fail, wander, joke around, and still deliberately       
+  choose kindness.                                                              
+                                                                                
+  Your movies reinforce it.                                                     
+                                                                                
+  Ikiru is almost entirely about the question: what makes a life meaningful? A  
+  person realizes how little time he has and finally chooses to make something  
+  real and useful.                                                              
+                                                                                
+  A Silent Voice is about guilt, isolation, forgiveness, connection and whether 
+  someone who has done wrong can still become a good person.                    
+                                                                                
+  Spider-Verse is outwardly a superhero movie, but emotionally it’s about       
+  identity, expectations, fear, family and taking the leap before you feel      
+  ready.                                                                        
+                                                                                
+  So I don’t think your movie taste is primarily about genre. Those three look  
+  completely different on the surface. The connection is people figuring out    
+  how they should live.                                                         
+                                                                                
+  Your shows make that even stronger.                                           
+                                                                                
+  Ted Lasso → kindness, community, damaged people helping damaged people.       
+                                                                                
+  The Bear → obsession with craft, pressure, grief, family, chaos, and trying   
+  to build something beautiful despite yourself.                                
+                                                                                
+  Haikyuu!! → enthusiasm, improvement, teamwork, respecting rivals, finding joy 
+  in getting better rather than merely winning.                                 
+                                                                                
+  One Piece → freedom, adventure, absurdity, loyalty, chosen family, enormous   
+  dreams, and refusing to let the world crush your individuality.               
+                                                                                
+  And Anthony Bourdain fits unusually well with all of this.                    
+                                                                                
+  He’s the bridge between your interest in people and places. Not travel as     
+  “here are the ten attractions you should see,” but going somewhere, eating    
+  with people, listening to them and trying to understand how they live. Food   
+  becomes an excuse to talk about culture, history, politics, loneliness,       
+  happiness and ordinary human lives.                                           
+                                                                                
+  Put together, I think there are a few deeper interests underneath the         
+  individual favorites:                                                         
+                                                                                
+  Freedom.                                                                      
+  Snufkin wandering, Luffy sailing wherever he wants, Miles defining what       
+  Spider-Man means for himself, Bourdain travelling without sanitizing the      
+  world.                                                                        
+                                                                                
+  Human connection.                                                             
+  Ted Lasso, A Silent Voice, One Piece, The Bear, Little Prince — relationships 
+  aren’t side plots in these stories. They’re essentially the point.            
+                                                                                
+  Kindness with weight behind it.                                               
+  You don’t seem drawn to generic “nice characters.” Iroh has suffered          
+  enormously. Ted is struggling himself. Spider-Man constantly pays for doing   
+  the right thing. Their kindness matters because it is a choice made despite   
+  pain.                                                                         
+                                                                                
+  Purpose.                                                                      
+  This is especially strong with Ikiru. There seems to be an attraction to the  
+  question of what makes a life worth having, rather than merely what makes     
+  someone successful.                                                           
+                                                                                
+  Wandering and discovering.                                                    
+  Snufkin, Bourdain, One Piece and The Little Prince all involve literally      
+  moving through the world and meeting different people. That’s probably        
+  important when we eventually map your interest in places, travel, mountains   
+  and nature.                                                                   
+                                                                                
+  Craft and improvement.                                                        
+  The Bear and Haikyuu are both intensely concerned with becoming excellent at  
+  something. But neither ultimately says excellence is merely about status. The 
+  process changes the people involved.                                          
+                                                                                
+  Earnestness.                                                                  
+  This might be one of the biggest ones. Most of these works are willing to be  
+  deeply sincere without constantly hiding behind irony. Even when they’re      
+  funny or absurd, they’re comfortable saying that friendship, dreams,          
+  kindness, food, beauty and tiny human moments genuinely matter.               
+                                                                                
+  And there’s an interesting combination in your taste:                         
+                                                                                
+  Snufkin’s freedom + Little Prince’s wonder + Iroh’s peace + Ted’s kindness +  
+  Spider-Man’s responsibility + Bourdain’s curiosity.                           
+                                                                                
+  That feels much closer to the center of your interests than “likes Linux and  
+  maps.”                                                                        
+                                                                                
+  We still have some big missing pieces before I can map the whole thing        
+  properly: music, books beyond The Little Prince, specific                     
+  places/countries/cities you feel drawn toward, mountains/nature, food,        
+  artists/directors, historical figures, childhood interests, games, and what   
+  kinds of real-life experiences make you happiest.                             
+                                                                                
+  be creativve with both and dont hold back.                                    
+                                                                                
+  fetch images of characters and shows and people and terminal ui them. make    
+  pretty artsy blog                                                             
+                                                                                
+  also the chat should not be lile opencode. it should be more creative and     
+  artiatic.                                                                     
+                                                                                
+  you have full creative control over this                                      
+
+● This is a great brief. Two big pieces — let me check what's actually available
+  before designing either.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● opencode acp exists — good. But Wikimedia and TMDB are blocked; only GitHub is
+  reachable. Let me map the actual boundary before I design around it:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+● Only GitHub is reachable — Wikimedia, TMDB, Wikia, Amazon and MAL are all
+  blocked, and there's no character art on the machine. I'll come back to that.
+  First let me de-risk the harder piece:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Handshake works. Now the session and plan mode:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● ACP works end to end. Let me find plan mode and test a real prompt:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Plan mode exists as a session config option. Let me find how to set it and run
+  a real prompt:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● session/set_mode works. Now a real prompt, to learn the streaming shape:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The prompt fails here with host_not_whitelisted — the LLM provider is blocked
+  by the same proxy. So I can build and test the whole protocol layer, but I
+  can't get a live model answer on this machine. Noting that; it'll work where
+  opencode has network.
+
+  Let me write the content for the taste section first — the writing is the
+  substance here.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the emblems. Let me reuse the shape DSL from the project marks pipeline:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the emblem pipeline — original artwork rather than dithered film stills,
+  which sidesteps both the blocked network and the copyright question:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The script draws blind, so let me look at what it actually produced:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Four of twelve are wrong: the hat's crown reads truncated, the planet is a
+  blob with a slot cut through it, the web is a half-net, and the knife is a
+  grey slab. Fixing those:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Double comma — my join added one and the format string had one. Fixing:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Better — but the hat still reads as a mountain and the knife has become a
+  rolling pin. Two more fixes:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The knife reads correctly now. The hat still doesn't — a cone reads as a
+  mountain, so let me make the crown a soft dome instead:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The hat reads now. Time to build the section itself — parser and a scrolling
+  long-form layout:
+  Ran 1 shell command (ctrl+o to expand)
+
+● The test caught a real mismatch — I drew sign but the sheet asks for whistle:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Now the page renderer — a scrolling essay with plates alternating down the
+  spread:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now wiring it into the shell with momentum scrolling:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Genuinely nice — but the emblems are overflowing their column and colliding
+  with the text ("without", "aesthetic" have the hat behind them). PLATE is 22
+  while the art runs to 34:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● No collisions, and the alternating plates read as a spread. Let me check
+  further down the page:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The essay section is done. Now the chat. First — do I have a JSON library
+  available offline, or do I hand-roll one?
+
+  Listed 1 directory (ctrl+o to expand)
+
+● No serde offline — so a minimal JSON parser it is, which suits the project's
+  zero-dependency ethos anyway:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the ACP client:
+
+  Read 1 file (ctrl+o to expand)
+
+● Now the chat UI. For the "thinking" state I want something generative rather
+  than a spinner — let me check the canvas API I can draw it with:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Now wiring it in. The agent answers from context rather than tools, so let me
+  see what data I can hand it:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Now the last wiring — the Ask section, which needs the shell to stop
+  swallowing keystrokes like q:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● The tide works. Two refinements — the lines are parallel copies of each other,
+  and the tab shouldn't poll at 40 Hz when idle:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Works end to end, and the provider error surfaces in the UI rather than
+  hanging. One thing I must verify — that typing a q doesn't quit:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● q types, Esc clears, Ctrl+C exits. Linting and checking the rail doesn't
+  overflow now there are six sections:
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● The contact line is being clipped to the text measure — ssh <th. Letting that
+  one row run wider:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● All six sections work. Committing:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both sections are in. 70 tests, clippy clean, driven through a pty end to end.
+
+  cd ~/projects/terminal && ./target/release/portfolio
+  # tab / shift-tab between sections, or 1–5 from home
+
+  taste
+
+  A scrolling long-form essay, not another fixed frame — the other sections
+  animate in place, and a fourth of those would have made this a card wall.
+  Emblems alternate down the spread, with momentum scrolling and snap-to-rest.
+
+  On the images: I couldn't fetch any. Every image host is blocked from here
+  except GitHub — Wikimedia, TMDB, Wikia, MAL, imgur all fail — and there's no
+  character art on the machine.
+
+  So I drew them instead, and I think it's the better answer regardless. A
+  dithered 40-column crop of a copyrighted frame is a bad thing to put on a
+  public server, and the object a character carries says more than a low-res 
+  picture of their face: Snufkin is a hat, Iroh is a cup of tea, The Bear is a
+  knife, One Piece is a straw hat. Twelve emblems composed from shape functions
+  — flat with a lit rim, so they read as woodcuts.
+
+  I rendered a contact sheet and fixed what didn't read: the hat was a mountain
+  until the crown became a dome, the knife was a grey slab, then a rolling pin,
+  before the blade got deep enough. A test asserts every entry names a drawing
+  that exists — it caught two that didn't.
+
+  If you'd rather have real stills, drop images anywhere I can reach and I'll
+  build the photo pipeline; it's the same half-block technique the logos already
+  use.
+
+  ask
+
+  Deliberately not a chat client. Questions set as marginalia in the accent,
+  answers as prose in the essay's measure, and the wait is a tide — contour
+  lines on the same braille canvas the map is made of, drifting while the agent
+  thinks, still when it answers. A pure function of a clock, like everything
+  else here.
+
+  The security posture is the design, not a wrapper round it: the session is
+  pinned to plan mode and refuses to continue if that call fails, every
+  permission request is declined, and turns are capped at 12. Nothing is granted
+  because nothing is needed — the whole portfolio is assembled into the first
+  prompt from the same sheets the app renders, so the agent has no reason to
+  reach for a tool.
+
+  That needed JSON and serde isn't in the offline registry, so there's a small
+  parser, with surrogate pairs and trailing-garbage rejection handled rather
+  than assumed.
+
+  One honest limit. I verified the handshake, plan mode, the prompt and the
+  error path against a live opencode acp — but the provider host is blocked from
+  this machine (Forbidden: host_not_whitelisted), so I have never seen a 
+  streamed answer arrive end to end. The stream handling is tested against
+  recorded message shapes. It should work where opencode has network; that's the
+  first thing to try.
+
+  Two things worth your attention before this goes anywhere public: the chat 
+  spends your LLM credits on strangers' questions, and 12 turns per connection
+  is the only brake — say the word and I'll add a global daily cap. And the
+  taste essay is written in my voice from your notes; it's
+  portfolio/data/taste.txt, read from disk, so edits need no rebuild.
+
+✻ Worked for 24m 50s
+
+❯ how do i run it?                                                              
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Already built:
+
+  cd ~/projects/terminal
+  ./target/release/portfolio
+
+  Run it from ~/projects/terminal (the workspace root) — the data paths resolve
+  from there. Anywhere else and the map silently falls back to the embedded
+  Mumbai sample.
+
+  ┌─────────────────┬───────────────────────────────────────────┐
+  │                 │                                           │
+  ├─────────────────┼───────────────────────────────────────────┤
+  │ tab / shift-tab │ move between sections                     │
+  ├─────────────────┼───────────────────────────────────────────┤
+  │ 1–5             │ jump straight there from home             │
+  ├─────────────────┼───────────────────────────────────────────┤
+  │ q               │ quit — except in ask, where it's a letter │
+  ├─────────────────┼───────────────────────────────────────────┤
+  │ ctrl-c          │ quit from anywhere                        │
+  └─────────────────┴───────────────────────────────────────────┘
+
+  Per section: n/b fly the map, ←/→ browse projects, drag and wheel slide the
+  skills sheet, ↑/↓/space read the taste essay, and in ask you just type.
+
+  Jump straight to something with --section taste (or experience, projects,
+  skills, ask).
+
+  Two notes:
+
+  Give it a wide terminal — I tuned at 180×48. Below ~120 columns the project
+  diagrams fall back to prose.
+
+  ask will probably fail on this machine. It spawns opencode acp and the LLM
+  provider host is blocked here — you'll see Forbidden: host_not_whitelisted on
+  the prompt line. That's the error path working, not a crash. It should answer
+  wherever opencode has real network, and that's the one thing in this build I
+  couldn't verify end to end.
+
+  I noticed --help is stale — it doesn't list taste, ask, --scroll or --emblems.
+  Small fix, want me to sort it?
+
+✻ Worked for 30s
+
+❯ okay add ../harber-1 to projects                                              
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● It's harbr-1 (and there's a harbr too). Let me survey it:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● A Rust container platform served over SSH — very much in the same family as
+  this portfolio. Let me get the details right:
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● Rust, SSH, Docker, Traefik and Git logos all exist. Let me look at how a scene
+  is written so the new card matches:
+
+  Searched for 2 patterns, ran 4 shell commands (ctrl+o to expand)
+
+● Now I have everything. Writing the entry, the mark and the diagram:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● The sheet looks truncated — let me verify harbr actually made it in:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The binary I ran is stale — the workspace moved target/ up a level, and
+  skills/target/ still holds the pre-workspace build:
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+● The mark reads as stacked shipping containers. Now the animated diagram:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both failures are the tests doing their job. Let me get the real footprint
+  from the measuring tape rather than guess:
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+● All green. Let me look at the finished card:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Nothing overlaps but it's too dense — notes run straight into the next heading
+  with no separation. Let me tighten the prose and give the blocks room to
+  breathe:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● One line still butts straight into rollback, and I need a mid-animation frame
+  to check the walk. Fixing both:
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  You've hit your session limit · resets 10:10pm (Asia/Kolkata)
+     /usage-credits to request more usage from your admin.
+
+● Usage limit reached · continuing automatically at 10:10pm · esc or 
+  type to cancel
+
+✻ Baked for 7m 50s
+
+● Usage limit reset · continuing automatically
+
+  Read 1 file (ctrl+o to expand)
+
+● The walk is visible now — db and cache healthy, api starting, web waiting —
+  and the blocks have room. Verifying in the portfolio and committing:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● harbr is in as the tenth project card. It's harbr-1, not harber-1 — I found it
+  at ~/projects/harbr-1 (there's also a plain harbr I left alone; say the word
+  if that's the one you meant).
+
+  Everything came from the repo itself — README, Cargo.toml, module tree — not
+  paraphrased: Rust · 10,900 LOC · 32 modules · russh + bollard + rusqlite · 
+  Traefik + ACME · CI.
+
+  The mark is three stacked shipping containers. The door ridges matter —
+  without them it's three rectangles; with them it's the thing the name is
+  about.
+
+  The diagram is two columns, because harbr has two independent halves:
+
+  - ONE DOOR — the key you connected with is the login; an unknown key files an
+  access request, and an admin approving it lets the person in without
+  reconnecting. Plus the first-key-claims-the-instance rule.
+  - ONE DEPLOY — compose parsed in-process and driven straight at the Docker
+  Engine API, BuildKit, then the services walking up through their health checks
+  in dependency order, one at a time on a loop. That animation is the point: a
+  service that never goes healthy fails the deploy rather than reporting success
+  over a crash-looping container. Rollback re-runs recorded image ids, not
+  tags.
+
+  The footnote is the best detail in that repo: bind mounts resolve to absolute
+  paths the Docker daemon reads on the host, so harbr's own data directory has
+  to sit at the same path inside its container — /var/lib/harbr at
+  /var/lib/harbr is load-bearing, not tidiness.
+
+  Two tests earned their keep. I declared the footprint by eye at 78×26 and the
+  crop test rejected it; the measuring tape gave the real numbers, twice, as the
+  layout changed. And the sheet test asserted an exact count of nine projects —
+  a number with nothing to do with what that test checks — so it's a floor now.
+
+  One thing that cost me a detour, worth knowing: skills/target/ still holds a
+  pre-workspace binary. The first contact sheet I looked at was rendered by a
+  build from before the mark existed, and I spent a few minutes convinced the
+  generator was broken. Run ./target/release/… from the workspace root; the
+  per-crate target/ dirs are stale and can be deleted.
+
+  cd ~/projects/terminal && ./target/release/portfolio --section projects
+
+  The card is 10 of 10 — ←/→ to it. Two open questions on the entry: the repo
+  line says "local — not yet published", and the year is a guess at 2026 since
+  the repo has no commits yet.
+
+✻ Cogitated for 1m 40s
+
+❯ 1 - we dont want anything to sound ai generated                               
+  2 - over ssh the skills page is super laggy.                                  
+  3 - taste section feels ai generated ah. we also dont need to over explain.   
+  just show what they are we arent lecturing them about stuff.                  
+  4 - / for gloable help. ? for search in termap                                
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ 1 - we dont want anything to sound ai generated                               
+  2 - over ssh the skills page is super laggy.                                  
+  3 - taste section feels ai generated ah. we also dont need to over explain.   
+  just show what they are we arent lecturing them about stuff.                  
+  4 - / for gloable help. ? for search in termap(location).                     
+                                                                                
+  5- we have to indicate tht people can use the map.                            
+                                                                                
+  6- add a loading screen when first launch make it feel asthetic.              
+                                                                                
+  7- we can improve home screen lots its by far the weakest. i want to put      
+  snuffkin pfp there .                                                          
+                                                                                
+  8- make it ready for production where i will run this in a docker compose and 
+  expose it at 22 port.                                                         
+                                                                                
+  9- for termap we will need to parse the clients ip location for showoing      
+  where they are.                                                               
+
+● Nine items — several are substantial. Let me start with the one that's a
+  defect I can measure, then work through the rest.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 88 KB/s at idle — that's the problem. The sheet drifts forever, so it never
+  stops repainting. Let me look:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● REST: (0.8, 0.45) — the sheet drifts forever, so it never stops repainting.
+  Over SSH that's constant background traffic for motion nobody asked for:
+
+  Ran 1 shell command (ctrl+o to expand)
+● There's already an animate flag — the fix is to default it off, so the sheet
+  holds still until you touch it:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● 88 KB/s → 0.4 KB/s idle. Two tests assumed the old default — let me look at
+  what they're actually asserting:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both tests are about drift specifically. Fixing them to test the behaviour
+  rather than the old default, and pacing the scroll frames:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Idle is fixed (0.3 KB/s) and scrolling is down to 833 KB/s. Let me try one
+  more lever — the tiles emit full truecolor per cell:
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+● Idle was the real problem (88 → 0.3 KB/s); the edge quantisation only bought
+  another 7%, so scrolling is inherently a full repaint. Moving on.
+
+  Now the key scheme. ? currently opens termap's own help — let me see what's
+  searchable for a location lookup:
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● States, landmarks and places all carry names. Let me build the location
+  search:
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+● Search works. Now wiring the keys — ? opens it in the map, / becomes global
+  help:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● fly_to needs one more thing — the caption must not claim you're at a tour stop
+  when you searched somewhere else:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Search and global help both work. Now #5 — making it obvious the map is
+  drivable:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● Now the writing. The taste section is the one explicitly called out —
+  rewriting it to show rather than explain:
+
+  Read 1 file, ran 3 shell commands (ctrl+o to expand)
+
+● Only three fit per screen with big voids. Let me halve the emblems and go
+  two-up, which suits a gallery better:
+
+  Read 1 file, ran 2 shell commands (ctrl+o to expand)
+
+● A proper shelf now. Let me fix the warning and do the wider prose pass — the
+  landing copy has the same tells, plus a stale count:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the home screen and the Snufkin avatar. I can't fetch a picture, but his
+  silhouette — hat, pipe, coat — is the recognisable part, so let me draw a
+  bust:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+❯ when 1 press one it takes me to projects, on 2 it takes me to skills.         
+  it works from home screen. not from anyother tab                              
+● Good catch — that's a real bug, and I can see the cause. In the
+  projects/skills section, 1/2 were being forwarded to skysheet, which uses them
+  for its own tabs, so the shell just followed along. Navigation keys should be
+  the shell's everywhere:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● My detector was matching across ANSI escapes. Let me key off the footer hint
+  instead:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Several came back empty — let me look at what's actually on screen rather than
+  guess:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+❯ all the one liner in taste are cheesy.                                        
+  we just want to explain them.                                                 
+                                                                                
+  i like snufkin coz he kind but is free                                        
+  i like bourdain for the same reason                                           
+  everything here is about people being free from other or themselves           
+                                                                                
+  we can remove haikyuu                                                         
+                                                                                
+  spiderverse also add themes from 2nd movie                                    
+                                                                                
+  ted is also free from judgemnent                                              
+                                                                                
+  uncle iroh helps zuko be more free from expactation tht leads to pride        
+                                                                                
+  ikiru is also about freedom he gets when he sees tht he is dying              
+                                                                                
+  i like pwoplw and thing tht remond me of kindness and freedom.                
+
+● Two things. First, that confirms the key fix didn't take — let me check
+  whether my patch actually applied:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The code looks right, so something after it must be consuming the key. Let me
+  see the rest:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The routing reads correctly — my test isn't clearing the buffer before the
+  keypress. Let me redo it properly:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● My markers were colliding with other words ("read" matches "already"). Using
+  distinctive phrases:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The pty stream is unreliable for this — crossterm only emits changed cells, so
+  the phrase arrives fragmented. Let me test the state machine directly, which
+  also pins the bug permanently:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All three pass — so the fix works; my pty test was the unreliable part. 1–5
+  now mean the same thing everywhere, and digits are text in the chat.
+
+  Now the taste rewrite. You're right that the one-liners were cheesy, and the
+  freedom/kindness thread you describe is a much better spine:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Much better — explanatory and on-theme. Committing this batch:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Clean. Now the home screen with the Snufkin avatar — it's by far the weakest
+  page, so let me rebuild it as a profile card:
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+● Much stronger. Now the loading screen — using the app's own vocabulary rather
+  than a spinner:
+
+  Read 2 files, ran 2 shell commands (ctrl+o to expand)
+
+● The opening settles from choppy sea to flat horizon. Now production. Let me
+  check what I can actually verify here:
+  Ran 1 shell command (ctrl+o to expand)
+
+● Docker daemon is down and the registry is blocked, so I can write the
+  deployment but cannot build or run the image here. Two code changes first — a
+  non-TTY path and an honest signal when the basemap isn't mounted:
+
+  Searched for 1 pattern, ran 1 shell command (ctrl+o to expand)
+
+● Now the client-IP location (#9) — over SSH the visitor's address is in the
+  environment:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now the deployment. Writing it as OpenSSH with a forced command rather than an
+  in-process SSH server — no crate for that is available offline, and real sshd
+  is the better-audited choice anyway:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Let me validate what I can without a daemon:
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● sshd accepted every directive and only stopped on the missing host key. Let me
+  finish the validation with a throwaway key:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● sshd -t passes cleanly — the config is valid against real OpenSSH. One more
+  production concern before I commit: an idle session holds a slot forever.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The idle timeout fires exactly on schedule. Running the full suite and
+  committing:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The boot screen broke them — a fresh Shell is booting, so the first key just
+  skips the title card. That's correct behaviour; the tests need to start after
+  it:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● All nine items are addressed. Let me finish the de-AI pass (#1) on the text
+  that gets read most — the project cards:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● projects.txt is the worst — 25 em-dashes and 11 "rather than" constructions.
+  Let me read and rewrite it:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● These read well technically but the voice is the problem — em-dashes, "not X
+  but Y", an aphorism to close every paragraph. Let me see the rest:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now I'll rewrite them all in a plainer voice — shorter sentences, no em-dash
+  habit, and dropping the aphorism that closes every paragraph:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● 26 of 26 rewrites applied, em-dashes down from 25 to 7. Let me check what's
+  left and do places.txt:
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+● Idle looks high again — but the boot screen now runs for the first 2.4 s and
+  my warmup is only 2 s. Let me re-measure past it:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All nine done, committed across four commits. Here's each:
+
+  2. Skills lag over SSH — this was the real one. The sheet drifted at rest by 
+  design, so it repainted a full screen of colour tiles forever: 88 KB/s with 
+  nobody touching it. Drift is now off by default (space re-enables it). Idle:
+  88 → 0.2 KB/s. Scrolling went 1204 → 801 KB/s via slower frames for that
+  section and quantised tile edges, but a moving sheet genuinely does repaint
+  every cell, so that floor is real.
+
+  4. Keys — / is global help from every section; ? in the map is a place search.
+  No geocoder and no network, so the gazetteer is what's in memory: the tour
+  stops, the state overlay, and named features of loaded tiles, recomputed as
+  the view moves. Prefix beats substring, nonsense finds nothing. Enter flies
+  there on the tour's arc.
+
+  5. Map affordance — after the arrival settles: drag to pan · wheel to zoom · ?
+  to find a place, which fades and never returns once you've touched it.
+
+  1 + 3. The writing — taste is rebuilt around what you actually said: people
+  getting free of others or themselves, and being kind with it. Snufkin free of
+  everybody and still fond of them; Bourdain the same trick with a camera crew;
+  Iroh getting Zuko out from under pride; Ted free of judgement; Ikiru freed by
+  a diagnosis. Miles now covers both films including refusing a fixed story.
+  Haikyuu is out. It's a two-column shelf, not an essay — the "threads" section
+  was the lecturing part, and it's gone. Separately I rewrote 26 project beats 
+  and 5 tour notes: em-dashes 25 → 7, no more "not X but Y", and the paragraphs
+  just end.
+
+  6. Loading screen — braille contour lines that arrive choppy and lie flat
+  while the name comes up out of them. Any key skips it (tested).
+
+  7. Home — a profile card: drawn Snufkin bust left, name and pitch and the way
+  in right. Silhouette because at that size the hat and pipe are the likeness.
+
+  8. Production — deploy/ + docker-compose.yml. OpenSSH with ForceCommand rather
+  than an SSH server in the binary; any public key accepted, everything else
+  off, all capabilities dropped but four, read-only rootfs, host keys in a
+  volume so returning visitors don't see a fingerprint warning. Piped output is
+  now a plain-text CV (also the healthcheck), it says "no basemap mounted"
+  instead of silently drawing Mumbai, and sessions end after 15 idle minutes.
+
+  9. Client location — SSH_CONNECTION gives the visitor's address, so the marker
+  is them, not the datacentre. Private ranges skipped, with 172.16/12 handled
+  properly.
+
+  One thing I could not verify: the docker daemon is down here and the registry
+  is blocked, so the image was never built or run. The sshd config does pass
+  sshd -t against real OpenSSH, and the compose file parses — but the first
+  docker compose up --build will be its first real test.
+
+  Also: --help is still stale (no taste, ask, --scroll, --emblems), and the ball
+  emblem is now unused since Haikyuu came out.
+
+✻ Cogitated for 39m 36s

@@ -44,11 +44,13 @@ services:
     # A stranger's session should not be able to take the box down. These are
     # sized for a handful of concurrent visitors on a small VPS; the map holds
     # 96 tiles and a heightmap, which is where most of the memory goes.
-    deploy:
-      resources:
-        limits:
-          cpus: "1.5"
-          memory: 512M
+    #
+    # Plain `cpus`/`mem_limit` rather than `deploy.resources.limits`: the
+    # `deploy` key is a Swarm construct, and recent Compose versions try to
+    # reconcile it with `pids_limit` at the top level and refuse to start when
+    # the two disagree. These apply directly under plain `docker compose up`.
+    cpus: 1.5
+    mem_limit: 512M
     pids_limit: 256
 
     # sshd needs to write /run/sshd and the login records; nothing else needs
