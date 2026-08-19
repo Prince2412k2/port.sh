@@ -136,17 +136,52 @@ built into the binary, and the compose file mounts all three. Edit, then
 
 ## The chat section
 
-`ask` shells out to `opencode acp`, which is not in the image — the section
-will say it could not start the agent, and everything else works. To enable
-it, install opencode in the runtime stage and give the container credentials
-for whichever provider you use.
+`ask` runs `opencode acp` inside the container. The binary is in the image; what
+it needs from you is a provider key. Put one in a `.env` file beside
+`docker-compose.yml`:
 
-Two things to decide before you do. It spends your tokens on questions from
-strangers, and the only brake is `MAX_TURNS` in `portfolio/src/acp.rs` —
-twelve questions per connection, with nothing stopping a reconnect. And the
-session is pinned to plan mode, which is what makes it safe to expose: it
-refuses every permission request and has no tools, so everything it answers
-from is the context the portfolio hands it.
+```
+OPENCODE_API_KEY=...
+```
+
+With no key the section reports that the agent would not start and every other
+section carries on working. That is the intended failure: a missing key should
+cost one tab, not the site.
+
+**Which model.** `portfolio/data/models.txt`, in order, mounted rather than
+baked. The first that answers wins; one that will not start or that fails a
+question is dropped and the next is asked the same question with the context it
+has not seen. Nobody sees the switch except as a slower first answer. This
+matters because the list is free tiers on a personal account, and a single
+pinned model means the section dies for everyone the day its quota runs out.
+`opencode models` inside the container lists what is actually reachable —
+trust that over the file, which goes stale.
+
+**What it may do.** It can fetch and search the web. It cannot run a shell, and
+that is not a close call: this box takes any username over SSH, so `bash` on it
+is arbitrary code execution for anyone who can type. The allow-list is enforced
+three times — in opencode's `tools` block, in its `permission` block, and again
+by name in `answer_request` at every request — because the first two are one
+upstream rename away from meaning nothing.
+
+**What it costs you.** Strangers' questions spend your tokens. Two brakes, both
+in `portfolio/src/acp.rs`: `MAX_TURNS` (twelve questions a connection) and
+`MAX_TOOL_CALLS` (twenty-four fetches a session). Neither stops a reconnect. If
+this gets found by something automated, the lever is `models.txt` — empty it and
+the section turns itself off.
+
+## Messages
+
+`/reach <message>` in the ask section appends a line of JSON to a volume. It
+never touches the agent: a message meant for a person should arrive whether or
+not a model is up, and word for word rather than as something's summary.
+
+```bash
+docker compose exec portfolio cat /app/messages/messages.jsonl
+```
+
+Both services mount the same volume, so it does not matter whether somebody
+came in over SSH or the browser.
 
 ## Checking it without a terminal
 
