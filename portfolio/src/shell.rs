@@ -19,7 +19,7 @@ use crate::boot;
 use crate::ask::{self, Ask};
 use crate::context;
 use crate::home;
-use crate::page::Page;
+use crate::museum::Museum;
 use crate::paint::{self, ACCENT, BG, DIM, FAINT, FG};
 use crate::taste;
 
@@ -64,7 +64,7 @@ impl Section {
             }
             Section::Projects => "← →  browse projects    /  help",
             Section::Skills => "drag / wheel  slide    hover  raise a tile    space  drift",
-            Section::Taste => "↑ ↓  read    space  page    home / end    /  help",
+            Section::Taste => "← →  walk the room    home / end    /  help",
             Section::Ask => "type a question    enter  send    esc  clear    tab  leave",
         }
     }
@@ -79,7 +79,7 @@ pub struct Shell {
     pub map: termap::app::App,
     pub sheet: skysheet::app::App,
     pub quit: bool,
-    pub page: Page,
+    pub museum: Museum,
     pub ask: Ask,
     /// Rows scrolled into the essay, and the velocity carrying it. Fractional
     /// so momentum can decay smoothly; only the whole part is ever drawn.
@@ -100,6 +100,10 @@ pub struct Shell {
     /// animations read it, and they want a clock that does not restart every
     /// time somebody changes section.
     clock: f64,
+    /// Seconds since this section was opened. The home portrait loops for a
+    /// while after somebody arrives and then holds, the same rule the museum
+    /// uses, so a tab left open is not still sending frames.
+    since: f64,
 }
 
 impl Shell {
@@ -114,7 +118,7 @@ impl Shell {
         let mut shell = Shell {
             section: Section::Home,
             about: about::load(),
-            page: Page::build(&sheet_taste),
+            museum: Museum::new(&sheet_taste),
             ask: Ask::new(),
             scroll: 0.0,
             vel: 0.0,
@@ -127,6 +131,7 @@ impl Shell {
             context: String::new(),
             boot: 0.0,
             clock: 0.0,
+            since: 0.0,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         shell
@@ -146,6 +151,7 @@ impl Shell {
         }
         // The essay opens at the top each time. Returning to it halfway down
         // where you left it sounds considerate and reads as a bug.
+        self.since = 0.0;
         if s == Section::Taste {
             self.scroll = 0.0;
             self.vel = 0.0;
@@ -189,7 +195,13 @@ impl Shell {
             // an eight-frame loop is bandwidth spent on frames identical to
             // the ones before them.
             Section::Home => 125,
-            Section::Taste if self.vel.abs() <= 0.01 => 125,
+            // Two rates, because the room has two kinds of motion. A slide is
+            // a third of a second and wants to be smooth; a plate looping at
+            // PORTRAIT_FPS does not, and asking for 25 frames a second to
+            // advance a 6 fps loop repaints the whole contour field four times
+            // for nothing. Measured, that distinction is 157 KB/s against 60.
+            Section::Taste if self.museum.sliding() => 40,
+            Section::Taste => (1000.0 / crate::paint::PORTRAIT_FPS) as u64,
             _ => 25,
         }
     }
@@ -201,25 +213,18 @@ impl Shell {
             || match self.section {
                 Section::Experience => self.map.animating(),
                 Section::Projects | Section::Skills => self.sheet.moving(),
-                // The scroll, or a plate that has not settled yet.
-                Section::Taste => self.vel.abs() > 0.01 || self.plates_moving(),
+                Section::Taste => self.museum.moving(),
                 // Only while the tide is running. Idle, the screen is static
                 // and the stream still gets polled on the slow heartbeat --
                 // asking for 40 frames a second to render a blinking caret is
                 // how a portfolio ends up warming someone's laptop.
                 Section::Ask => self.ask.busy(),
-                Section::Home => self.plates_moving(),
+                Section::Home => self.since < crate::museum::LIVELY && self.home_plate_moves(),
             }
     }
 
-    /// True while any baked animation is still playing.
-    ///
-    /// They run once and stop, so this goes false a second or two into a
-    /// session and the page costs nothing to hold after that.
-    fn plates_moving(&self) -> bool {
-        crate::portraits::PORTRAITS
-            .iter()
-            .any(|p| p.frames.len() > 1 && self.clock < crate::paint::portrait_secs(p))
+    fn home_plate_moves(&self) -> bool {
+        crate::portraits::find("snufkin-home").is_some_and(|p| p.frames.len() > 1)
     }
 
     /// True while the opening is still on screen.
@@ -234,6 +239,7 @@ impl Shell {
 
     pub fn tick(&mut self, dt: f64) {
         self.clock += dt;
+        self.since += dt;
         if self.booting() {
             self.boot += dt;
             return;
@@ -246,7 +252,7 @@ impl Shell {
         match self.section {
             Section::Experience => self.map.tick(dt),
             Section::Projects | Section::Skills => self.sheet.tick(dt),
-            Section::Taste => self.scroll_tick(dt),
+            Section::Taste => self.museum.tick(dt),
             Section::Ask => self.ask.tick(dt),
             Section::Home => {}
         }
@@ -309,7 +315,7 @@ impl Shell {
             _ => match self.section {
                 Section::Home => self.home_key(k),
                 Section::Experience => self.map.on_key(k),
-                Section::Taste => self.scroll_key(k),
+                Section::Taste => self.museum_key(k),
                 Section::Ask => {}
                 Section::Projects | Section::Skills => {
                     self.sheet.on_key(k);
@@ -324,59 +330,24 @@ impl Shell {
         }
     }
 
-    /// How far the essay can go: far enough to read the last line, and not one
-    /// row further. Scrolling into empty space below the text looks like the
-    /// page has broken.
-    fn scroll_max(&self) -> f64 {
-        (self.page.height as f64 - self.body.height.max(1) as f64).max(0.0)
-    }
-
-    fn nudge(&mut self, rows: f64) {
-        self.vel += rows;
-    }
-
-    fn scroll_tick(&mut self, dt: f64) {
-        if self.vel.abs() < 1e-6 {
-            return;
-        }
-        self.scroll = (self.scroll + self.vel * dt).clamp(0.0, self.scroll_max());
-        // Exponential friction, plus a floor: decay never actually arrives, so
-        // without the snap the page creeps a hundredth of a row forever and
-        // never stops asking to be redrawn.
-        self.vel *= (-8.0 * dt).exp();
-        if self.vel.abs() < 0.6 {
-            self.vel = 0.0;
-        }
-        // Hitting either end kills the momentum rather than letting it grind.
-        if self.scroll <= 0.0 || self.scroll >= self.scroll_max() {
-            self.vel = 0.0;
-        }
-    }
-
-    fn scroll_key(&mut self, k: KeyEvent) {
-        let page = self.body.height.saturating_sub(2) as f64;
+    /// Walking the room. Left and right only -- there is no second axis here,
+    /// and arrow-up on a wall of pictures does not mean anything.
+    fn museum_key(&mut self, k: KeyEvent) {
         match k.code {
-            KeyCode::Down | KeyCode::Char('j') => self.nudge(26.0),
-            KeyCode::Up | KeyCode::Char('k') => self.nudge(-26.0),
-            KeyCode::PageDown | KeyCode::Char(' ') => self.nudge(page * 5.0),
-            KeyCode::PageUp => self.nudge(-page * 5.0),
-            KeyCode::Home => {
-                self.scroll = 0.0;
-                self.vel = 0.0;
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char(' ') => {
+                self.museum.next()
             }
-            KeyCode::End => {
-                self.scroll = self.scroll_max();
-                self.vel = 0.0;
-            }
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') => self.museum.prev(),
+            KeyCode::Home => self.museum.go(0),
+            KeyCode::End => self.museum.go(self.museum.len().saturating_sub(1)),
             _ => {}
         }
     }
 
-    /// Put the essay at a known row. For snapshots, which need a frame to be a
+    /// Jump straight to a work. For snapshots, which need a frame to be a
     /// pure function of the flags that produced it.
-    pub fn set_scroll(&mut self, rows: u16) {
-        self.scroll = (rows as f64).min(self.scroll_max());
-        self.vel = 0.0;
+    pub fn set_scroll(&mut self, n: u16) {
+        self.museum.jump(n as usize);
     }
 
     fn home_key(&mut self, k: KeyEvent) {
@@ -390,9 +361,12 @@ impl Shell {
         match self.section {
             Section::Experience => self.map.on_mouse(m),
             Section::Projects | Section::Skills => self.sheet.on_mouse(m),
+            // A wheel walks the room a work at a time. There is nothing to
+            // scroll here, and momentum on a wall of pictures would overshoot
+            // past whatever somebody was reaching for.
             Section::Taste => match m.kind {
-                MouseEventKind::ScrollDown => self.nudge(34.0),
-                MouseEventKind::ScrollUp => self.nudge(-34.0),
+                MouseEventKind::ScrollDown => self.museum.next(),
+                MouseEventKind::ScrollUp => self.museum.prev(),
                 _ => {}
             },
             Section::Home | Section::Ask => {}
@@ -428,9 +402,9 @@ impl Shell {
         }
 
         match self.section {
-            Section::Home => home::render(f, body, &self.about, self.clock),
+            Section::Home => home::render(f, body, &self.about, self.since),
             Section::Taste => {
-                self.page.render(f, body, self.scroll.round().max(0.0) as u16, self.clock)
+                crate::museum::render(f, body, &self.museum)
             }
             Section::Ask => ask::render(f, body, &self.ask),
             Section::Experience => termap::ui::render_map_only(f, body, &mut self.map),

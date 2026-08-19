@@ -18,35 +18,60 @@ pub const CYAN: Color = Color::Rgb(110, 224, 255);
 
 /// How fast a baked animation plays, in frames a second.
 ///
-/// Deliberately slow. These are a dozen frames sampled out of a loop, not a
-/// smooth one, and every frame that changes is cells crossing a network to a
-/// visitor who is reading rather than watching.
-pub const PORTRAIT_FPS: f64 = 8.0;
+/// Deliberately slow, and the rate is a bandwidth setting as much as a
+/// timing one. Every step repaints about half the cells of a large plate --
+/// ~11 KB for the home portrait -- so 8 fps and 6 fps differ by 25% of the
+/// whole page's cost. The footage is a slow pan in both cases and does not
+/// read as choppier for it.
+pub const PORTRAIT_FPS: f64 = 6.0;
 
-/// How long a baked animation runs before it settles, in seconds.
-pub fn portrait_secs(p: &portraits::Portrait) -> f64 {
-    p.frames.len() as f64 / PORTRAIT_FPS
-}
-
-/// Which frame of a baked animation is showing at `t` seconds.
+/// Which frame is showing at `t`, looping while `alive` and holding after.
 ///
-/// Plays once and then holds the last frame -- it does not loop. That is a
-/// bandwidth decision, not a taste one, and the numbers are lopsided enough
-/// to settle it: chafa picks glyphs and colours for each frame independently,
-/// so two visually similar frames share almost no cells, and all 408 of the
-/// home portrait's change on every step. Looped at 8 fps that is **126 KB/s**
-/// on the landing page, for ever, measured over a real WebSocket -- against
-/// the 0.3 KB/s an idle screen costs otherwise. Played once it is a quarter of
-/// a megabyte on arrival and nothing after.
-///
-/// So the portrait moves while somebody is arriving and reading the first
-/// line, and is a still by the time they are done.
-pub fn portrait_frame(p: &portraits::Portrait, t: f64) -> &'static [portraits::Cell] {
+/// The museum wants a loop for as long as somebody has just arrived at a work
+/// and then silence, which is neither "play once" nor "loop for ever". Holding
+/// the frame it happened to be on would stop mid-gesture, so it settles on the
+/// last one — the same place `portrait_frame` ends up.
+pub fn portrait_loop(p: &portraits::Portrait, t: f64, alive: bool) -> &'static [portraits::Cell] {
     let n = p.frames.len();
     if n <= 1 {
         return p.frames[0];
     }
-    p.frames[((t * PORTRAIT_FPS) as usize).min(n - 1)]
+    if !alive {
+        return p.frames[n - 1];
+    }
+    p.frames[((t * PORTRAIT_FPS) as usize) % n]
+}
+
+/// Remap everything already drawn in a region onto one colour.
+///
+/// The subpixel canvas draws in greys because coverage is all it knows; this
+/// turns that into a hue afterwards, so one field can serve eight works
+/// instead of needing a palette slot each. Cells the region never drew into
+/// are left alone — the test is the page's own ground, not brightness, or the
+/// darkest parts of the field would be indistinguishable from empty.
+pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32) {
+    let Color::Rgb(kr, kg, kb) = BG else { return };
+    let buf = f.buffer_mut();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let (fg, bg) = (cell.fg, cell.bg);
+            let map = |c: Color| -> Color {
+                let Some((r, g, b)) = termap::canvas::rgb_of(c) else { return c };
+                if (r, g, b) == (kr, kg, kb) {
+                    return c;
+                }
+                // Rec. 601 luma recovers "how much ink is in this cell"
+                // before the colour is put back on top of it.
+                let l = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) / 255.0;
+                let mix = |t: u8, base: u8| {
+                    (base as f32 + (t as f32 * l - base as f32) * k).clamp(0.0, 255.0) as u8
+                };
+                termap::canvas::ink(mix(rgb.0, kr), mix(rgb.1, kg), mix(rgb.2, kb))
+            };
+            cell.set_fg(map(fg)).set_bg(map(bg));
+        }
+    }
 }
 
 /// Blit one baked plate at `x`,`y`, clipped to `area`.
@@ -55,25 +80,45 @@ pub fn portrait_frame(p: &portraits::Portrait, t: f64) -> &'static [portraits::C
 /// baked; there is no tint to apply. Cells chafa left as pure background are
 /// skipped rather than painted, so a plate sits on the page instead of on a
 /// rectangle of its own.
+pub fn ink(i: portraits::Ink) -> Color {
+    match i {
+        portraits::Ink::I(n) => Color::Indexed(n),
+        portraits::Ink::C(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+/// Whether a cell is the page's own ground rather than part of the picture.
+///
+/// chafa spells "nothing here" as a space or as braille blank, depending on
+/// which symbol class won the cell. Either one over our own background is a
+/// cell to leave alone, so a plate sits on the page rather than on a rectangle
+/// of its own.
+fn is_ground(ch: char, bg: portraits::Ink) -> bool {
+    if ch != ' ' && ch != '\u{2800}' {
+        return false;
+    }
+    let Color::Rgb(kr, kg, kb) = BG else { return false };
+    match bg {
+        portraits::Ink::C(r, g, b) => (r, g, b) == (kr, kg, kb),
+        // Quantised, so our ground has landed on whatever palette entry is
+        // nearest it -- near-black, and near-black behind a blank glyph is
+        // nothing worth painting either way.
+        portraits::Ink::I(n) => n == 16 || n == 0 || n == 232 || n == 233,
+    }
+}
+
 pub fn portrait(f: &mut Frame, area: Rect, x: u16, y: u16, cells: &[portraits::Cell], cols: u16) {
-    let Color::Rgb(kr, kg, kb) = BG else { return };
-    for (i, &(ch, fr, fg, fb, br, bg, bb)) in cells.iter().enumerate() {
+    for (i, &(ch, fg, bg)) in cells.iter().enumerate() {
         let (c, r) = (i as u16 % cols, i as u16 / cols);
         let (px, py) = (x + c, y + r);
         if px >= area.x + area.width || py >= area.y + area.height {
             continue;
         }
-        // chafa spells "nothing here" as a space or as braille blank,
-        // depending on which symbol class won the cell. Either one over our
-        // own ground is a cell to leave alone, so the plate sits on the page
-        // rather than on a rectangle of its own.
-        if (ch == ' ' || ch == '\u{2800}') && (br, bg, bb) == (kr, kg, kb) {
+        if is_ground(ch, bg) {
             continue;
         }
         if let Some(cell) = f.buffer_mut().cell_mut((px, py)) {
-            cell.set_char(ch)
-                .set_fg(Color::Rgb(fr, fg, fb))
-                .set_bg(Color::Rgb(br, bg, bb));
+            cell.set_char(ch).set_fg(ink(fg)).set_bg(ink(bg));
         }
     }
 }
@@ -170,7 +215,7 @@ mod tests {
     fn the_animation_clock_wraps_instead_of_running_off_the_end() {
         for p in portraits::PORTRAITS.iter() {
             for t in [0.0, 0.5, 3.0, 1e4, 8.64e4] {
-                let f = portrait_frame(p, t);
+                let f = portrait_loop(p, t, true);
                 assert_eq!(f.len(), p.cols as usize * p.rows as usize, "{} at {t}s", p.id);
             }
         }

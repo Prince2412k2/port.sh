@@ -43,7 +43,11 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
 
     if aw > 0 {
         if let Some(m) = face {
-            crate::paint::portrait(f, area, x0, y, crate::paint::portrait_frame(m, t), m.cols);
+            // Loops while somebody is arriving and then holds. See the note
+            // in museum.rs: a looping plate is ~136 KB/s for as long as the
+            // tab is open, and this is the first screen anybody sees.
+            let frame = crate::paint::portrait_loop(m, t, t < crate::museum::LIVELY);
+            crate::paint::portrait(f, area, x0, y, frame, m.cols);
         }
     }
 
@@ -87,7 +91,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
         ("1", "experience", "five places on a map you can drive"),
         ("2", "projects", "ten of them, and how they work"),
         ("3", "skills", "the tools"),
-        ("4", "taste", "films, shows, people"),
+        ("4", "taste", "a room you can walk"),
         ("5", "ask", "put a question to the agent on this box"),
     ] {
         put(f, y, vec![
@@ -120,7 +124,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
 /// Every key in the app, in one place, because three embedded renderers means
 /// three key maps and no single screen that admits it.
 pub fn help(f: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 18] = [
+    let rows: [(&str, &str); 22] = [
         ("tab / shift-tab", "move between sections"),
         ("1 – 5", "jump straight to one"),
         ("/", "this list, from anywhere"),
@@ -132,9 +136,13 @@ pub fn help(f: &mut Frame, area: Rect) {
         ("drag, wheel", "pan and zoom"),
         ("u / o, m", "tilt the camera, or level it"),
         ("", ""),
-        ("projects / skills / taste", ""),
+        ("projects / skills", ""),
         ("← →", "browse the project cards"),
-        ("drag, wheel, ↑ ↓", "slide the sheet, read the essay"),
+        ("drag, wheel, ↑ ↓", "slide the sheet"),
+        ("", ""),
+        ("taste", ""),
+        ("← →, wheel", "walk the room"),
+        ("home / end", "first and last"),
         ("", ""),
         ("ask", ""),
         ("enter", "ask it"),

@@ -48,6 +48,12 @@ pub static EMBLEMS: [Emblem; 13] = [
     Emblem { id: "strawhat", rgb: (238, 198, 122), art: Art { cols: 30, rows: 6, cells: &STRAWHAT } },
 ];
 
+/// Used by `--emblems` and by the test that checks every taste entry names a
+/// drawing that exists. The museum hangs photographs now, so nothing on screen
+/// reaches for these any more -- they are kept because they are the fallback
+/// if an image ever has to come out, and because regenerating them is a Python
+/// script nobody would think to re-run.
+#[allow(dead_code)]
 pub fn find(id: &str) -> Option<&'static Emblem> {
     EMBLEMS.iter().find(|e| e.id == id)
 }

@@ -39,23 +39,41 @@ BG = "#08090b"
 # had them for years.
 SYMBOLS = "sextant+ascii+braille+border+dot+stipple"
 
-MAX_FRAMES = 14
+MAX_FRAMES = 18
 
-# id, source file, columns, rows. Sizes are what the layout has room for:
-# the home portrait gets its own column, the shelf plates are half that.
+# How many colours chafa may use, per plate. This is a bandwidth decision and
+# the numbers are not close.
+#
+# At 64x24 a still frame is 1536 cells. In truecolor, *every* cell differs
+# from the frame before -- chafa re-picks glyph and colour per frame, so two
+# frames that look nearly identical share almost nothing -- and each changed
+# cell costs ~38 bytes of SGR. That is 57 KB a frame, 456 KB/s at 8 fps.
+#
+# Quantised to the xterm palette, half the cells survive unchanged between
+# frames and each one that does change costs ~22 bytes. 17 KB a frame: 3.4x
+# cheaper, and both halves of that come free from the same decision.
+#
+# So anything that moves is quantised and anything that holds still is not.
+# A still is paid for exactly once, so it gets the full range; a loop is paid
+# for every frame, for as long as somebody is looking at it.
+FULL = "full"
+QUANTISED = "256"
+
+# id, source file, columns, rows, colours.
+#
+# Sizes are generous on purpose: this is a museum wall now, not a contact
+# sheet, and the whole point of sextants is that detail survives being small
+# enough to fit. Each plate is baked at exactly the size it is drawn -- there
+# is no resampling a sextant, so a second size means a second bake.
 PLATES = [
-    # The home page gives the portrait its own column, so it is baked twice:
-    # once large for there, once at shelf size like every other plate. Scaling
-    # one of them at runtime would mean resampling glyphs, which is not a
-    # thing you can do to a sextant.
-    ("snufkin-home", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 34, 17),
-    ("snufkin", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 18, 9),
-    ("bourdain", "bourdain.jpeg", 18, 9),
-    ("iroh", "iroh.png", 18, 9),
-    ("ted", "ted.jpg", 18, 9),
-    ("miles", "miles.jpeg", 18, 9),
-    ("little-prince", "llprince.jpeg", 18, 9),
-    ("one-piece", "onepeace.gif", 18, 9),
+    ("snufkin-home", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 52, 26, QUANTISED),
+    ("snufkin", "0a9a46ba2536b06ab2c5e8841e6aacd3.gif", 64, 32, QUANTISED),
+    ("one-piece", "onepeace.gif", 64, 32, QUANTISED),
+    ("bourdain", "bourdain.jpeg", 64, 32, FULL),
+    ("iroh", "iroh.png", 64, 32, FULL),
+    ("ted", "ted.jpg", 64, 32, FULL),
+    ("miles", "miles.jpeg", 64, 32, FULL),
+    ("little-prince", "llprince.jpeg", 64, 32, FULL),
 ]
 
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
@@ -90,24 +108,77 @@ def coalesce(path: Path, into: Path) -> list:
     return sorted(into.glob("f-*.png"))
 
 
-def render(src: str, cols: int, rows: int) -> str:
+def render(src: str, cols: int, rows: int, colours: str) -> str:
     """One frame of ANSI from chafa."""
     return subprocess.run(
-        ["chafa", "-f", "symbols", "-c", "full", "--symbols", SYMBOLS,
+        ["chafa", "-f", "symbols", "-c", colours, "--symbols", SYMBOLS,
          "--size", f"{cols}x{rows}", "--bg", BG, "-t", "1", str(src)],
         capture_output=True, text=True, check=True,
     ).stdout
 
 
+# The xterm-256 palette, used only to turn an index back into RGB so the tint
+# and the "is this our own background" test can be computed. The index itself
+# is what gets baked -- see the note on Ink in the generated file.
+def _palette():
+    p = [(0, 0, 0), (128, 0, 0), (0, 128, 0), (128, 128, 0), (0, 0, 128),
+         (128, 0, 128), (0, 128, 128), (192, 192, 192), (128, 128, 128),
+         (255, 0, 0), (0, 255, 0), (255, 255, 0), (0, 0, 255), (255, 0, 255),
+         (0, 255, 255), (255, 255, 255)]
+    lv = (0, 95, 135, 175, 215, 255)
+    for r in lv:
+        for g in lv:
+            for b in lv:
+                p.append((r, g, b))
+    p.extend((v, v, v) for v in range(8, 239, 10))
+    return p
+
+
+PALETTE = _palette()
+
+
+def rgb_of(ink):
+    """An Ink as RGB, whichever kind it is."""
+    kind, a, b, c = ink
+    return PALETTE[a] if kind == "i" else (a, b, c)
+
+
+def tint(flat) -> tuple:
+    """The plate's own colour, for the field drawn behind it.
+
+    The mean is muddy and the single most common colour is usually the
+    background, so this takes the mean of the most *saturated* fifth: the
+    colour you would name if asked, rather than the colour there is most of.
+    """
+    px = []
+    for _, f, b_ in flat:
+        for r, g, b in (rgb_of(f), rgb_of(b_)):
+            hi, lo = max(r, g, b), min(r, g, b)
+            if hi < 24:
+                continue          # near-black, including our own ground
+            px.append((hi - lo, r, g, b))
+    if not px:
+        return (128, 128, 128)
+    px.sort(reverse=True)
+    top = px[: max(1, len(px) // 5)]
+    n = len(top)
+    return tuple(sum(p[i] for p in top) // n for i in (1, 2, 3))
+
+
 def parse(ansi: str):
-    """ANSI -> (cols, rows, [(ch, fr,fg,fb, br,bg,bb)]).
+    """ANSI -> (cols, rows, [(ch, fg_ink, bg_ink)]).
 
     chafa emits a foreground/background pair and then the glyphs that use it,
     so the colours are carried across cells rather than repeated. Rows are
     ragged only if chafa clipped one, so the grid is padded to the widest.
+
+    Both colour forms are kept as they were written. `-c 256` emits `38;5;N`
+    and `-c full` emits `38;2;r;g;b`; converting the first into the second here
+    would throw away the entire reason for quantising, because what reaches the
+    terminal would be a truecolor escape again.
     """
     grid, row = [], []
-    fg = bg = (0, 0, 0)
+    fg = bg = ("c", 0, 0, 0)
     i = 0
     while i < len(ansi):
         m = SGR.match(ansi, i)
@@ -116,15 +187,16 @@ def parse(ansi: str):
             j = 0
             while j < len(parts):
                 if parts[j] == 0:
-                    fg = bg = (0, 0, 0)
+                    fg = bg = ("c", 0, 0, 0)
                     j += 1
                 elif parts[j] in (38, 48) and parts[j + 1] == 2:
-                    rgb = tuple(parts[j + 2:j + 5])
-                    if parts[j] == 38:
-                        fg = rgb
-                    else:
-                        bg = rgb
+                    ink = ("c", *parts[j + 2:j + 5])
+                    fg, bg = (ink, bg) if parts[j] == 38 else (fg, ink)
                     j += 5
+                elif parts[j] in (38, 48) and parts[j + 1] == 5:
+                    ink = ("i", parts[j + 2], 0, 0)
+                    fg, bg = (ink, bg) if parts[j] == 38 else (fg, ink)
+                    j += 3
                 else:
                     j += 1
             i = m.end()
@@ -137,7 +209,7 @@ def parse(ansi: str):
             continue
         if ch == "\r":
             continue
-        row.append((ch, *fg, *bg))
+        row.append((ch, fg, bg))
     if row:
         grid.append(row)
 
@@ -145,7 +217,7 @@ def parse(ansi: str):
     if not grid:
         return 0, 0, []
     w = max(len(r) for r in grid)
-    blank = (" ", 0, 0, 0, 0, 0, 0)
+    blank = (" ", ("c", 0, 0, 0), ("c", 0, 0, 0))
     flat = []
     for r in grid:
         flat.extend(r + [blank] * (w - len(r)))
@@ -162,9 +234,14 @@ def rust_char(ch: str) -> str:
     return f"'{ch}'"
 
 
+def ink_lit(ink) -> str:
+    kind, a, b, c = ink
+    return f"I({a})" if kind == "i" else f"C({a},{b},{c})"
+
+
 def cells(flat) -> str:
     return ",".join(
-        f"({rust_char(c[0])},{c[1]},{c[2]},{c[3]},{c[4]},{c[5]},{c[6]})" for c in flat
+        f"({rust_char(c[0])},{ink_lit(c[1])},{ink_lit(c[2])})" for c in flat
     )
 
 
@@ -183,20 +260,38 @@ def main() -> None:
     out.append("//! drawing can be tinted against the page. These are photographs; there is")
     out.append("//! nothing to tint.")
     out.append("")
-    out.append("/// glyph, then foreground rgb, then background rgb.")
-    out.append("pub type Cell = (char, u8, u8, u8, u8, u8, u8);")
+    out.append("/// One colour, as chafa wrote it.")
+    out.append("///")
+    out.append("/// `I` is an xterm palette index and `C` is truecolor, and the")
+    out.append("/// difference survives all the way to the terminal on purpose: an")
+    out.append("/// indexed cell goes out as `ESC[38;5;N` (about 22 bytes with its")
+    out.append("/// background) where a truecolor one costs about 38. Converting I to C")
+    out.append("/// anywhere in here would throw away the reason the animated plates are")
+    out.append("/// quantised at all.")
+    out.append("#[derive(Clone, Copy)]")
+    out.append("pub enum Ink {")
+    out.append("    I(u8),")
+    out.append("    C(u8, u8, u8),")
+    out.append("}")
+    out.append("")
+    out.append("pub use Ink::{C, I};")
+    out.append("")
+    out.append("/// glyph, foreground, background.")
+    out.append("pub type Cell = (char, Ink, Ink);")
     out.append("")
     out.append("pub struct Portrait {")
     out.append("    pub id: &'static str,")
     out.append("    pub cols: u16,")
     out.append("    pub rows: u16,")
+    out.append("    /// The plate's own colour, for the field drawn behind it.")
+    out.append("    pub tint: (u8, u8, u8),")
     out.append("    /// One entry per frame. Still images have exactly one.")
     out.append("    pub frames: &'static [&'static [Cell]],")
     out.append("}")
     out.append("")
 
     made = []
-    for pid, name, cols, rows in PLATES:
+    for pid, name, cols, rows, colours in PLATES:
         path = ASSETS / name
         if not path.exists():
             print(f"skipping {pid}: no {path}", file=sys.stderr)
@@ -210,7 +305,7 @@ def main() -> None:
             else:
                 n = min(total, MAX_FRAMES)
                 picks = sorted({round(k * (total - 1) / (n - 1)) for k in range(n)})
-            sheets = [parse(render(files[i], cols, rows)) for i in picks]
+            sheets = [parse(render(files[i], cols, rows, colours)) for i in picks]
 
         shape, frames = None, []
         for idx, (w, h, flat) in zip(picks, sheets):
@@ -239,12 +334,15 @@ def main() -> None:
         joined = ",".join(f"&{sym}_{k}" for k in range(len(frames)))
         out.append(f"static {sym}_F: [&[Cell]; {len(frames)}] = [{joined}];")
         out.append("")
-        made.append((pid, sym, w, h, len(frames)))
-        print(f"{pid}: {w}x{h}, {len(frames)} frame(s) from {total}", file=sys.stderr)
+        rgb = tint(frames[0])
+        made.append((pid, sym, w, h, rgb))
+        print(f"{pid}: {w}x{h}, {len(frames)} frame(s) from {total}, "
+              f"-c {colours}, tint {rgb}", file=sys.stderr)
 
     out.append(f"pub static PORTRAITS: [Portrait; {len(made)}] = [")
-    for pid, sym, w, h, _ in made:
-        out.append(f'    Portrait {{ id: "{pid}", cols: {w}, rows: {h}, frames: &{sym}_F }},')
+    for pid, sym, w, h, rgb in made:
+        out.append(f'    Portrait {{ id: "{pid}", cols: {w}, rows: {h}, '
+                   f"tint: ({rgb[0]}, {rgb[1]}, {rgb[2]}), frames: &{sym}_F }},")
     out.append("];")
     out.append("")
     out.append("pub fn find(id: &str) -> Option<&'static Portrait> {")
