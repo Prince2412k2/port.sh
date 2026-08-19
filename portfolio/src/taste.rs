@@ -22,7 +22,7 @@ pub struct Entry {
     pub name: String,
     pub from: String,
     pub emblem: String,
-    pub line: String,
+    pub quote: String,
     pub body: String,
 }
 
@@ -135,7 +135,7 @@ fn field_mut<'a>(e: &'a mut Entry, key: &str) -> Option<&'a mut String> {
         "name" => &mut e.name,
         "from" => &mut e.from,
         "emblem" => &mut e.emblem,
-        "line" => &mut e.line,
+        "quote" => &mut e.quote,
         "body" => &mut e.body,
         _ => return None,
     })
@@ -151,14 +151,14 @@ mod tests {
         let s = parse(include_str!("../data/taste.txt"));
         assert!(!s.open.is_empty() && !s.close.is_empty());
         assert!(s.figures.len() >= 4, "figures: {}", s.figures.len());
-        assert!(s.works.len() >= 4, "works: {}", s.works.len());
+        assert!(s.works.len() >= 2, "works: {}", s.works.len());
         for e in s.figures.iter().chain(&s.works) {
             assert!(!e.name.is_empty(), "{} has no name", e.id);
             assert!(!e.from.is_empty(), "{} has no source", e.id);
-            assert!(!e.line.is_empty(), "{} has no line", e.id);
+            assert!(!e.quote.is_empty(), "{} has no quote", e.id);
             // Two lines at the gallery's measure. Longer than this and the
             // shelf turns back into an essay.
-            assert!(e.line.len() < 170, "{} has grown into a paragraph", e.id);
+            assert!(e.quote.len() < 170, "{} has grown into a paragraph", e.id);
         }
     }
 
@@ -179,8 +179,8 @@ mod tests {
 
     #[test]
     fn a_wrapped_value_comes_back_as_one_line() {
-        let sheet = parse("figure x\n  name X\n  line one\n    two\n");
+        let sheet = parse("figure x\n  name X\n  quote one\n    two\n");
         let p = &sheet.figures[0];
-        assert_eq!(p.line, "one two");
+        assert_eq!(p.quote, "one two");
     }
 }

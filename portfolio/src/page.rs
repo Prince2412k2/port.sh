@@ -249,10 +249,15 @@ fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block) {
                     e.from.clone(),
                     Style::default().fg(FAINT),
                 )]);
-                for (j, l) in wrap(&e.line, tw as usize).into_iter().enumerate() {
+                // Set as a quotation, because it is one: the curly marks and
+                // the italic are the only thing separating their words from
+                // the caption above, and without them the shelf reads as if
+                // these were my descriptions of each entry.
+                let said = format!("\u{201c}{}\u{201d}", e.quote);
+                for (j, l) in wrap(&said, tw as usize).into_iter().enumerate() {
                     put(f, area, tx, tw, top + 2 + j as i32, vec![Span::styled(
                         l,
-                        Style::default().fg(DIM),
+                        Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
                     )]);
                 }
             }

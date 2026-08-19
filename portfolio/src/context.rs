@@ -65,7 +65,9 @@ pub fn build(about: &About, taste: &Sheet, projects: &[skysheet::data::Project])
     s.push_str(&taste.open);
     s.push('\n');
     for e in taste.figures.iter().chain(&taste.works) {
-        s.push_str(&format!("\n{} ({}) — {}. {}\n", e.name, e.from, e.line, e.body));
+        // Marked as a quotation so the agent repeats it as one rather than
+        // paraphrasing it back as though it were Prince's own sentence.
+        s.push_str(&format!("\n{} ({}) — quoted: \u{201c}{}\u{201d} {}\n", e.name, e.from, e.quote, e.body));
     }
     s.push_str("\nThe threads running through those:\n");
     for e in &taste.threads {
