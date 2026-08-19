@@ -8,9 +8,11 @@ mod context;
 mod emblems;
 mod home;
 mod json;
+mod net;
 mod page;
 mod paint;
 mod shell;
+mod wire;
 mod taste;
 mod snapshot;
 
@@ -33,6 +35,10 @@ fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut shot: Option<snapshot::Opts> = None;
     let mut start: Option<String> = None;
+    let mut serve = false;
+    let mut ssh_addr = "0.0.0.0".to_string();
+    let mut ssh_port: u16 = 2222;
+    let mut host_key: Option<String> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -42,6 +48,12 @@ fn main() -> io::Result<()> {
                 println!("  --snapshot WxH   draw one frame to stdout and exit");
                 println!("  --plain          snapshot without colour");
                 println!("  --at SECONDS     how far into the section's animation to draw");
+                println!();
+                println!("  --serve                  run the SSH server instead of a local terminal");
+                println!("  --ssh-addr ADDR          bind address for --serve (default 0.0.0.0)");
+                println!("  --ssh-port PORT          bind port for --serve (default 2222)");
+                println!("  --host-key PATH          where the SSH host key lives, generated on first run");
+                println!("                           (default $PORTFOLIO_HOST_KEY or ./data/ssh_host_key)");
                 return Ok(());
             }
             "--snapshot" => {
@@ -77,6 +89,10 @@ fn main() -> io::Result<()> {
                     s.scroll = v;
                 }
             }
+            "--serve" => serve = true,
+            "--ssh-addr" => ssh_addr = args.next().unwrap_or(ssh_addr),
+            "--ssh-port" => ssh_port = args.next().and_then(|v| v.parse().ok()).unwrap_or(ssh_port),
+            "--host-key" => host_key = args.next(),
             "--section" => start = args.next(),
             _ => {}
         }
@@ -85,6 +101,16 @@ fn main() -> io::Result<()> {
     if let Some(mut o) = shot {
         o.section = start.or(o.section);
         return snapshot::render(&o);
+    }
+
+    if serve {
+        let path = host_key
+            .or_else(|| std::env::var("PORTFOLIO_HOST_KEY").ok())
+            .unwrap_or_else(|| "data/ssh_host_key".to_string());
+        let rt = tokio::runtime::Runtime::new()?;
+        return rt
+            .block_on(net::serve(&ssh_addr, ssh_port, std::path::Path::new(&path)))
+            .map_err(|e| io::Error::other(e.to_string()));
     }
 
     // No terminal on the other end: `ssh host | cat`, a health check, a script.
@@ -187,7 +213,10 @@ fn plain_text() -> io::Result<()> {
     }
     writeln!(out)?;
     writeln!(out, "This is the plain-text version. The interactive one needs a terminal:")?;
-    writeln!(out, "  ssh -t <this-host>")?;
+    // Built on about.txt's own ssh line rather than a second hardcoded one --
+    // the port is a deployment detail, and one copy of it is one that can go
+    // stale instead of two that can quietly disagree.
+    writeln!(out, "  {}", a.ssh.replacen("ssh ", "ssh -t ", 1))?;
     Ok(())
 }
 

@@ -2,51 +2,79 @@
 
 ```bash
 docker compose up -d --build
-ssh -p 2222 visitor@your-host
+ssh -p 2222 your-host
 ```
 
-That is the whole thing. Any SSH key, straight into the portfolio.
+No username needed. There is no OS account to name — the binary speaks SSH
+itself, so a login name is just a string in the handshake, and any one (or
+none at all) is accepted.
 
-Published on **2222** for now rather than 22, on purpose: it means this never
-has to fight the host's own sshd, and there is nothing to discover about a port
-conflict from outside the machine. Move it to 22 later by changing the one
-`"2222:22"` line in `docker-compose.yml` — the container's own sshd already
-listens on 22 internally, so nothing else changes.
+Published on **2222** for now rather than 22, so this never has to fight
+whatever the host's own sshd is doing. Move it to 22 later by changing the
+left side of the `"2222:2222"` line in `docker-compose.yml`.
 
-## What a visitor can do
+## Why there is no OpenSSH here
 
-Authenticate with any key, get a pty, and run one program. That is the entire
-surface:
+The first version of this ran behind a real sshd with `ForceCommand`, and it
+worked right up until the goal became a bare `ssh <domain>` with no username
+at all. OpenSSH looks up the requested account in the OS's user database
+*before* it will run any authentication — `AuthorizedKeysCommand` included —
+and there is no wildcard for that short of writing a custom NSS module.
+
+So the binary now speaks SSH directly, using the same [`russh`](https://
+github.com/Eugeny/russh) crate an adjacent project (`harbr`) already uses to
+solve the identical problem: a ratatui TUI served to many SSH sessions at
+once. A login is accepted regardless of username or key — there is nothing
+behind it worth gating, and gating a public CV only turns away the people it
+exists for.
+
+That also shrinks the container to almost nothing. No sshd, no PAM, no NSS,
+no privilege-separation directory, no login account for a stranger to somehow
+reach. The image runs one already-unprivileged process, with:
 
 | | |
 |---|---|
-| any public key | accepted — see `anykey` and the note in `sshd_config` |
-| passwords | off |
-| forwarding (TCP, agent, X11, unix, tunnel) | off |
-| sftp | off |
-| shell | unreachable; `ForceCommand` runs the portfolio whatever you ask for |
-| root login | off |
+| filesystem | fully read-only, no `tmpfs` anywhere |
+| capabilities | all dropped, none re-added |
+| account | a system user with `nologin`, never used to log in |
+| password / forwarding / sftp | never implemented — there is no code path for them |
 
-The container drops every capability except the four sshd needs, runs with a
-read-only root filesystem, `no-new-privileges`, a pid limit, and CPU and memory
-caps. A visitor's session cannot outlive `MaxSessions 2`, `LoginGraceTime 20`
-and the client-alive timeout.
+Every session gets its own OS thread and its own single-threaded async
+runtime (see the comment in `portfolio/src/net.rs` for why), so one visitor's
+map tile decoding cannot stall anyone else's session, and a `Shell` never has
+to be made `Send` to satisfy a shared executor.
 
-Anyone with a key gets in because there is nothing here to protect and asking
-strangers to register a key to read a CV is a worse trade. If you would rather
-gate it, delete the `AuthorizedKeysCommand` lines and put real keys in
-`/home/visitor/.ssh/authorized_keys`.
+## Fingerprint
 
-Sessions time out after fifteen minutes with no keystroke
-(`PORTFOLIO_IDLE_SECS`, or `0` to disable). sshd's own keepalive only catches a
-client that has stopped answering; a laptop left open on a page answers
-keepalives all afternoon and holds the slot the whole time.
+The host key is generated once, on first start, into the `hostkey` volume,
+and reused after that — do not delete that volume unless you mean to; a new
+key shows every returning visitor a changed-fingerprint warning.
+
+Its fingerprint is printed to the log on **every** start, not only when it is
+generated, because there is no `ssh-keygen` in this image to compute it after
+the fact:
+
+```bash
+docker compose logs portfolio | grep fingerprint
+```
+
+Publish that so people can check it before trusting the connection.
+
+## Session limits
+
+A stranger's session should not be able to take the box down or run forever:
+
+| | |
+|---|---|
+| concurrent sessions | 128 (`MAX_SESSIONS` in `net.rs`) |
+| idle timeout | 15 minutes with no keystroke (`PORTFOLIO_IDLE_SECS`, `0` disables it) |
+| container | 1.5 CPUs, 512 MB, 256 pids (`docker-compose.yml`) |
 
 ## The map data
 
-The archives are not in the image. The India basemap is 1.6 GB, and both it and
-the heightmap are rebuildable from `map/scripts/`. The compose file bind-mounts
-them:
+The archives are not in the image. The India basemap is 1.6 GB, and both it
+and the heightmap are rebuildable from `map/scripts/`. The compose file
+bind-mounts them:
 
 | file | what | without it |
 |---|---|---|
@@ -65,29 +93,17 @@ built into the binary, and the compose file mounts all three. Edit, then
 
 ## The chat section
 
-`ask` shells out to `opencode acp`, which is not in the image — the section will
-say it could not start the agent, and everything else works. To enable it,
-install opencode in the runtime stage and give the container credentials for
-whichever provider you use.
+`ask` shells out to `opencode acp`, which is not in the image — the section
+will say it could not start the agent, and everything else works. To enable
+it, install opencode in the runtime stage and give the container credentials
+for whichever provider you use.
 
 Two things to decide before you do. It spends your tokens on questions from
-strangers, and the only brake is `MAX_TURNS` in `portfolio/src/acp.rs` — twelve
-questions per connection, with nothing stopping a reconnect. And the session is
-pinned to plan mode, which is what makes it safe to expose: it refuses every
-permission request and has no tools, so everything it answers from is the
-context the portfolio hands it.
-
-## Fingerprints
-
-The host key is generated once into the `hostkeys` volume and reused. Do not
-delete that volume unless you mean to: a new key shows every returning visitor
-a man-in-the-middle warning.
-
-Publish the fingerprint so people can check it:
-
-```bash
-docker compose exec portfolio ssh-keygen -lf /etc/ssh/keys/ssh_host_ed25519_key.pub
-```
+strangers, and the only brake is `MAX_TURNS` in `portfolio/src/acp.rs` —
+twelve questions per connection, with nothing stopping a reconnect. And the
+session is pinned to plan mode, which is what makes it safe to expose: it
+refuses every permission request and has no tools, so everything it answers
+from is the context the portfolio hands it.
 
 ## Checking it without a terminal
 
@@ -95,6 +111,17 @@ Piped, the binary prints a plain-text CV instead of raw-mode escapes, which is
 what the healthcheck uses:
 
 ```bash
-ssh -p 2222 visitor@your-host | cat        # plain text
-ssh -p 2222 -t visitor@your-host   # force the interactive one
+ssh -p 2222 your-host | cat        # plain text
+ssh -p 2222 -t your-host           # force the interactive one
+```
+
+## Debugging inside the container
+
+There is no shell-based login path any more, but `docker exec` still works —
+it runs a command directly in the container's namespace rather than going
+through any login mechanism, so the `nologin` shell on the app's own account
+does not get in the way:
+
+```bash
+docker compose exec portfolio sh
 ```
