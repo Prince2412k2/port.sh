@@ -365,7 +365,7 @@ mod tests {
         let s = sheet();
         let m = Museum::new(&s);
         assert_eq!(m.len(), s.figures.len() + s.works.len());
-        assert!(m.len() >= 8, "{}", m.len());
+        assert!(m.len() >= 7, "{}", m.len());
     }
 
     /// Wrapping matters here: the collection is a loop and the index row shows

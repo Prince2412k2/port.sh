@@ -20,7 +20,8 @@ figure snufkin
   name    Snufkin
   from    Moominvalley
   emblem  hat
-  quote   You can't ever be really free if you admire somebody too much.
+  quote   Little one, if you worship someone too much, you'll end up losing
+          your freedom.
 
 figure bourdain
   name    Anthony Bourdain
@@ -62,12 +63,6 @@ work one-piece
   emblem  strawhat
   quote   I don't want to conquer anything. I just think the guy with the most
           freedom in this whole ocean is the Pirate King.
-
-work silent-voice
-  name    A Silent Voice
-  from    Yamada, 2016
-  emblem  notebook
-  quote   I'm sorry.
 
 close People and things that remind me of kindness and freedom. That is the
       whole list.
