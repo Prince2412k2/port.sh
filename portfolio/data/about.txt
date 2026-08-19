@@ -25,4 +25,4 @@
   github    github.com/Prince2412k2
   # Update the port here if docker-compose.yml's mapping changes -- this is
   # not read from that file, it is just text.
-  ssh       ssh -p 2222 <this-host>
+  ssh       ssh -p 2222 visitor@<this-host>

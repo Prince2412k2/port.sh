@@ -2,7 +2,7 @@
 
 ```bash
 docker compose up -d --build
-ssh -p 2222 your-host
+ssh -p 2222 visitor@your-host
 ```
 
 That is the whole thing. Any SSH key, straight into the portfolio.
@@ -95,6 +95,6 @@ Piped, the binary prints a plain-text CV instead of raw-mode escapes, which is
 what the healthcheck uses:
 
 ```bash
-ssh -p 2222 your-host | cat        # plain text
-ssh -p 2222 -t your-host           # force the interactive one
+ssh -p 2222 visitor@your-host | cat        # plain text
+ssh -p 2222 -t visitor@your-host   # force the interactive one
 ```

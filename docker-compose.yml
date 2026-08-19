@@ -1,4 +1,4 @@
-# ssh -p 2222 <your-host>
+# ssh -p 2222 visitor@<your-host>
 #
 #   docker compose up -d --build
 #

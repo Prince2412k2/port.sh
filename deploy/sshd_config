@@ -17,6 +17,11 @@ AuthorizedKeysFile none
 AuthorizedKeysCommand /usr/local/bin/anykey %t %k
 AuthorizedKeysCommandUser nobody
 
+# This still requires the *account* named in the login (visitor@host) to
+# exist -- sshd looks that up before it will even run AuthorizedKeysCommand,
+# so "any key gets in" does not mean "any username" gets in. There is only
+# one account, visitor, so that is what every connection has to name.
+
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
