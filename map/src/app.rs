@@ -26,6 +26,27 @@ pub const TOGGLES: [Layer; 8] = [
     Layer::Boundary,
 ];
 
+/// The key that toggles each layer in `TOGGLES`, and the two that work on all of
+/// them. One table, read by both the key handler and the panel that prints them,
+/// so the label on screen cannot drift from the key that does the work.
+///
+/// These were the digits, which they can no longer be. The portfolio that embeds
+/// this map owns `1`-`5` for moving between sections, so `3` meant "road minor"
+/// here and "skills" one section later -- and `6`-`9` reached nothing at all. A
+/// key that means two things depending on which screen you are looking at is not
+/// a binding, and a panel that prints a number for it is a lie.
+///
+/// Shift and a digit on a US keyboard, but bound as the *characters*: a layout
+/// where `!` is somewhere else still works, because what is matched is what the
+/// terminal delivers rather than the chord that produced it.
+pub const LAYER_KEYS: [char; 8] = ['!', '@', '#', '$', '%', '^', '&', '*'];
+
+/// Terrain relief. Shift and `9`, keeping its place in the row.
+pub const TERRAIN_KEY: char = '(';
+
+/// Every layer back on. Shift and `0`, likewise.
+pub const ALL_LAYERS_KEY: char = ')';
+
 pub struct App {
     pub source: Source,
     /// Tiles covering the current viewport, refreshed each frame.
@@ -448,7 +469,10 @@ impl App {
             KeyCode::Char('o') => self.set_tilt(self.vp.tilt - 0.08),
             KeyCode::Char(',') => self.set_bearing(self.vp.bearing - 0.10),
             KeyCode::Char('.') => self.set_bearing(self.vp.bearing + 0.10),
-            KeyCode::Char('@') => {
+            // `x` marks the spot. This was `@`, which is now Shift+2 and belongs
+            // to the road-medium layer; two things on one key is what this whole
+            // change is about removing.
+            KeyCode::Char('x') => {
                 // Cloned out of the lock first: the arms mutate self, and the
                 // guard would still be alive across them.
                 let fix = self.home.lock().unwrap().clone();
@@ -480,7 +504,7 @@ impl App {
                 }
                 }
             }
-            KeyCode::Char('9') => {
+            KeyCode::Char(TERRAIN_KEY) => {
                 self.show_terrain = !self.show_terrain;
                 self.toast = Some(
                     if self.show_terrain { "terrain on" } else { "terrain off" }.into(),
@@ -562,12 +586,12 @@ impl App {
                 }
             }
 
-            KeyCode::Char('0') => {
+            KeyCode::Char(ALL_LAYERS_KEY) => {
                 self.layers = [true; LAYER_COUNT];
                 self.toast = Some("all layers on".into());
             }
-            KeyCode::Char(d @ '1'..='8') => {
-                let i = d as usize - '1' as usize;
+            KeyCode::Char(c) if LAYER_KEYS.contains(&c) => {
+                let i = LAYER_KEYS.iter().position(|&k| k == c).expect("just matched");
                 let layer = TOGGLES[i];
                 let on = &mut self.layers[layer.index()];
                 *on = !*on;
