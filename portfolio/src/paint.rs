@@ -23,13 +23,30 @@ pub const CYAN: Color = Color::Rgb(110, 224, 255);
 /// visitor who is reading rather than watching.
 pub const PORTRAIT_FPS: f64 = 8.0;
 
+/// How long a baked animation runs before it settles, in seconds.
+pub fn portrait_secs(p: &portraits::Portrait) -> f64 {
+    p.frames.len() as f64 / PORTRAIT_FPS
+}
+
 /// Which frame of a baked animation is showing at `t` seconds.
-pub fn portrait_frame(p: &crate::portraits::Portrait, t: f64) -> &'static [portraits::Cell] {
+///
+/// Plays once and then holds the last frame -- it does not loop. That is a
+/// bandwidth decision, not a taste one, and the numbers are lopsided enough
+/// to settle it: chafa picks glyphs and colours for each frame independently,
+/// so two visually similar frames share almost no cells, and all 408 of the
+/// home portrait's change on every step. Looped at 8 fps that is **126 KB/s**
+/// on the landing page, for ever, measured over a real WebSocket -- against
+/// the 0.3 KB/s an idle screen costs otherwise. Played once it is a quarter of
+/// a megabyte on arrival and nothing after.
+///
+/// So the portrait moves while somebody is arriving and reading the first
+/// line, and is a still by the time they are done.
+pub fn portrait_frame(p: &portraits::Portrait, t: f64) -> &'static [portraits::Cell] {
     let n = p.frames.len();
     if n <= 1 {
         return p.frames[0];
     }
-    p.frames[((t * PORTRAIT_FPS) as usize) % n]
+    p.frames[((t * PORTRAIT_FPS) as usize).min(n - 1)]
 }
 
 /// Blit one baked plate at `x`,`y`, clipped to `area`.

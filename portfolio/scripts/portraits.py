@@ -250,12 +250,7 @@ def main() -> None:
     out.append("pub fn find(id: &str) -> Option<&'static Portrait> {")
     out.append("    PORTRAITS.iter().find(|p| p.id == id)")
     out.append("}")
-    out.append("")
-    out.append("/// Whether anything baked here moves, which is what decides")
-    out.append("/// whether a page holding these needs redrawing at all.")
-    out.append("pub fn any_animated() -> bool {")
-    out.append("    PORTRAITS.iter().any(|p| p.frames.len() > 1)")
-    out.append("}")
+
     out.append("")
 
     sys.stdout.write("\n".join(out))

@@ -201,16 +201,25 @@ impl Shell {
             || match self.section {
                 Section::Experience => self.map.animating(),
                 Section::Projects | Section::Skills => self.sheet.moving(),
-                // The scroll, or a plate with more than one baked frame.
-                Section::Taste => self.vel.abs() > 0.01 || crate::portraits::any_animated(),
+                // The scroll, or a plate that has not settled yet.
+                Section::Taste => self.vel.abs() > 0.01 || self.plates_moving(),
                 // Only while the tide is running. Idle, the screen is static
                 // and the stream still gets polled on the slow heartbeat --
                 // asking for 40 frames a second to render a blinking caret is
                 // how a portfolio ends up warming someone's laptop.
                 Section::Ask => self.ask.busy(),
-                Section::Home => crate::portraits::find("snufkin-home")
-                    .is_some_and(|p| p.frames.len() > 1),
+                Section::Home => self.plates_moving(),
             }
+    }
+
+    /// True while any baked animation is still playing.
+    ///
+    /// They run once and stop, so this goes false a second or two into a
+    /// session and the page costs nothing to hold after that.
+    fn plates_moving(&self) -> bool {
+        crate::portraits::PORTRAITS
+            .iter()
+            .any(|p| p.frames.len() > 1 && self.clock < crate::paint::portrait_secs(p))
     }
 
     /// True while the opening is still on screen.

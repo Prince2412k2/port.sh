@@ -96,9 +96,3 @@ pub static PORTRAITS: [Portrait; 8] = [
 pub fn find(id: &str) -> Option<&'static Portrait> {
     PORTRAITS.iter().find(|p| p.id == id)
 }
-
-/// Whether anything baked here moves, which is what decides
-/// whether a page holding these needs redrawing at all.
-pub fn any_animated() -> bool {
-    PORTRAITS.iter().any(|p| p.frames.len() > 1)
-}
