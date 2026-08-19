@@ -2,15 +2,16 @@
 
 ```bash
 docker compose up -d --build
-ssh your-host
+ssh -p 2222 your-host
 ```
 
-That is the whole thing. Port 22, any SSH key, straight into the portfolio.
+That is the whole thing. Any SSH key, straight into the portfolio.
 
-**If the box already runs sshd, move it first.** Put `Port 2200` in the host's
-`/etc/ssh/sshd_config`, restart it, reconnect on the new port, *then* bring this
-up. Discovering the conflict after `docker compose up` means discovering it from
-outside the machine.
+Published on **2222** for now rather than 22, on purpose: it means this never
+has to fight the host's own sshd, and there is nothing to discover about a port
+conflict from outside the machine. Move it to 22 later by changing the one
+`"2222:22"` line in `docker-compose.yml` — the container's own sshd already
+listens on 22 internally, so nothing else changes.
 
 ## What a visitor can do
 
@@ -94,6 +95,6 @@ Piped, the binary prints a plain-text CV instead of raw-mode escapes, which is
 what the healthcheck uses:
 
 ```bash
-ssh your-host | cat        # plain text
-ssh -t your-host           # force the interactive one
+ssh -p 2222 your-host | cat        # plain text
+ssh -p 2222 -t your-host           # force the interactive one
 ```

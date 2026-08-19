@@ -23,4 +23,6 @@
 # rather than either of the work addresses this machine is signed in to.
   email     prince240102@gmail.com
   github    github.com/Prince2412k2
-  ssh       ssh <this-host>
+  # Update the port here if docker-compose.yml's mapping changes -- this is
+  # not read from that file, it is just text.
+  ssh       ssh -p 2222 <this-host>

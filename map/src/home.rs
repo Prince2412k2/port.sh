@@ -169,11 +169,16 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
 
-    /// The private ranges have to be excluded, and 172.16/12 is the one that is
-    /// easy to get wrong: 172.15 and 172.32 are public, everything between is
-    /// not.
+    /// One test, not two, because `ssh_client_ip` reads process-global
+    /// environment variables and Rust runs tests on parallel threads by
+    /// default -- two tests each setting `SSH_CONNECTION` race each other and
+    /// fail intermittently depending on scheduling. Keeping every case that
+    /// touches these variables in one function is what makes it deterministic.
     #[test]
-    fn only_routable_client_addresses_are_looked_up() {
+    fn client_lookup_reads_the_environment_it_is_given() {
+        // The private ranges have to be excluded, and 172.16/12 is the one
+        // that is easy to get wrong: 172.15 and 172.32 are public, everything
+        // between is not.
         let cases = [
             ("203.0.113.7 51234 10.0.0.2 22", true),
             ("10.1.2.3 51234 10.0.0.2 22", false),
@@ -186,19 +191,15 @@ mod tests {
             ("::1 5 1.2.3.4 22", false),
         ];
         for (conn, want) in cases {
-            // Set and clear around each case; the function reads the process
-            // environment, which is the only thing sshd gives us.
             std::env::set_var("SSH_CONNECTION", conn);
             assert_eq!(ssh_client_ip().is_some(), want, "{conn}");
         }
-        std::env::remove_var("SSH_CONNECTION");
-    }
 
-    #[test]
-    fn there_is_a_way_to_turn_it_off() {
+        // And the off switch, on a connection that would otherwise pass.
         std::env::set_var("SSH_CONNECTION", "203.0.113.7 1 2 22");
         std::env::set_var("TERMAP_NO_CLIENT_LOOKUP", "1");
         assert!(ssh_client_ip().is_none());
+
         std::env::remove_var("TERMAP_NO_CLIENT_LOOKUP");
         std::env::remove_var("SSH_CONNECTION");
     }

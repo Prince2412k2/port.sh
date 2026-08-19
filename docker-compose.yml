@@ -1,10 +1,11 @@
-# ssh <your-host>
+# ssh -p 2222 <your-host>
 #
 #   docker compose up -d --build
 #
-# Port 22 on the host. If the box already runs its own sshd, move that one to
-# another port first -- losing your way back into a machine is a bad way to
-# find out about a port conflict.
+# Published on 2222 for now, specifically so it does not have to fight
+# whatever the host's own sshd is already doing on 22. Moving it to 22 later
+# is a one-line change to the port mapping below -- sshd inside the
+# container still listens on its own 22 either way.
 
 services:
   portfolio:
@@ -13,7 +14,7 @@ services:
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
     ports:
-      - "22:22"
+      - "2222:22"
 
     volumes:
       # The host key. Keep this: it is what stops every returning visitor
