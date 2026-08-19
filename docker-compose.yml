@@ -31,9 +31,15 @@ services:
       - hostkey:/app/keys
 
       # The basemap and the terrain. Large, rebuildable, and deliberately not
-      # in the image. Point these wherever the archives actually live; without
-      # them the map section says so rather than drawing the wrong city.
-      - ./map/data/india.pmtiles:/app/data/india.pmtiles:ro
+      # in the image; without them the map section says so rather than drawing
+      # the wrong city.
+      #
+      # The basemap is bound straight from map-data/ rather than through the
+      # symlink that used to sit at map/data/india.pmtiles. A bind source is
+      # resolved by the daemon, so when that symlink's target went away Docker
+      # tried to *create* the path and the whole stack refused to start:
+      # `mkdir ...india.pmtiles: file exists`. A real file cannot fail that way.
+      - ./map-data/vector.pmtiles:/app/data/india.pmtiles:ro
       - ./map/data/india.tmhg:/app/data/india.tmhg:ro
       - ./map/data/states.tmap:/app/data/states.tmap:ro
 
@@ -124,7 +130,7 @@ services:
     volumes:
       # No host key here: nothing on this path is authenticated, so there is
       # nothing to persist between restarts.
-      - ./map/data/india.pmtiles:/app/data/india.pmtiles:ro
+      - ./map-data/vector.pmtiles:/app/data/india.pmtiles:ro
       - ./map/data/india.tmhg:/app/data/india.tmhg:ro
       - ./map/data/states.tmap:/app/data/states.tmap:ro
       - ./portfolio/data/about.txt:/app/data/about.txt:ro

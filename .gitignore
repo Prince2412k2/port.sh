@@ -9,6 +9,11 @@ target/
 # regenerated at any other size.
 !assets/*.png
 
+# The basemap archive, kept at the top level so it is mounted rather than
+# symlinked into map/data. 1.7 GB: this must never reach a commit, and it is
+# listed before anything else here for that reason.
+map-data/
+
 # Basemaps and everything derived from them: ~110 MB here, plus a symlink to a
 # 1.6 GB PMTiles archive. All of it is rebuildable from the scripts in
 # map/scripts, and none of it is authored.
