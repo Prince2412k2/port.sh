@@ -6,6 +6,7 @@ mod boot;
 mod ask;
 mod context;
 mod emblems;
+mod gates;
 mod health;
 mod home;
 mod json;
@@ -14,6 +15,7 @@ mod net;
 mod paint;
 mod portraits;
 mod reach;
+mod servers;
 mod session;
 mod shell;
 mod web;
@@ -107,8 +109,22 @@ fn main() -> io::Result<()> {
                 // One pass of the hourly check, printed. The same code the
                 // server runs, so this answers "which tier is up right now"
                 // rather than "which tier does the file list first".
+                // The gates first. They are compiled in, so this is the only way
+                // to read the running binary's policy rather than the policy in
+                // whatever source tree happens to be checked out.
+                println!("gates");
+                for t in gates::TOOLS {
+                    println!("  tool  {:<12} {}", t.name, if t.open { "on" } else { "off" });
+                }
+                for (cap, open) in gates::capabilities() {
+                    println!("  acp   {:<12} {}", cap, if open { "on" } else { "off" });
+                }
+                println!("  budget  {} questions, {} tool calls", gates::GATES.turns, gates::GATES.tool_calls);
+                println!("  advertised  {}", gates::client_capabilities());
+                println!();
+
                 for t in health::tiers() {
-                    println!("tier {}", t.name);
+                    println!("tier {}  via {}", t.name, t.server.label());
                     for m in &t.models {
                         println!("  {m}");
                     }

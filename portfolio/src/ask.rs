@@ -33,6 +33,8 @@ pub struct Turn {
     /// and a reader who scrolls back should still see what it looked at.
     pub calls: Vec<Call>,
     pub done: bool,
+    /// Stopped at the visitor's request rather than finished.
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,10 @@ pub struct Ask {
     pub state: State,
     pub input: String,
     pub turns: Vec<Turn>,
+    /// What the handshake settled on, once it has. Drives the header: the
+    /// section can say which server and which protocol version answered rather
+    /// than implying there is only one possibility.
+    pub link: Option<acp::Ready>,
     /// Clock for the tide.
     pub t: f64,
     scroll: f64,
@@ -68,6 +74,7 @@ impl Ask {
             state: State::Cold,
             input: String::new(),
             turns: Vec::new(),
+            link: None,
             t: 0.0,
             scroll: 0.0,
         }
@@ -104,7 +111,8 @@ impl Ask {
     fn apply(&mut self, e: Event) {
         {
             match e {
-                Event::Ready => {
+                Event::Ready(r) => {
+                    self.link = Some(r);
                     if self.state == State::Starting {
                         self.state = State::Ready;
                     }
@@ -137,6 +145,18 @@ impl Ask {
                 Event::Done => {
                     if let Some(t) = self.turns.last_mut() {
                         t.done = true;
+                    }
+                    self.state = State::Ready;
+                }
+                // Stopped on purpose, so the section goes back to ready rather
+                // than to failed -- nothing is wrong and the tier is fine.
+                Event::Cancelled => {
+                    if let Some(t) = self.turns.last_mut() {
+                        t.done = true;
+                        t.cancelled = true;
+                        if t.a.trim().is_empty() {
+                            t.a = "Stopped.".into();
+                        }
                     }
                     self.state = State::Ready;
                 }
@@ -210,7 +230,18 @@ impl Ask {
             KeyCode::Backspace => {
                 self.input.pop();
             }
-            KeyCode::Esc => self.input.clear(),
+            // Escape means "stop" while something is running and "clear the
+            // line" otherwise. Cancelling is cooperative, so the wait carries on
+            // until the agent answers -- the key is a request, not a kill.
+            KeyCode::Esc => {
+                if self.state == State::Thinking {
+                    if let Some(c) = &self.client {
+                        c.cancel();
+                    }
+                } else {
+                    self.input.clear();
+                }
+            }
             KeyCode::Char('u') if ctrl => self.input.clear(),
             // Guarded: without this, Ctrl-C types a `c` into the question
             // instead of quitting.
@@ -230,8 +261,26 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     }
     let w = TEXT.min(area.width.saturating_sub(8));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
+    // Once there is an answer to read, the whole panel collapses to a single
+    // faint line and the reading space is given back. The full version is an
+    // invitation; two rows of it above somebody's answer would be furniture.
+    let head: u16 = if a.turns.is_empty() { 0 } else { 2 };
+    if head > 0 && area.height > 6 {
+        status(f, Rect { x, y: area.y, width: w, height: 1 }, a);
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "\u{2500}".repeat(w as usize),
+                Style::default().fg(FAINT),
+            )),
+            Rect { x, y: area.y + 1, width: w, height: 1 },
+        );
+    }
     // The question line lives on the last row; everything else is above it.
-    let body = Rect { height: area.height.saturating_sub(2), ..area };
+    let body = Rect {
+        y: area.y + head,
+        height: area.height.saturating_sub(2 + head),
+        ..area
+    };
 
     let put = |f: &mut Frame, y: i32, spans: Vec<Span<'static>>| {
         if y < 0 || y >= body.height as i32 {
@@ -247,6 +296,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     // read, and it should not move as the answer grows.
     let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
     if a.turns.is_empty() {
+        panel(&mut lines, w, a);
         for l in wrap(OPENING, w as usize) {
             lines.push(vec![Span::styled(l, Style::default().fg(DIM))]);
         }
@@ -327,7 +377,16 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         }
     }
 
-    let start = lines.len() as i32 - body.height as i32;
+    // A conversation is anchored to the bottom, because the newest exchange is
+    // the one being read and it must not move as the answer grows. The opening
+    // is anchored to the top instead: it is taller than a narrow screen once the
+    // gate rows wrap, and scrolling it from the bottom would push the policy off
+    // the top and leave the suggestions -- exactly the wrong half to keep.
+    let start = if a.turns.is_empty() {
+        0
+    } else {
+        lines.len() as i32 - body.height as i32
+    };
     for (i, spans) in lines.into_iter().enumerate() {
         put(f, i as i32 - start.max(0), spans);
     }
@@ -372,10 +431,169 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     );
 }
 
+/// Filled, for a gate that is open. The shut ones carry no marker: their rows
+/// are labelled `refused` and `off`, and a hollow dot on each would spend eight
+/// columns of a sixty-two column measure repeating the label.
+const OPEN: &str = "\u{25cf}";
+
+/// How many tool calls the screen has watched happen.
+///
+/// Counted from the transcript rather than reported by the client, so it is
+/// honestly "what you have seen" -- the authoritative budget lives in `acp.rs`
+/// and is the one that actually refuses. Refusals do not count against it,
+/// because they were never spent.
+fn spent(a: &Ask) -> usize {
+    a.turns
+        .iter()
+        .flat_map(|t| &t.calls)
+        .filter(|c| c.status != Status::Refused)
+        .count()
+}
+
+/// What we are connected to, in one line. Right-aligned, faint, skippable.
+///
+/// Names the server rather than assuming one: the whole point of `servers.rs` is
+/// that this could be anything, and a line that said "opencode" whatever was
+/// running would be a lie the moment somebody used the feature.
+fn wired(a: &Ask) -> String {
+    let Some(l) = &a.link else {
+        return match crate::health::checked() {
+            true => crate::health::note().unwrap_or_else(|| "no tier answered".into()),
+            // Before the first check the tier on screen is the file's first
+            // line, which is a guess rather than a verdict.
+            false => "not yet checked".into(),
+        };
+    };
+    let mut bits = Vec::new();
+    if !l.tier.is_empty() {
+        bits.push(l.tier.clone());
+    }
+    // The server is named because it is genuinely variable now, and a line that
+    // said "opencode" whatever was running would be a lie the first time
+    // somebody pointed a tier at something else.
+    bits.push(l.server.clone());
+    if !l.mode.is_empty() {
+        bits.push(l.mode.clone());
+    }
+    bits.push(format!("v{}", l.version));
+    bits.join(" \u{b7} ")
+}
+
+/// The collapsed header, once there is an answer worth the room.
+fn status(f: &mut Frame, area: Rect, a: &Ask) {
+    let n = spent(a);
+    let left = Span::styled(
+        if n > 0 {
+            format!("acp  \u{b7}  {n}/{} tools", crate::gates::GATES.tool_calls)
+        } else {
+            "acp".to_string()
+        },
+        Style::default().fg(FAINT),
+    );
+    f.render_widget(Paragraph::new(Line::from(vec![left])), area);
+    f.render_widget(
+        Paragraph::new(Span::styled(wired(a), Style::default().fg(FAINT))).right_aligned(),
+        area,
+    );
+}
+
+/// What the agent may and may not do, stated before it is asked anything.
+///
+/// This is the part worth putting on a portfolio. A chat box that says "it
+/// cannot run anything" is a claim; a list of every tool with the shut ones
+/// still on it, drawn from the same table that does the refusing, is the claim
+/// and its evidence in one place. The dots are the gates in `gates.rs` -- if
+/// somebody opens one, this fills in without being edited.
+fn panel(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
+    let rule = |lines: &mut Vec<Vec<Span<'static>>>| {
+        lines.push(vec![Span::styled(
+            "\u{2500}".repeat(w as usize),
+            Style::default().fg(FAINT),
+        )]);
+    };
+
+    // Clear of the rail above. Without this the heading sits directly under the
+    // navigation and reads as part of it.
+    lines.push(vec![]);
+
+    // The heading, with what we are wired to on the right of the same row.
+    let title = "what it may do";
+    let right = wired(a);
+    let gap = (w as usize).saturating_sub(title.chars().count() + right.chars().count());
+    lines.push(vec![
+        Span::styled(title.to_string(), Style::default().fg(DIM)),
+        Span::styled(" ".repeat(gap), Style::default()),
+        Span::styled(right, Style::default().fg(FAINT)),
+    ]);
+    rule(lines);
+
+    // The granted tools, one to a row with what they are for. These are the
+    // only rows that get the accent: they are the whole grant.
+    for t in crate::gates::TOOLS.iter().filter(|t| t.open) {
+        lines.push(vec![
+            Span::styled(format!("  {OPEN} "), Style::default().fg(CYAN)),
+            Span::styled(
+                format!("{:<12}", t.name),
+                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(t.blurb.to_string(), Style::default().fg(FAINT)),
+        ]);
+    }
+
+    // Everything refused, compactly. One row rather than one each: the reader
+    // does not need a paragraph per thing that cannot happen, but the names
+    // have to be *there*, because a list of what is allowed proves nothing on
+    // its own.
+    let shut: Vec<&str> =
+        crate::gates::TOOLS.iter().filter(|t| !t.open).map(|t| t.name).collect();
+    let off: Vec<&str> = crate::gates::capabilities()
+        .into_iter()
+        .filter(|(_, open)| !open)
+        .map(|(n, _)| n)
+        .collect();
+    // No marker on these rows: the label already says they are shut, and four
+    // of them would spend eight columns saying it again. Wrapped rather than
+    // clipped -- a list of refusals that loses its last entry to the measure is
+    // the one kind of truncation this panel cannot afford.
+    // The label sits in a gutter beside the list where there is room for one.
+    // On a narrow screen it takes its own row instead -- twelve columns of
+    // gutter out of twenty-two is how "elicitation" ends up as "elicitatio".
+    const LABEL: usize = 12;
+    let gutter = if (w as usize) >= 40 { LABEL } else { 0 };
+    for (label, list) in [("refused", shut), ("off", off)] {
+        if list.is_empty() {
+            continue;
+        }
+        if gutter == 0 {
+            lines.push(vec![Span::styled(
+                format!("  {label}"),
+                Style::default().fg(FAINT),
+            )]);
+        }
+        let room = (w as usize).saturating_sub(gutter.max(4)).max(8);
+        for (i, run) in wrap(&list.join(" \u{b7} "), room).into_iter().enumerate() {
+            let head = match (gutter, i) {
+                (0, _) => "    ".to_string(),
+                (_, 0) => format!("  {:<width$}", label, width = LABEL - 2),
+                _ => " ".repeat(LABEL),
+            };
+            lines.push(vec![
+                Span::styled(head, Style::default().fg(FAINT)),
+                Span::styled(run, Style::default().fg(DIM)),
+            ]);
+        }
+    }
+    rule(lines);
+    lines.push(vec![]);
+}
+
+/// The panel above says what the agent may do, so this no longer lists it. It
+/// used to promise that the agent could leave Prince a message, which the panel
+/// would now contradict -- `reach_out` is shut and `/reach` is handled here.
 const OPENING: &str = "Ask about the work, the places, or anything else. There \
-    is an agent on this box. It can read the web and it can leave Prince a \
-    message, and you will see it reach for those as it goes. It cannot run \
-    anything or write to this machine.";
+    is an agent on this box, and you will see it reach for the web as it goes. \
+    To leave Prince a message type /reach, which is handled here rather than by \
+    the agent -- so it arrives whether or not a model is up, and word for word.";
 
 /// Trim to `room` columns, marking that something was cut.
 ///
@@ -467,6 +685,127 @@ mod tests {
             status,
             detail: "https://example.com".into(),
         }
+    }
+
+    /// Draw a frame and read it back as text.
+    ///
+    /// The panel is the part of this change worth checking, and the two states
+    /// it has cannot both be reached from `--snapshot`: the collapsed one needs
+    /// a conversation, and there is no flag that invents one.
+    fn drawn(a: &Ask, w: u16, h: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render(f, f.area(), a)).unwrap();
+        termap::snapshot::plain(term.backend().buffer())
+    }
+
+    fn ready(a: &mut Ask) {
+        a.apply(Event::Ready(acp::Ready {
+            tier: "github copilot".into(),
+            server: "opencode".into(),
+            version: 1,
+            mode: "plan".into(),
+        }));
+    }
+
+    /// Every gate is on screen before the agent is asked anything, open ones and
+    /// shut ones alike. A list of what is permitted proves nothing on its own,
+    /// so the refusals have to be visible too -- and they come from the same
+    /// table that does the refusing.
+    #[test]
+    fn the_panel_names_every_gate_open_or_shut() {
+        let mut a = Ask::new();
+        ready(&mut a);
+        let s = drawn(&a, 92, 30);
+        for t in crate::gates::TOOLS {
+            assert!(s.contains(t.name), "{} is not on screen:\n{s}", t.name);
+        }
+        for (cap, _) in crate::gates::capabilities() {
+            // `cancel` is the one gate that grants nothing, so it is not listed
+            // among the refusals; the rest must be.
+            if cap != "cancel" {
+                assert!(s.contains(cap), "{cap} is not on screen:\n{s}");
+            }
+        }
+        assert!(s.contains("opencode"), "the server is not named:\n{s}");
+        assert!(s.contains("plan"), "the mode is not named:\n{s}");
+    }
+
+    /// Once there is an answer to read the panel collapses to one line, so the
+    /// reading space goes back to the prose.
+    #[test]
+    fn the_panel_gives_its_room_back_once_there_is_an_answer() {
+        let mut a = Ask::new();
+        ready(&mut a);
+        let empty = drawn(&a, 92, 30);
+        assert!(empty.contains("what it may do"));
+
+        a.turns.push(Turn { q: "why braille?".into(), a: "Because dots.".into(), ..Default::default() });
+        let full = drawn(&a, 92, 30);
+        assert!(!full.contains("what it may do"), "the panel stayed:\n{full}");
+        assert!(full.contains("Because dots."), "the answer is missing:\n{full}");
+        // The collapsed line still says what we are talking to.
+        assert!(full.contains("opencode"), "the server went missing:\n{full}");
+    }
+
+    /// A refused call is not a spent one -- it never reached anything.
+    #[test]
+    fn the_tool_count_ignores_what_was_refused() {
+        let mut a = Ask::new();
+        a.turns.push(Turn { q: "hi".into(), ..Default::default() });
+        a.apply(Event::Tool(call("t1", Status::Done)));
+        a.apply(Event::Tool(call("t2", Status::Refused)));
+        assert_eq!(spent(&a), 1);
+    }
+
+    /// Stopping is not failing: the section goes back to ready and the tier is
+    /// left alone, because the visitor asked for it.
+    #[test]
+    fn cancelling_leaves_the_section_ready_rather_than_failed() {
+        let mut a = Ask::new();
+        ready(&mut a);
+        a.turns.push(Turn { q: "long one".into(), ..Default::default() });
+        a.state = State::Thinking;
+        a.apply(Event::Cancelled);
+        assert_eq!(a.state, State::Ready);
+        assert!(a.turns[0].done);
+        assert!(a.turns[0].cancelled);
+        assert_eq!(a.turns[0].a, "Stopped.");
+    }
+
+    /// Escape means two different things and must not do the wrong one. While an
+    /// answer is coming it stops the turn; otherwise it clears the line.
+    #[test]
+    fn escape_clears_the_line_only_when_nothing_is_running() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = Ask::new();
+        a.input = "half a question".into();
+        a.state = State::Thinking;
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(a.input, "half a question", "the question was thrown away mid-answer");
+
+        a.state = State::Ready;
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(a.input, "");
+    }
+
+    /// The narrowest sane terminal must not lose a refusal to the measure, and
+    /// must not panic on the arithmetic that lays the panel out.
+    #[test]
+    fn the_panel_survives_a_narrow_screen() {
+        let mut a = Ask::new();
+        ready(&mut a);
+        for w in [30u16, 40, 62, 80, 200] {
+            let s = drawn(&a, w, 30);
+            for t in crate::gates::TOOLS {
+                assert!(s.contains(t.name), "{} lost at width {w}:\n{s}", t.name);
+            }
+            // The longest capability name is the one that gets clipped first.
+            assert!(s.contains("elicitation"), "clipped at width {w}:\n{s}");
+        }
+        // Below the section's own floor it draws nothing rather than panicking.
+        let _ = drawn(&a, 20, 6);
     }
 
     /// A tool call is reported several times as it runs. Each report carries

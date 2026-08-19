@@ -194,18 +194,28 @@ the wrong street.
 | `u` `o` | tilt the camera (2.5D) |
 | `,` `.` | rotate bearing |
 | `m` | back to flat 2D |
-| `9` | terrain relief |
-| `@` | fly to your location |
+| `(` | terrain relief |
+| `x` | fly to your location |
 | `f` | depth focus: off / subtle / strong |
 | `r` | road glyphs: lines / braille / blocks |
 | `c` | monochrome / colour by kind |
-| `1`–`8` | toggle a layer, `0` for all |
+| `!` `@` `#` `$` `%` `^` `&` `*` | toggle a layer, `)` for all |
 | `t` `p` | labels, side panel |
 | `g` | fit to data |
 | `?` `q` | help, quit |
 | `e` | fly the experience tour |
 | `n` `b` | next / previous stop |
 | `enter` | replay the arrival |
+
+The layer toggles are Shift and a digit — `!` for the first layer through `*` for
+the eighth, `(` and `)` for terrain and all-on — rather than the digits
+themselves. They were the digits until the portfolio embedded this map and took
+`1`–`5` for moving between sections, at which point `3` meant "minor road" here
+and "skills" one section later, and `6`–`9` reached nothing at all. The side
+panel prints the key beside each layer, and both come from one table
+(`app::LAYER_KEYS`), so the label cannot drift from the binding. What is matched
+is the character rather than the chord, so a keyboard that puts `!` somewhere
+other than Shift+1 still works.
 
 Hovering reports what is under the pointer in the status bar. Hit-testing reads a
 per-subpixel feature-id buffer written during rasterisation, so it is exact

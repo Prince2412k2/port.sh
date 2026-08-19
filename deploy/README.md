@@ -189,18 +189,35 @@ both services share it. Keep that volume: on the tmpfs everything else uses,
 this would work perfectly until the first restart and then silently drop the
 whole Copilot tier.
 
-**What it may do.** It can fetch and search the web. It cannot run a shell, and
-that is not a close call: this box takes any username over SSH, so `bash` on it
-is arbitrary code execution for anyone who can type. The allow-list is enforced
-three times — in opencode's `tools` block, in its `permission` block, and again
-by name in `answer_request` at every request — because the first two are one
-upstream rename away from meaning nothing.
+**What it may do.** One table, `portfolio/src/gates.rs`, and everything else
+derives from it: the `clientCapabilities` in the ACP handshake, the server's own
+`tools` and `permission` blocks where it has them, and the check on every inbound
+request. It can fetch and search the web. It cannot run a shell, and that is not
+a close call: this box takes any username over SSH, so `bash` on it is arbitrary
+code execution for anyone who can type. Enforced three times over, because the
+first two layers are somebody else's code and one upstream rename from meaning
+nothing.
 
-**What it costs you.** Strangers' questions spend your tokens. Two brakes, both
-in `portfolio/src/acp.rs`: `MAX_TURNS` (twelve questions a connection) and
-`MAX_TOOL_CALLS` (twenty-four fetches a session). Neither stops a reconnect. If
-this gets found by something automated, the lever is `models.txt` — empty it and
-the section turns itself off.
+A shut gate answers with a JSON-RPC error, not an empty result. Answering
+`terminal/create` with `{}` would tell the agent it has a terminal, and it would
+then read from it.
+
+`portfolio --probe` prints the gates the running binary was built with, along
+with which tier is answering.
+
+**Why compile time.** These gates decide whether a public server runs a shell for
+a stranger. A file on disk is one bad mount from being absent or empty — see the
+dangling-symlink incident — so turning one on is a rebuild and a redeploy. That
+is the right amount of friction for the question.
+
+**What it costs you.** Strangers' questions spend your tokens. Two brakes, in
+`gates.rs`: `turns` (twelve questions a connection) and `tool_calls` (twenty-four
+a session). Neither stops a reconnect. If this gets found by something automated,
+the lever is `models.txt` — empty it and the section turns itself off.
+
+**Which server.** Any ACP server, not just opencode. A tier in `models.txt` may
+name a `command` and how the model is pinned; left out, it is `opencode acp`. The
+gates apply to all of them, so adding a server cannot widen what an agent may do.
 
 ## Messages
 

@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, TOGGLES};
+use crate::app::{App, LAYER_KEYS, TOGGLES};
 use crate::canvas::Canvas;
 use crate::geo::PIXEL_ASPECT;
 use crate::scene::{self, SceneOpts};
@@ -145,7 +145,10 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
                 format!(" {} ", if on { "▣" } else { "▢" }),
                 Style::default().fg(if on { FG } else { FAINT }),
             ),
-            Span::styled(format!("{} ", i + 1), Style::default().fg(FAINT)),
+            // The key that actually toggles it, straight from the table the key
+            // handler reads. This printed `i + 1` and so advertised a digit --
+            // which, embedded in the portfolio, moved you to another section.
+            Span::styled(format!("{} ", LAYER_KEYS[i]), Style::default().fg(FAINT)),
             Span::styled(
                 format!("{:<13}", layer.label()),
                 Style::default().fg(if on { FG } else { FAINT }),
@@ -191,8 +194,8 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         ("u o", "tilt"),
         (", .", "rotate"),
         ("m", "auto / manual cam"),
-        ("9", "terrain"),
-        ("@", "my location"),
+        ("(", "terrain"),
+        ("x", "my location"),
         ("c", "colour / mono"),
         ("t", "labels"),
         ("p", "panel"),
@@ -721,8 +724,12 @@ fn help(f: &mut Frame, area: Rect) {
         row("h j k l", "pan left/down/up/right"),
         row("+ -", "zoom in / out"),
         row("f", "cycle depth focus off/subtle/strong"),
-        row("1 - 7", "toggle a layer"),
-        row("0", "all layers on"),
+        // Shift and a digit. Not the digits themselves: the portfolio that
+        // embeds this map owns those for moving between sections.
+        row("! @ # $ % ^ & *", "toggle a layer (see the panel)"),
+        row(")", "all layers on"),
+        row("(", "terrain relief"),
+        row("x", "my location"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),
         row("g", "recentre on the data"),

@@ -19,12 +19,13 @@
 //! costs a single one-word prompt.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::json;
+use crate::servers::Server;
 
 /// How long between checks.
 pub fn interval() -> Duration {
@@ -46,6 +47,21 @@ const PATIENCE: Duration = Duration::from_secs(45);
 pub struct Tier {
     pub name: String,
     pub models: Vec<String>,
+    /// Which ACP server this tier's models are reached through. Per tier rather
+    /// than global, because "the same question, somewhere else" is exactly what
+    /// a tier is -- and a fallback tier that has to run a different server is
+    /// the case this whole indirection exists for.
+    pub server: Server,
+}
+
+/// One thing to try: a model, the server that runs it, and the tier it came
+/// from. Flattened for the caller, which wants a list to walk rather than a
+/// tree to recurse.
+#[derive(Debug, Clone)]
+pub struct Shot {
+    pub tier: String,
+    pub server: Server,
+    pub model: String,
 }
 
 /// The tiers, in the order they should be tried.
@@ -64,18 +80,29 @@ pub fn parse(src: &str) -> Vec<Tier> {
             continue;
         }
         let (word, rest) = bare.split_once(char::is_whitespace).unwrap_or((bare, ""));
+        // A directive before any tier still belongs somewhere. Naming the tier
+        // after nothing is better than dropping the line.
+        let current = |out: &mut Vec<Tier>| {
+            if out.is_empty() {
+                out.push(Tier { name: "default".into(), ..Tier::default() });
+            }
+        };
         match word {
-            "tier" => out.push(Tier { name: rest.trim().to_string(), models: Vec::new() }),
+            "tier" => out.push(Tier { name: rest.trim().to_string(), ..Tier::default() }),
+            "command" if !rest.trim().is_empty() => {
+                current(&mut out);
+                out.last_mut().expect("just pushed").server.command_line(rest.trim());
+            }
+            "pin" if !rest.trim().is_empty() => {
+                current(&mut out);
+                out.last_mut().expect("just pushed").server.pin_line(rest.trim());
+            }
             "model" => {
                 let m = rest.trim().to_string();
                 if m.is_empty() {
                     continue;
                 }
-                // A model before any tier still belongs somewhere. Naming the
-                // tier after nothing is better than dropping the model.
-                if out.is_empty() {
-                    out.push(Tier { name: "default".into(), models: Vec::new() });
-                }
+                current(&mut out);
                 out.last_mut().expect("just pushed").models.push(m);
             }
             _ => {}
@@ -103,15 +130,38 @@ fn state() -> &'static Mutex<State> {
 /// Before the first check has finished this is every model in the file, in
 /// order — which is exactly the old behaviour, and the right answer for a
 /// session that arrives in the first few seconds after a restart.
-pub fn models() -> Vec<String> {
+pub fn plan() -> Vec<Shot> {
+    let chosen = {
+        let s = state().lock().unwrap_or_else(|e| e.into_inner());
+        s.tier.clone()
+    };
+    // Checked and nothing answered hands back everything anyway rather than
+    // nothing: the check is an hour old at worst, and a tier that just came
+    // back should not have to wait for the next one to be used.
+    let list = match chosen {
+        Some(t) => vec![t],
+        None => tiers(),
+    };
+    list.into_iter()
+        .flat_map(|t| {
+            let (name, server) = (t.name, t.server);
+            t.models.into_iter().map(move |model| Shot {
+                tier: name.clone(),
+                server: server.clone(),
+                model,
+            })
+        })
+        .collect()
+}
+
+/// Whether a check has finished yet.
+///
+/// The difference between "this tier answered forty minutes ago" and "nobody has
+/// asked yet" is worth showing rather than flattening: before the first check the
+/// tier on screen is the file's first line, which is a guess.
+pub fn checked() -> bool {
     let s = state().lock().unwrap_or_else(|e| e.into_inner());
-    match (&s.tier, s.checked) {
-        (Some(t), _) => t.models.clone(),
-        // Checked, and nothing answered. Hand back everything anyway rather
-        // than nothing: the check is a minute old at worst and a tier that
-        // just came back should not have to wait an hour to be used.
-        (None, _) => tiers().into_iter().flat_map(|t| t.models).collect(),
-    }
+    s.checked
 }
 
 /// A line for the ask section to show while it waits.
@@ -139,16 +189,21 @@ pub fn watch() {
 pub fn check() {
     let mut tried = Vec::new();
     for t in tiers() {
-        let live: Vec<String> = t.models.iter().filter(|m| ask_one_word(m)).cloned().collect();
+        let live: Vec<String> =
+            t.models.iter().filter(|m| ask_one_word(&t.server, m)).cloned().collect();
         if !live.is_empty() {
             eprintln!(
-                "portfolio: agent tier `{}` answering ({}/{} models)",
+                "portfolio: agent tier `{}` answering via `{}` ({}/{} models)",
                 t.name,
+                t.server.label(),
                 live.len(),
                 t.models.len()
             );
             let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
-            *s = State { tier: Some(Tier { name: t.name, models: live }), checked: true };
+            *s = State {
+                tier: Some(Tier { name: t.name, models: live, server: t.server }),
+                checked: true,
+            };
             return;
         }
         tried.push(t.name);
@@ -167,16 +222,10 @@ fn reap(mut c: Child) {
     let _ = c.wait();
 }
 
-/// Ask one model one word. True if it answered at all.
-fn ask_one_word(model: &str) -> bool {
-    let Ok(mut child) = Command::new("opencode")
-        .arg("acp")
-        .env("OPENCODE_CONFIG_CONTENT", crate::acp::config(model))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
+/// Ask one model one word, through the server its tier names. True if it
+/// answered at all.
+fn ask_one_word(server: &Server, model: &str) -> bool {
+    let Ok(mut child) = server.spawn_command(model).spawn() else {
         return false;
     };
 
@@ -224,35 +273,29 @@ fn ask_one_word(model: &str) -> bool {
     };
 
     let ok = (|| {
-        if !send(&mut w, concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"#,
-            r#""clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false}}}}"#
-        )) {
+        // The same handshake acp.rs performs, built by the same functions --
+        // a probe that negotiates differently is not a probe of the thing being
+        // asked about. That used to be a comment asking the reader to keep two
+        // copies in step; now there is one copy.
+        if !send(&mut w, &crate::acp::initialize_request(1)) {
             return false;
         }
         if wait(1, deadline).is_none() {
             return false;
         }
-        let cwd = std::env::current_dir().unwrap_or_default();
-        if !send(&mut w, &format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"session/new","params":{{"cwd":{},"mcpServers":[]}}}}"#,
-            json::quote(&cwd.to_string_lossy())
-        )) {
+        if !send(&mut w, &crate::acp::session_new_request(2)) {
             return false;
         }
         let Some(res) = wait(2, deadline) else { return false };
         let Some(sid) = res.get("sessionId").and_then(|v| v.as_str()).map(str::to_string) else {
             return false;
         };
-        // Plan mode here too. A probe that runs in a mode the real sessions
-        // never use is not a probe of the thing being asked about, and this is
-        // also where a model that refuses plan mode gets caught.
-        if !send(&mut w, &format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"session/set_mode","params":{{"sessionId":{},"modeId":"plan"}}}}"#,
-            json::quote(&sid)
-        )) || wait(3, deadline).is_none()
-        {
-            return false;
+        // Restrained here too, and this is also where a model that offers a
+        // mode and then refuses to enter it gets caught.
+        if let Some(r) = crate::acp::restraint(&res) {
+            if !send(&mut w, &r.request(3, &sid)) || wait(3, deadline).is_none() {
+                return false;
+            }
         }
         // The actual question. One word, and the answer is thrown away: what
         // is being tested is that a token came back at all.
@@ -312,10 +355,39 @@ mod tests {
     /// arrives in the first seconds after a restart must not find an empty
     /// list and report the agent as down.
     #[test]
-    fn models_before_the_first_check_are_everything_in_order() {
+    fn the_plan_before_the_first_check_is_everything_in_order() {
         let all: Vec<String> = tiers().into_iter().flat_map(|t| t.models).collect();
-        let m = models();
-        assert_eq!(m, all);
-        assert!(!m.is_empty());
+        let got: Vec<String> = plan().into_iter().map(|s| s.model).collect();
+        assert_eq!(got, all);
+        assert!(!got.is_empty());
+    }
+
+    /// Every shot carries the server its tier named, so nothing downstream has
+    /// to fall back to a hard-coded command.
+    #[test]
+    fn every_shot_knows_which_server_runs_it() {
+        for s in plan() {
+            assert!(!s.server.label().is_empty(), "{} has no server", s.model);
+            assert!(!s.tier.is_empty(), "{} has no tier", s.model);
+        }
+    }
+
+    #[test]
+    fn a_tier_can_name_its_own_acp_server() {
+        let t = parse(
+            "tier local\n  command  claude-code-acp --stdio\n  pin  flag --model\n  model a/b\n",
+        );
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].server.label(), "claude-code-acp");
+        assert_eq!(t[0].server.pin, crate::servers::Pin::Flag("--model".into()));
+    }
+
+    /// A tier that names no server is the shipped file's shape, and must keep
+    /// working exactly as it did.
+    #[test]
+    fn a_tier_naming_no_server_still_gets_opencode() {
+        let t = parse("tier default\n  model a/b\n");
+        assert_eq!(t[0].server.label(), "opencode");
+        assert_eq!(t[0].server.pin, crate::servers::Pin::OpencodeConfig);
     }
 }
