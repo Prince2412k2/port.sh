@@ -51,7 +51,8 @@ fn main() -> io::Result<()> {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("portfolio -- an interactive CV in a terminal\n");
-                println!("  --section NAME   open on home | experience | projects | skills");
+                println!("  --section NAME   open on home | experience | projects | skills |");
+                println!("                   taste | ask");
                 println!("  --snapshot WxH   draw one frame to stdout and exit");
                 println!("  --plain          snapshot without colour");
                 println!("  --at SECONDS     how far into the section's animation to draw");
@@ -65,6 +66,16 @@ fn main() -> io::Result<()> {
                 println!("  --web                    run the web terminal instead (same app, no shell)");
                 println!("  --web-addr ADDR          bind address for --web (default 0.0.0.0)");
                 println!("  --web-port PORT          bind port for --web (default 8080)");
+                println!();
+                println!("Environment:");
+                println!("  TERMAP_DATA              where the basemap and heightmap live");
+                println!("  PORTFOLIO_HOST_KEY       the SSH host key, generated on first run");
+                println!("  PORTFOLIO_IDLE_SECS      idle timeout, 0 to disable (default 900)");
+                println!("  PORTFOLIO_MESSAGES       where `/reach` appends (default data/messages.jsonl)");
+                println!();
+                println!("The agent behind `ask` is `opencode acp`, pinned to the first model in");
+                println!("data/models.txt that will answer. It needs that provider's API key in");
+                println!("the environment; without one, every other section still works.");
                 return Ok(());
             }
             "--snapshot" => {

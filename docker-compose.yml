@@ -43,10 +43,36 @@ services:
       - ./portfolio/data/about.txt:/app/data/about.txt:ro
       - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
       - ./map/data/places.txt:/app/data/places.txt:ro
+      # The agent's model list. Mounted so the order can change, or a model
+      # that has stopped being free can go, without a rebuild.
+      - ./portfolio/data/models.txt:/app/data/models.txt:ro
+
+      # Where `/reach` appends. The only thing the process writes that anyone
+      # wants to keep, and the only writable path outside the tmpfs below.
+      - messages:/app/messages
+
+    # opencode insists on a writable HOME for its cache and its logs. This is
+    # scratch and none of it survives a restart -- but without it the ask
+    # section fails at spawn on a read-only filesystem, with an error nobody
+    # sees because its stderr goes nowhere.
+    tmpfs:
+      - /tmp:size=64m,mode=1777
 
     environment:
       # Where termap looks for all of the above.
       TERMAP_DATA: /app/data
+
+      # The agent's credentials. Whichever provider data/models.txt names
+      # needs its key here; opencode reads the standard variables. Keep them
+      # in a .env file beside this one -- compose picks that up on its own,
+      # and it is not a file to commit.
+      #
+      # With no key the ask section reports that the agent would not start and
+      # every other section carries on. That is deliberate: a missing key
+      # should cost one tab, not the site.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # The visitor's own address is geolocated to put a marker on the map.
       # Set this to anything to turn that off.
       # TERMAP_NO_CLIENT_LOOKUP: "1"
@@ -104,9 +130,28 @@ services:
       - ./portfolio/data/about.txt:/app/data/about.txt:ro
       - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
       - ./map/data/places.txt:/app/data/places.txt:ro
+      - ./portfolio/data/models.txt:/app/data/models.txt:ro
+      # The same volume as the ssh service: it should not matter which way in
+      # somebody came to leave a message.
+      - messages:/app/messages
+
+    tmpfs:
+      - /tmp:size=64m,mode=1777
 
     environment:
       TERMAP_DATA: /app/data
+
+      # The agent's credentials. Whichever provider data/models.txt names
+      # needs its key here; opencode reads the standard variables. Keep them
+      # in a .env file beside this one -- compose picks that up on its own,
+      # and it is not a file to commit.
+      #
+      # With no key the ask section reports that the agent would not start and
+      # every other section carries on. That is deliberate: a missing key
+      # should cost one tab, not the site.
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # A browser tab left open in the background answers everything and would
       # otherwise hold its session indefinitely.
       # PORTFOLIO_IDLE_SECS: "900"
@@ -129,3 +174,6 @@ services:
 
 volumes:
   hostkey:
+  # Messages left through `/reach`, one JSON document per line. Read them:
+  #   docker compose exec portfolio cat /app/messages/messages.jsonl
+  messages:
