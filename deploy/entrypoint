@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# sshd's privilege-separation directory. The Dockerfile creates this at build
+# time, but the compose file mounts a fresh tmpfs over /run so the container
+# can run with a read-only root filesystem -- which replaces whatever was
+# there at build time with an empty directory. It has to be remade here, every
+# start, on the tmpfs itself.
+mkdir -p /run/sshd
+chmod 0755 /run/sshd
+
 # Generate the host key once, into the volume. Same key across restarts and
 # redeploys, so returning visitors do not get a changed-fingerprint warning.
 if [ ! -f /etc/ssh/keys/ssh_host_ed25519_key ]; then
