@@ -343,8 +343,16 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         rule,
     );
 
+    // Which tier answered the last hourly check. Shown while waiting because
+    // that wait is the one moment it explains anything: the tiers differ in
+    // how fast they start, and "waking ollama cloud" is a different promise
+    // from "waking github copilot".
+    let waking = match crate::health::note() {
+        Some(t) => format!("waking {t}…"),
+        None => "waking the agent…".to_string(),
+    };
     let (mark, hint, style) = match &a.state {
-        State::Cold | State::Starting => ("·", "waking the agent…", Style::default().fg(FAINT)),
+        State::Cold | State::Starting => ("·", waking.as_str(), Style::default().fg(FAINT)),
         State::Ready => ("›", "", Style::default().fg(CYAN)),
         State::Thinking => ("·", "thinking", Style::default().fg(FAINT)),
         State::Failed(m) => ("×", m.as_str(), Style::default().fg(ACCENT)),

@@ -148,14 +148,46 @@ With no key the section reports that the agent would not start and every other
 section carries on working. That is the intended failure: a missing key should
 cost one tab, not the site.
 
-**Which model.** `portfolio/data/models.txt`, in order, mounted rather than
-baked. The first that answers wins; one that will not start or that fails a
-question is dropped and the next is asked the same question with the context it
-has not seen. Nobody sees the switch except as a slower first answer. This
-matters because the list is free tiers on a personal account, and a single
-pinned model means the section dies for everyone the day its quota runs out.
-`opencode models` inside the container lists what is actually reachable —
-trust that over the file, which goes stale.
+**Which tier.** `portfolio/data/models.txt` holds tiers, not a flat list, and
+they are tried in order:
+
+1. **github copilot** — a seat that is already paid for.
+2. **opencode zen** — free, and free means a daily allowance rather than a
+   guarantee.
+3. **ollama cloud** — the backstop, slower and still an answer.
+
+A background check runs once an hour and settles which tier sessions start on,
+so nobody has to discover a dead one mid-question. Within the chosen tier the
+lazy fallback still applies: a model that fails is dropped and the next is
+asked the same question. Both layers exist because a tier can go down between
+checks and the visitor should not pay for that either.
+
+The check is one real one-word question to one model — the only thing that
+distinguishes *configured* from *answering*, since a listed model can be out of
+quota, unauthenticated, or withdrawn and all of those look fine until you ask.
+The walk stops at the first tier that answers, so a normal hour costs a single
+`ping`. Change the interval with `PORTFOLIO_PROBE_SECS`.
+
+To see the current state, without waiting an hour:
+
+```bash
+docker compose exec portfolio portfolio --probe
+```
+
+That prints the tiers, runs one check, and says which one it would use. It is
+the same code the server runs on its timer.
+
+**Logging Copilot in.** Once, interactively — it is a device flow you finish in
+a browser:
+
+```bash
+docker compose exec -it portfolio opencode auth login github-copilot
+```
+
+The credential lands in the `agent` volume (`XDG_DATA_HOME=/app/agent`) and
+both services share it. Keep that volume: on the tmpfs everything else uses,
+this would work perfectly until the first restart and then silently drop the
+whole Copilot tier.
 
 **What it may do.** It can fetch and search the web. It cannot run a shell, and
 that is not a close call: this box takes any username over SSH, so `bash` on it

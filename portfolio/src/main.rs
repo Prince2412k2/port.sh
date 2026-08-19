@@ -6,6 +6,7 @@ mod boot;
 mod ask;
 mod context;
 mod emblems;
+mod health;
 mod home;
 mod json;
 mod museum;
@@ -56,6 +57,7 @@ fn main() -> io::Result<()> {
                 println!("  --snapshot WxH   draw one frame to stdout and exit");
                 println!("  --plain          snapshot without colour");
                 println!("  --at SECONDS     how far into the section's animation to draw");
+                println!("  --probe          check which agent tier is answering, and exit");
                 println!();
                 println!("  --serve                  run the SSH server instead of a local terminal");
                 println!("  --ssh-addr ADDR          bind address for --serve (default 0.0.0.0)");
@@ -101,6 +103,24 @@ fn main() -> io::Result<()> {
                     s.at = v;
                 }
             }
+            "--probe" => {
+                // One pass of the hourly check, printed. The same code the
+                // server runs, so this answers "which tier is up right now"
+                // rather than "which tier does the file list first".
+                for t in health::tiers() {
+                    println!("tier {}", t.name);
+                    for m in &t.models {
+                        println!("  {m}");
+                    }
+                }
+                println!();
+                health::check();
+                match health::note() {
+                    Some(t) => println!("using: {t}"),
+                    None => println!("using: nothing -- no tier answered"),
+                }
+                return Ok(());
+            }
             "--emblems" => {
                 print!("{}", emblems::sheet());
                 return Ok(());
@@ -129,6 +149,7 @@ fn main() -> io::Result<()> {
     }
 
     if web {
+        health::watch();
         let rt = tokio::runtime::Runtime::new()?;
         return rt
             .block_on(web::serve(&web_addr, web_port))
@@ -139,6 +160,7 @@ fn main() -> io::Result<()> {
         let path = host_key
             .or_else(|| std::env::var("PORTFOLIO_HOST_KEY").ok())
             .unwrap_or_else(|| "data/ssh_host_key".to_string());
+        health::watch();
         let rt = tokio::runtime::Runtime::new()?;
         return rt
             .block_on(net::serve(&ssh_addr, ssh_port, std::path::Path::new(&path)))

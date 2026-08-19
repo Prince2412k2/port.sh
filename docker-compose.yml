@@ -57,6 +57,10 @@ services:
       # wants to keep, and the only writable path outside the tmpfs below.
       - messages:/app/messages
 
+      # opencode's credential store. Shared with the web service on purpose:
+      # `opencode auth login github-copilot` is done once and serves both.
+      - agent:/app/agent
+
     # opencode insists on a writable HOME for its cache and its logs. This is
     # scratch and none of it survives a restart -- but without it the ask
     # section fails at spawn on a read-only filesystem, with an error nobody
@@ -137,9 +141,10 @@ services:
       - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
       - ./map/data/places.txt:/app/data/places.txt:ro
       - ./portfolio/data/models.txt:/app/data/models.txt:ro
-      # The same volume as the ssh service: it should not matter which way in
-      # somebody came to leave a message.
+      # The same volumes as the ssh service: it should not matter which way in
+      # somebody came to leave a message, and the agent logs in once.
       - messages:/app/messages
+      - agent:/app/agent
 
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -183,3 +188,6 @@ volumes:
   # Messages left through `/reach`, one JSON document per line. Read them:
   #   docker compose exec portfolio cat /app/messages/messages.jsonl
   messages:
+  # opencode's credentials. Keep this volume: losing it means logging the
+  # agent back in, not just a restart.
+  agent:

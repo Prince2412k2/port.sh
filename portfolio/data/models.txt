@@ -1,20 +1,39 @@
 # models
 #
-# The agent behind the ask section, in the order they are tried. One per line.
-# The first that answers wins; if one refuses -- rate limited, out of quota,
-# withdrawn, renamed -- the next is started and the question is asked again.
-# Nobody sees the switch except as a slightly slower first answer.
+# The agent behind the ask section, in tiers. A tier is a place the questions
+# can go; the models inside one are alternatives within it.
 #
-# Names are opencode's `provider/model`. `opencode models` lists what the
-# container can actually reach, and that list changes faster than this file
-# does, so check it rather than trusting these.
+# Tiers are tried in order and the first that answers is the one sessions use,
+# until the next check. Within a tier the models are tried in order too, so a
+# tier survives one of its models being withdrawn or rate limited.
 #
-# This is mounted in docker-compose.yml, so editing it and restarting is
-# enough -- nothing here is compiled in.
+# Order here is cheapest-to-us first, not best first. Copilot is a seat that is
+# already paid for; zen is a free tier on somebody's personal account; the
+# cloud models are the backstop that keeps the section alive when the other two
+# are out for the day.
 #
-# A note on why there is a list at all: this runs on somebody's personal
-# account on a public box. A single pinned model means the section is dead
-# for everyone the moment that model's free tier runs out for the day.
+# Names are opencode's `provider/model`. `opencode models` inside the container
+# lists what it can actually reach, and that list moves faster than this file
+# does -- trust it over these. Anything unreachable is skipped at the next
+# check rather than breaking the section.
+#
+# Mounted in docker-compose.yml: edit and restart, nothing is compiled in. An
+# empty file turns the ask section off, which is the lever to pull if this ever
+# gets found by something automated.
 
-opencode/grok-code
-opencode/code-supernova
+tier  github copilot
+  # A seat, not a metered key. Needs `opencode auth login github-copilot` once
+  # -- see deploy/README.md, the credential lives on a volume so it survives a
+  # restart.
+  model  github-copilot/gpt-4.1
+  model  github-copilot/gpt-4o
+
+tier  opencode zen
+  # Free, and the free tier is a daily allowance rather than a guarantee.
+  model  opencode/grok-code
+  model  opencode/code-supernova
+
+tier  ollama cloud
+  # The backstop. Slower and further away, and still an answer.
+  model  ollama/gpt-oss:120b-cloud
+  model  ollama/qwen3-coder:480b-cloud

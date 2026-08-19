@@ -50,8 +50,8 @@ RUN apt-get update \
 # A system account with no shell, purely so the process is not root. Nothing
 # ever logs into it -- there is no login path here at all any more.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin portfolio \
- && mkdir -p /app/keys /app/messages \
- && chown -R portfolio:portfolio /app/keys /app/messages
+ && mkdir -p /app/keys /app/messages /app/agent \
+ && chown -R portfolio:portfolio /app/keys /app/messages /app/agent
 
 WORKDIR /app
 COPY --from=build /src/target/release/portfolio /usr/local/bin/portfolio
@@ -68,14 +68,20 @@ ENV TERMAP_DATA=/app/data
 # writes that anybody wants to keep, and the filesystem is otherwise read-only.
 ENV PORTFOLIO_MESSAGES=/app/messages/messages.jsonl
 
-# opencode wants somewhere to put its own state. Pointed at a tmpfs the
-# compose file mounts: it is a cache, it does not survive a restart, and
-# without this opencode tries to write under a read-only $HOME and the whole
-# ask section fails at spawn rather than at first question.
+# opencode wants somewhere to write. Most of it is cache and belongs on the
+# tmpfs the compose file mounts -- without it opencode fails at spawn on a
+# read-only filesystem, and the ask section dies before the first question.
 ENV HOME=/tmp
 ENV XDG_CACHE_HOME=/tmp/cache
-ENV XDG_DATA_HOME=/tmp/share
 ENV XDG_CONFIG_HOME=/tmp/config
+
+# Except the credential. `opencode auth login github-copilot` is a device
+# flow somebody completes in a browser, and auth.json lands under
+# XDG_DATA_HOME -- so that one path is a volume rather than scratch. On tmpfs
+# it would work perfectly until the first restart and then quietly drop the
+# whole Copilot tier, which is the sort of failure that gets diagnosed as
+# "Copilot is down" a week later.
+ENV XDG_DATA_HOME=/app/agent
 
 # The image is both services. ENTRYPOINT is the binary alone and the flags
 # come from `command:` in docker-compose.yml, so the ssh and web containers

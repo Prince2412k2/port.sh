@@ -100,17 +100,13 @@ pub struct Ask {
     rx: Receiver<Event>,
 }
 
-/// The models to try, in order.
+/// The models to try, best first.
+///
+/// Comes from the hourly check rather than straight off disk, so a session
+/// starts on a tier that was answering minutes ago instead of discovering a
+/// dead one at the visitor's expense. See health.rs.
 pub fn models() -> Vec<String> {
-    let disk = std::fs::read_to_string("portfolio/data/models.txt")
-        .or_else(|_| std::fs::read_to_string("data/models.txt"))
-        .ok();
-    let src = disk.as_deref().unwrap_or(include_str!("../data/models.txt"));
-    src.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect()
+    crate::health::models()
 }
 
 /// opencode's whole configuration for one attempt, as a JSON document.
@@ -118,7 +114,7 @@ pub fn models() -> Vec<String> {
 /// Passed in the environment rather than written to disk: `opencode acp` has
 /// no flag for the model, and the container has no writable filesystem to put
 /// a config file on.
-fn config(model: &str) -> String {
+pub fn config(model: &str) -> String {
     format!(
         concat!(
             r#"{{"model":{},"#,
@@ -658,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn the_model_list_skips_comments_and_blanks() {
+    fn the_model_list_is_never_empty_and_is_always_provider_slash_model() {
         let list = models();
         assert!(!list.is_empty(), "no models configured");
         for m in &list {
