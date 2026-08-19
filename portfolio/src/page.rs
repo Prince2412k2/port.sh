@@ -29,7 +29,9 @@ const GAP: u16 = 4;
 /// guessed. Guessed, it was 22 against art that runs to 34, and every emblem
 /// printed straight through the paragraph beside it.
 fn plate_w() -> u16 {
-    emblems::EMBLEMS.iter().map(|e| e.art.cols.div_ceil(2)).max().unwrap_or(0)
+    let drawn = emblems::EMBLEMS.iter().map(|e| e.art.cols.div_ceil(2)).max().unwrap_or(0);
+    let baked = crate::portraits::PORTRAITS.iter().map(|p| p.cols).max().unwrap_or(0);
+    drawn.max(baked)
 }
 
 /// One cell of the gallery: a half-size drawing and its three lines.
@@ -98,13 +100,36 @@ fn halved(m: &Emblem) -> Small {
     (hw as u16, out_rows as u16, cells)
 }
 
+/// What sits in a plate: a photograph baked by chafa, or one of the drawn
+/// emblems. Both exist because most entries now have a real image and two do
+/// not, and a blank column where Snufkin's hat used to be reads as a bug.
+enum Plate {
+    Baked(&'static crate::portraits::Portrait),
+    Drawn(Small),
+}
+
+impl Plate {
+    fn cols(&self) -> u16 {
+        match self {
+            Plate::Baked(p) => p.cols,
+            Plate::Drawn((w, _, _)) => *w,
+        }
+    }
+    fn rows(&self) -> u16 {
+        match self {
+            Plate::Baked(p) => p.rows,
+            Plate::Drawn((_, h, _)) => *h,
+        }
+    }
+}
+
 enum Block {
     Title(String, String),
     /// A section heading with a rule running off to the right.
     Rule(&'static str),
     /// Two entries side by side. The gallery is a shelf, not a list, and one
     /// per row turned twelve short captions into a very long scroll.
-    Row(Vec<(Entry, Small)>),
+    Row(Vec<(Entry, Plate)>),
     Para(String),
     Space(u16),
 }
@@ -135,7 +160,15 @@ impl Page {
                 let row: Vec<_> = pair
                     .iter()
                     .map(|e| {
-                        let art = emblems::find(&e.emblem).map(halved).unwrap_or((0, 0, vec![]));
+                        // The photograph wins where there is one. The emblem
+                        // stays as the fallback rather than being deleted:
+                        // A Silent Voice has no image in assets/.
+                        let art = match crate::portraits::find(&e.id) {
+                            Some(p) => Plate::Baked(p),
+                            None => Plate::Drawn(
+                                emblems::find(&e.emblem).map(halved).unwrap_or((0, 0, vec![])),
+                            ),
+                        };
                         (e.clone(), art)
                     })
                     .collect();
@@ -156,7 +189,7 @@ impl Page {
 
     /// Draw the page at `scroll` rows down. Blocks outside the viewport are
     /// skipped whole; the one straddling each edge is clipped per line.
-    pub fn render(&self, f: &mut Frame, area: Rect, scroll: u16) {
+    pub fn render(&self, f: &mut Frame, area: Rect, scroll: u16, t: f64) {
         let w = width().min(area.width.saturating_sub(4));
         let x = area.x + (area.width.saturating_sub(w)) / 2;
         let top = scroll;
@@ -167,7 +200,7 @@ impl Page {
             if *y + h < top || *y > bottom {
                 continue;
             }
-            draw(f, area, x, w, *y as i32 - scroll as i32, b);
+            draw(f, area, x, w, *y as i32 - scroll as i32, b, t);
         }
     }
 }
@@ -178,7 +211,7 @@ fn height_of(b: &Block) -> u16 {
         Block::Rule(_) => 3,
         Block::Space(n) => *n,
         Block::Para(t) => wrap(t, TEXT as usize).len() as u16,
-        Block::Row(cells) => cells.iter().map(|(_, a)| a.1.max(3)).max().unwrap_or(3),
+        Block::Row(cells) => cells.iter().map(|(_, a)| a.rows().max(3)).max().unwrap_or(3),
     }
 }
 
@@ -193,7 +226,7 @@ fn put(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, spans: Vec<Span<'stat
     );
 }
 
-fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block) {
+fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block, t: f64) {
     match b {
         Block::Space(_) => {}
         Block::Title(t, sub) => {
@@ -235,12 +268,30 @@ fn draw(f: &mut Frame, area: Rect, x: u16, w: u16, dy: i32, b: &Block) {
                 // Centred in its column: the drawings are cropped to their ink
                 // and so are all different widths, and left-aligning them makes
                 // the shelf's edge look ragged for no reason.
-                plate(f, area, cx + pw.saturating_sub(art.0) / 2, dy, art, e);
+                let px = cx + pw.saturating_sub(art.cols()) / 2;
+                match art {
+                    Plate::Baked(p) => crate::paint::portrait(
+                        f,
+                        area,
+                        px,
+                        // `dy` is signed because a block can start above the
+                        // viewport; the blitter takes screen coordinates, so a
+                        // plate scrolled off the top is skipped rather than
+                        // wrapped around into a huge u16.
+                        match u16::try_from(dy) {
+                            Ok(v) => area.y + v,
+                            Err(_) => continue,
+                        },
+                        crate::paint::portrait_frame(p, t),
+                        p.cols,
+                    ),
+                    Plate::Drawn(small) => plate(f, area, px, dy, small, e),
+                }
                 let tx = cx + pw + GAP;
                 let tw = cw.saturating_sub(pw + GAP);
                 // Set against the middle of the drawing, so a short caption
                 // does not float at the top of a tall plate.
-                let top = dy + (art.1 as i32 - 3) / 2;
+                let top = dy + (art.rows() as i32 - 3) / 2;
                 put(f, area, tx, tw, top, vec![Span::styled(
                     e.name.to_uppercase(),
                     Style::default().fg(FG).add_modifier(Modifier::BOLD),

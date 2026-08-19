@@ -7,12 +7,59 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::Frame;
 
+use crate::portraits;
+
 pub const BG: Color = Color::Rgb(8, 9, 11);
 pub const FG: Color = Color::Rgb(196, 200, 206);
 pub const DIM: Color = Color::Rgb(96, 102, 112);
 pub const FAINT: Color = Color::Rgb(58, 62, 70);
 pub const ACCENT: Color = Color::Rgb(255, 176, 64);
 pub const CYAN: Color = Color::Rgb(110, 224, 255);
+
+/// How fast a baked animation plays, in frames a second.
+///
+/// Deliberately slow. These are a dozen frames sampled out of a loop, not a
+/// smooth one, and every frame that changes is cells crossing a network to a
+/// visitor who is reading rather than watching.
+pub const PORTRAIT_FPS: f64 = 8.0;
+
+/// Which frame of a baked animation is showing at `t` seconds.
+pub fn portrait_frame(p: &crate::portraits::Portrait, t: f64) -> &'static [portraits::Cell] {
+    let n = p.frames.len();
+    if n <= 1 {
+        return p.frames[0];
+    }
+    p.frames[((t * PORTRAIT_FPS) as usize) % n]
+}
+
+/// Blit one baked plate at `x`,`y`, clipped to `area`.
+///
+/// Unlike the emblems these carry real colour and are drawn as they were
+/// baked; there is no tint to apply. Cells chafa left as pure background are
+/// skipped rather than painted, so a plate sits on the page instead of on a
+/// rectangle of its own.
+pub fn portrait(f: &mut Frame, area: Rect, x: u16, y: u16, cells: &[portraits::Cell], cols: u16) {
+    let Color::Rgb(kr, kg, kb) = BG else { return };
+    for (i, &(ch, fr, fg, fb, br, bg, bb)) in cells.iter().enumerate() {
+        let (c, r) = (i as u16 % cols, i as u16 / cols);
+        let (px, py) = (x + c, y + r);
+        if px >= area.x + area.width || py >= area.y + area.height {
+            continue;
+        }
+        // chafa spells "nothing here" as a space or as braille blank,
+        // depending on which symbol class won the cell. Either one over our
+        // own ground is a cell to leave alone, so the plate sits on the page
+        // rather than on a rectangle of its own.
+        if (ch == ' ' || ch == '\u{2800}') && (br, bg, bb) == (kr, kg, kb) {
+            continue;
+        }
+        if let Some(cell) = f.buffer_mut().cell_mut((px, py)) {
+            cell.set_char(ch)
+                .set_fg(Color::Rgb(fr, fg, fb))
+                .set_bg(Color::Rgb(br, bg, bb));
+        }
+    }
+}
 
 /// Blend a colour toward the background. `k` of 1 leaves it alone, 0 removes it.
 ///
@@ -75,4 +122,40 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         out.push(line);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// portraits.rs is written by a Python script, so nothing but this checks
+    /// that what it emitted is the shape the blitter indexes into. A frame
+    /// short of `cols * rows` would draw a plate that slides diagonally.
+    #[test]
+    fn every_baked_frame_is_exactly_its_declared_grid() {
+        for p in portraits::PORTRAITS.iter() {
+            assert!(p.cols > 0 && p.rows > 0, "{} is empty", p.id);
+            assert!(!p.frames.is_empty(), "{} has no frames", p.id);
+            for (i, f) in p.frames.iter().enumerate() {
+                assert_eq!(
+                    f.len(),
+                    p.cols as usize * p.rows as usize,
+                    "{} frame {i} is {} cells, want {}x{}",
+                    p.id, f.len(), p.cols, p.rows
+                );
+            }
+        }
+    }
+
+    /// The frame index has to stay inside the array for any time at all,
+    /// including the moment a session has been open for hours.
+    #[test]
+    fn the_animation_clock_wraps_instead_of_running_off_the_end() {
+        for p in portraits::PORTRAITS.iter() {
+            for t in [0.0, 0.5, 3.0, 1e4, 8.64e4] {
+                let f = portrait_frame(p, t);
+                assert_eq!(f.len(), p.cols as usize * p.rows as usize, "{} at {t}s", p.id);
+            }
+        }
+    }
 }

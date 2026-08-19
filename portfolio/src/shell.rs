@@ -96,6 +96,10 @@ pub struct Shell {
     /// mattering; any key cuts it short, because a title card you cannot skip
     /// is a title card that gets resented on the second visit.
     boot: f64,
+    /// Seconds since the session started, never reset. Only the baked
+    /// animations read it, and they want a clock that does not restart every
+    /// time somebody changes section.
+    clock: f64,
 }
 
 impl Shell {
@@ -122,6 +126,7 @@ impl Shell {
             show_help: false,
             context: String::new(),
             boot: 0.0,
+            clock: 0.0,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         shell
@@ -179,6 +184,12 @@ impl Shell {
         }
         match self.section {
             Section::Skills => 45,
+            // Nothing on these two moves except a baked portrait, and those
+            // play at PORTRAIT_FPS. Asking for 40 frames a second to advance
+            // an eight-frame loop is bandwidth spent on frames identical to
+            // the ones before them.
+            Section::Home => 125,
+            Section::Taste if self.vel.abs() <= 0.01 => 125,
             _ => 25,
         }
     }
@@ -190,13 +201,15 @@ impl Shell {
             || match self.section {
                 Section::Experience => self.map.animating(),
                 Section::Projects | Section::Skills => self.sheet.moving(),
-                Section::Taste => self.vel.abs() > 0.01,
+                // The scroll, or a plate with more than one baked frame.
+                Section::Taste => self.vel.abs() > 0.01 || crate::portraits::any_animated(),
                 // Only while the tide is running. Idle, the screen is static
                 // and the stream still gets polled on the slow heartbeat --
                 // asking for 40 frames a second to render a blinking caret is
                 // how a portfolio ends up warming someone's laptop.
                 Section::Ask => self.ask.busy(),
-                Section::Home => false,
+                Section::Home => crate::portraits::find("snufkin-home")
+                    .is_some_and(|p| p.frames.len() > 1),
             }
     }
 
@@ -211,6 +224,7 @@ impl Shell {
     }
 
     pub fn tick(&mut self, dt: f64) {
+        self.clock += dt;
         if self.booting() {
             self.boot += dt;
             return;
@@ -396,9 +410,9 @@ impl Shell {
         self.rail(f, head);
 
         match self.section {
-            Section::Home => home::render(f, body, &self.about),
+            Section::Home => home::render(f, body, &self.about, self.clock),
             Section::Taste => {
-                self.page.render(f, body, self.scroll.round().max(0.0) as u16)
+                self.page.render(f, body, self.scroll.round().max(0.0) as u16, self.clock)
             }
             Section::Ask => ask::render(f, body, &self.ask),
             Section::Experience => termap::ui::render_map_only(f, body, &mut self.map),

@@ -4,6 +4,10 @@ target/
 # Snapshots. Every rendering decision in here was checked by dumping a frame to
 # PNG (see map/scripts/ansi2png.py); none of those frames are source.
 *.png
+# -- except the ones in assets/, which are. portraits.py bakes them into
+# portfolio/src/portraits.rs, and without the originals that file cannot be
+# regenerated at any other size.
+!assets/*.png
 
 # Basemaps and everything derived from them: ~110 MB here, plus a symlink to a
 # 1.6 GB PMTiles archive. All of it is rebuildable from the scripts in

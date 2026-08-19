@@ -19,15 +19,15 @@ const MEASURE: u16 = 62;
 /// Between the portrait and the text.
 const GAP: u16 = 5;
 
-pub fn render(f: &mut Frame, area: Rect, a: &About) {
+pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     if area.width < 24 || area.height < 8 {
         return;
     }
-    let face = crate::emblems::find("snufkin");
+    let face = crate::portraits::find("snufkin-home");
     // The portrait is dropped rather than shrunk on a narrow terminal: half a
     // drawing beside a squeezed column is worse than no drawing.
     let aw = match face {
-        Some(m) if area.width >= m.art.cols + MEASURE + GAP + 8 => m.art.cols,
+        Some(m) if area.width >= m.cols + MEASURE + GAP + 8 => m.cols,
         _ => 0,
     };
     let w = MEASURE.min(area.width.saturating_sub(8 + aw + GAP));
@@ -38,12 +38,12 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
     let pitch = wrap(&a.pitch, w as usize);
     let now = wrap(&a.now, w as usize);
     let body = 3 + pitch.len() + if now.is_empty() { 0 } else { 2 + now.len() } + 2 + 6;
-    let tall = body.max(face.map_or(0, |m| m.art.rows as usize) + 1);
+    let tall = body.max(face.map_or(0, |m| m.rows as usize) + 1);
     let mut y = area.y + ((area.height as usize).saturating_sub(tall) / 2).max(1) as u16;
 
     if aw > 0 {
         if let Some(m) = face {
-            portrait(f, area, x0, y, m);
+            crate::paint::portrait(f, area, x0, y, crate::paint::portrait_frame(m, t), m.cols);
         }
     }
 
@@ -114,35 +114,6 @@ pub fn render(f: &mut Frame, area: Rect, a: &About) {
             Paragraph::new(Line::from(links)),
             Rect { x, y, width: lw, height: 1 },
         );
-    }
-}
-
-/// The portrait, blitted a half-block row at a time.
-fn portrait(f: &mut Frame, area: Rect, x: u16, y: u16, m: &crate::emblems::Emblem) {
-    use ratatui::style::Color;
-    let Color::Rgb(br, bg, bb) = BG else { return };
-    let mix = |v: u8| {
-        let v = v as f32 / 255.0;
-        termap::canvas::ink(
-            (br as f32 + (m.rgb.0 as f32 - br as f32) * v) as u8,
-            (bg as f32 + (m.rgb.1 as f32 - bg as f32) * v) as u8,
-            (bb as f32 + (m.rgb.2 as f32 - bb as f32) * v) as u8,
-        )
-    };
-    for r in 0..m.art.rows {
-        if y + r >= area.y + area.height {
-            break;
-        }
-        let buf = f.buffer_mut();
-        for c in 0..m.art.cols {
-            let (ch, fa, ba) = m.art.cells[(r * m.art.cols + c) as usize];
-            if fa == 0 && ba == 0 {
-                continue;
-            }
-            if let Some(cell) = buf.cell_mut((x + c, y + r)) {
-                cell.set_char(ch).set_fg(mix(fa)).set_bg(mix(ba));
-            }
-        }
     }
 }
 

@@ -11,6 +11,7 @@ mod json;
 mod net;
 mod page;
 mod paint;
+mod portraits;
 mod session;
 mod shell;
 mod web;
