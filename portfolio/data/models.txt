@@ -20,6 +20,37 @@
 # Mounted in docker-compose.yml: edit and restart, nothing is compiled in. An
 # empty file turns the ask section off, which is the lever to pull if this ever
 # gets found by something automated.
+#
+#
+# ANY ACP SERVER
+#
+# A tier may name the ACP server its models are reached through. Left out, it is
+# `opencode acp`, which is what every tier below uses:
+#
+#   tier  some other agent
+#     command  npx -y @zed-industries/claude-code-acp
+#     pin      flag --model
+#     model    claude-sonnet-4-5
+#
+# `command` is the program and its arguments, split on whitespace and never
+# passed through a shell. `pin` is how the model name reaches it:
+#
+#   opencode-config   a whole opencode config document in
+#                     OPENCODE_CONFIG_CONTENT. The default, and the only one
+#                     that also carries the tool policy to the server.
+#   flag  --model     appended to the command line, followed by the model name.
+#   env   NAME        a named environment variable holding just the model name.
+#   none              the server picks for itself.
+#
+# Naming a `command` that is not opencode switches `pin` to `none` unless a
+# `pin` line says otherwise, because handing OPENCODE_CONFIG_CONTENT to
+# something else is at best ignored and at worst silently relied upon.
+#
+# What a server may do is NOT set here. That is `portfolio/src/gates.rs`,
+# compiled in, and it applies to every server in this file -- adding one cannot
+# widen what an agent is allowed to do. Only `opencode-config` pushes the policy
+# into the server as well; for everything else the client-side gate is the only
+# enforcement, which is what it was always for.
 
 tier  github copilot
   # A seat, not a metered key. Needs `opencode auth login github-copilot` once

@@ -59,13 +59,15 @@ impl Section {
     fn hints(self) -> &'static str {
         match self {
             Section::Home => "tab  move between sections    /  help",
+            // `p` rather than the layer keys themselves: the panel is where they
+            // are written down, next to what each one draws.
             Section::Experience => {
-                "n b  places    ?  find    drag  pan    wheel  zoom    /  help"
+                "n b  places    ?  find    drag  pan    wheel  zoom    p  layers    /  help"
             }
             Section::Projects => "← →  browse projects    /  help",
             Section::Skills => "drag / wheel  slide    hover  raise a tile    space  drift",
             Section::Taste => "← →  walk the room    home / end    /  help",
-            Section::Ask => "type a question    enter  send    esc  clear    tab  leave",
+            Section::Ask => "type a question    enter  send    esc  stop    tab  leave",
         }
     }
 }
@@ -299,6 +301,12 @@ impl Shell {
         // meant "experience" on the landing page and "projects" one section
         // later. A key that means different things in different places is not
         // navigation.
+        //
+        // The map wanted them too, for its layer toggles, and lost: `1`-`5` are
+        // sections everywhere and `6`-`9` are reserved for sections that do not
+        // exist yet. Its toggles are Shift and a digit now -- `!` through `*`,
+        // see `termap::app::LAYER_KEYS` -- which is punctuation and falls
+        // straight through this to the section below.
         if self.section == Section::Ask {
             self.ask.on_key(k);
             return;
@@ -492,7 +500,7 @@ impl Shell {
         if self.section == Section::Ask {
             let n = self.ask.turns.len();
             right.push(Span::styled(
-                format!("{n}/{} questions     ", crate::acp::MAX_TURNS),
+                format!("{n}/{} questions     ", crate::gates::GATES.turns),
                 Style::default().fg(FAINT),
             ));
         }
@@ -525,6 +533,61 @@ mod tests {
         let mut s = Shell::new();
         s.skip_boot();
         s
+    }
+
+    /// The map's layer toggles must survive the trip through the shell. They are
+    /// punctuation precisely so they can: digits never reach a section.
+    #[test]
+    fn the_maps_layer_keys_reach_the_map_and_toggle_a_layer() {
+        for (i, key) in termap::app::LAYER_KEYS.iter().enumerate() {
+            let mut s = shell();
+            s.go(Section::Experience);
+            let layer = termap::app::TOGGLES[i];
+            let before = s.map.layers[layer.index()];
+            s.on_key(press(*key));
+            assert_eq!(
+                s.section,
+                Section::Experience,
+                "`{key}` navigated away instead of toggling {}",
+                layer.label()
+            );
+            assert_ne!(
+                before,
+                s.map.layers[layer.index()],
+                "`{key}` did not toggle {}",
+                layer.label()
+            );
+        }
+    }
+
+    /// Terrain and all-layers-on, which used to be `9` and `0`. `9` was swallowed
+    /// by the shell's digit arm and reached nothing at all.
+    #[test]
+    fn terrain_and_all_layers_have_keys_that_arrive() {
+        let mut s = shell();
+        s.go(Section::Experience);
+        let before = s.map.show_terrain;
+        s.on_key(press(termap::app::TERRAIN_KEY));
+        assert_ne!(before, s.map.show_terrain, "terrain did not toggle");
+
+        for l in s.map.layers.iter_mut() {
+            *l = false;
+        }
+        s.on_key(press(termap::app::ALL_LAYERS_KEY));
+        assert!(s.map.layers.iter().all(|&on| on), "layers did not all come back");
+        assert_eq!(s.section, Section::Experience, "navigated away");
+    }
+
+    /// The other half of the same rule: a digit in the map section is still
+    /// navigation, and never a layer.
+    #[test]
+    fn digits_in_the_map_section_still_navigate() {
+        let mut s = shell();
+        s.go(Section::Experience);
+        let before = s.map.layers;
+        s.on_key(press('3'));
+        assert_eq!(s.section, Section::Skills, "`3` stopped navigating");
+        assert_eq!(before, s.map.layers, "`3` toggled a layer on its way out");
     }
 
     /// The bug this pins: the digits used to fall through to whichever section
