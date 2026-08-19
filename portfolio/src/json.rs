@@ -38,6 +38,17 @@ impl Value {
         }
     }
 
+    /// Only the tests read booleans out of a document — the protocol carries
+    /// none. It is here so the opencode config can be checked as parsed JSON
+    /// rather than as a string, which is the only way that test means anything.
+    #[allow(dead_code)]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Num(n) => Some(*n),

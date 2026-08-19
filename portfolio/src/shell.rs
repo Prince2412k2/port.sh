@@ -399,15 +399,24 @@ impl Shell {
             return;
         }
 
+        // The ask page pulls in once a conversation has started: the rail
+        // goes, and the reading column gets the rows the chrome was using.
+        // Everywhere else the tabs are how you know what else exists, but a
+        // page you are reading an answer on is not a page you are navigating,
+        // and five section names above somebody's reply is furniture.
+        let zoomed = self.section == Section::Ask && !self.ask.turns.is_empty();
+
         let [head, body, foot] = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(if zoomed { 0 } else { 1 }),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .areas(area);
         self.body = body;
 
-        self.rail(f, head);
+        if !zoomed {
+            self.rail(f, head);
+        }
 
         match self.section {
             Section::Home => home::render(f, body, &self.about, self.clock),

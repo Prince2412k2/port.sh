@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::acp::{self, Event};
+use crate::acp::{self, Call, Event, Status};
 use crate::paint::{wrap, ACCENT, CYAN, DIM, FAINT, FG};
 
 /// The measure. Same as the essay's, so the two read as one publication.
@@ -28,6 +28,10 @@ pub struct Turn {
     pub a: String,
     /// The last thing it said it was doing, shown small. Not the answer.
     pub thought: String,
+    /// Every tool call this turn made, in the order they started, kept after
+    /// the answer arrives. Watching it reach for things is half the point,
+    /// and a reader who scrolls back should still see what it looked at.
+    pub calls: Vec<Call>,
     pub done: bool,
 }
 
@@ -87,6 +91,18 @@ impl Ask {
         self.t += dt;
         let Some(c) = &self.client else { return };
         for e in c.poll() {
+            self.apply(e);
+        }
+    }
+
+    /// Fold one event from the agent into the page.
+    ///
+    /// Split out of `tick` so it can be driven from recorded events: this
+    /// machine cannot reach a model, and the ordering rules here -- an update
+    /// landing on the call that opened, an answer appending to the newest turn
+    /// -- are exactly the part worth checking.
+    fn apply(&mut self, e: Event) {
+        {
             match e {
                 Event::Ready => {
                     if self.state == State::Starting {
@@ -104,6 +120,18 @@ impl Ask {
                         // something is happening, not to publish a transcript
                         // of the model's reasoning to a stranger.
                         t.thought = s.lines().last().unwrap_or("").trim().to_string();
+                    }
+                }
+                Event::Tool(c) => {
+                    if let Some(t) = self.turns.last_mut() {
+                        // Updates arrive under the same id as the call that
+                        // opened, so this is an upsert rather than a push --
+                        // otherwise one fetch becomes three rows as it moves
+                        // from pending to running to completed.
+                        match t.calls.iter_mut().find(|e| e.id == c.id) {
+                            Some(e) => *e = c,
+                            None => t.calls.push(c),
+                        }
                     }
                 }
                 Event::Done => {
@@ -127,6 +155,13 @@ impl Ask {
         if q.is_empty() || self.busy() {
             return;
         }
+        // Handled here rather than by the agent. A message for Prince should
+        // arrive whether or not a model is up, whether or not it is out of
+        // quota, and word for word rather than as something's summary of it.
+        if let Some(body) = q.strip_prefix("/reach") {
+            self.leave(body);
+            return;
+        }
         let Some(c) = &self.client else { return };
         c.send(&q);
         self.turns.push(Turn { q, ..Default::default() });
@@ -134,6 +169,36 @@ impl Ask {
         self.state = State::Thinking;
         // Always show the newest exchange; the alternative is typing a question
         // and watching nothing happen because you were scrolled up.
+        self.scroll = 0.0;
+    }
+
+    /// Put a message in the file, and answer in the transcript so it reads as
+    /// part of the conversation rather than as a status bar somewhere.
+    fn leave(&mut self, body: &str) {
+        use crate::reach::Sent;
+        let said = match crate::reach::leave("", body, &crate::reach::origin()) {
+            Sent::Ok => "Left with him. He reads these by hand, so it may be a \
+                         few days -- and there is no reply address unless you \
+                         put one in the message."
+                .to_string(),
+            Sent::Empty => "Nothing to send. `/reach` and then what you want to say.".to_string(),
+            Sent::TooLong(n) => format!(
+                "That is {n} characters and the limit is {}. Shorten it, or use the \
+                 email address on the home page.",
+                crate::reach::MAX_LEN
+            ),
+            Sent::Unwritable(_) => "That did not save -- the message box is not \
+                                    reachable from here. The email address on the \
+                                    home page still works."
+                .to_string(),
+        };
+        self.turns.push(Turn {
+            q: format!("/reach{body}"),
+            a: said,
+            done: true,
+            ..Default::default()
+        });
+        self.input.clear();
         self.scroll = 0.0;
     }
 
@@ -201,6 +266,39 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
             ]);
         }
         lines.push(vec![]);
+        // What it reached for, live. These sit above the answer because that
+        // is the order they happened in, and they stay there afterwards as a
+        // record of where the answer came from.
+        for c in &t.calls {
+            let (glyph, colour) = match c.status {
+                // Four frames of a quarter-turn. The clock is the tide's, so
+                // everything on the page that moves moves together.
+                Status::Running => (
+                    ["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"]
+                        [((a.t * 6.0) as usize) % 4],
+                    CYAN,
+                ),
+                Status::Done => ("\u{2713}", DIM),
+                Status::Failed => ("\u{00d7}", ACCENT),
+                Status::Refused => ("\u{2300}", ACCENT),
+            };
+            let label = if c.title.is_empty() { "tool" } else { c.title.as_str() };
+            // The URL is the interesting half and the one most likely to be
+            // long, so it is what gets trimmed rather than the label.
+            let room = (w as usize).saturating_sub(label.chars().count() + 4);
+            let detail = ellipsis(&c.detail, room);
+            lines.push(vec![
+                Span::styled(format!("{glyph} "), Style::default().fg(colour)),
+                Span::styled(label.to_string(), Style::default().fg(DIM)),
+                Span::styled(
+                    if detail.is_empty() { String::new() } else { format!("  {detail}") },
+                    Style::default().fg(FAINT),
+                ),
+            ]);
+        }
+        if !t.calls.is_empty() {
+            lines.push(vec![]);
+        }
         if t.a.is_empty() && !t.thought.is_empty() {
             lines.push(vec![Span::styled(
                 t.thought.clone(),
@@ -267,14 +365,31 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
 }
 
 const OPENING: &str = "Ask about the work, the places, or anything else. There \
-    is an agent on this box in plan mode. It can read and think. It cannot \
-    write anything, and it has no tools.";
+    is an agent on this box. It can read the web and it can leave Prince a \
+    message, and you will see it reach for those as it goes. It cannot run \
+    anything or write to this machine.";
 
-const SUGGESTIONS: [&str; 4] = [
+/// Trim to `room` columns, marking that something was cut.
+///
+/// Counts characters rather than bytes: a URL with an accent in it is not a
+/// reason to panic on a byte index that lands mid-codepoint.
+fn ellipsis(s: &str, room: usize) -> String {
+    if room == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= room {
+        return s.to_string();
+    }
+    let keep = room.saturating_sub(1);
+    s.chars().take(keep).collect::<String>() + "\u{2026}"
+}
+
+const SUGGESTIONS: [&str; 5] = [
     "what is the hardest part of netjail?",
     "why braille for the map?",
     "what would he be like to work with?",
     "what should I read from all this?",
+    "/reach  ...to leave him a message instead",
 ];
 
 /// Contour lines that drift while the agent thinks.
@@ -331,4 +446,81 @@ fn tide(f: &mut Frame, area: Rect, t: f64) {
         }
     }
     canvas.resolve(f.buffer_mut(), area, &Fog::default(), true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(id: &str, status: Status) -> Call {
+        Call {
+            id: id.into(),
+            title: "Fetch".into(),
+            status,
+            detail: "https://example.com".into(),
+        }
+    }
+
+    /// A tool call is reported several times as it runs. Each report carries
+    /// the id of the call that opened, so they have to collapse onto one row
+    /// -- otherwise a single fetch reads as three separate ones.
+    #[test]
+    fn a_tool_call_updates_in_place_rather_than_stacking_up() {
+        let mut a = Ask::new();
+        a.turns.push(Turn { q: "hi".into(), ..Default::default() });
+
+        for e in [
+            Event::Tool(call("t1", Status::Running)),
+            Event::Tool(call("t2", Status::Running)),
+            Event::Tool(call("t1", Status::Done)),
+        ] {
+            a.apply(e);
+        }
+
+        let calls = &a.turns[0].calls;
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0].id, "t1");
+        assert_eq!(calls[0].status, Status::Done, "the update did not land");
+        // Order is the order they started in, not the order they finished.
+        assert_eq!(calls[1].id, "t2");
+        assert_eq!(calls[1].status, Status::Running);
+    }
+
+    /// `/reach` must never reach the agent: it is a message for a person, and
+    /// a model in the middle would paraphrase it, or be down.
+    #[test]
+    fn a_reach_message_becomes_a_turn_without_asking_the_agent() {
+        let _guard = crate::reach::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("askreach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("PORTFOLIO_MESSAGES", dir.join("m.jsonl"));
+
+        let mut a = Ask::new();
+        // No client at all -- the agent has never been woken. This still works.
+        a.input = "/reach hello, the map is lovely".into();
+        a.submit();
+
+        assert_eq!(a.turns.len(), 1);
+        assert!(a.turns[0].q.starts_with("/reach"));
+        assert!(a.turns[0].done);
+        assert!(a.turns[0].a.contains("Left with him"), "{}", a.turns[0].a);
+        assert!(a.input.is_empty());
+        assert_ne!(a.state, State::Thinking, "it went to the agent");
+
+        let text = std::fs::read_to_string(dir.join("m.jsonl")).unwrap();
+        assert!(text.contains("the map is lovely"));
+
+        std::env::remove_var("PORTFOLIO_MESSAGES");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_long_url_is_trimmed_on_a_character_boundary() {
+        assert_eq!(ellipsis("abcdef", 10), "abcdef");
+        assert_eq!(ellipsis("abcdef", 4), "abc\u{2026}");
+        assert_eq!(ellipsis("", 4), "");
+        assert_eq!(ellipsis("abc", 0), "");
+        // Would panic on a byte index.
+        assert_eq!(ellipsis("héllo wörld", 4), "hél\u{2026}");
+    }
 }

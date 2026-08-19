@@ -12,6 +12,7 @@ mod net;
 mod page;
 mod paint;
 mod portraits;
+mod reach;
 mod session;
 mod shell;
 mod web;

@@ -1,0 +1,20 @@
+# models
+#
+# The agent behind the ask section, in the order they are tried. One per line.
+# The first that answers wins; if one refuses -- rate limited, out of quota,
+# withdrawn, renamed -- the next is started and the question is asked again.
+# Nobody sees the switch except as a slightly slower first answer.
+#
+# Names are opencode's `provider/model`. `opencode models` lists what the
+# container can actually reach, and that list changes faster than this file
+# does, so check it rather than trusting these.
+#
+# This is mounted in docker-compose.yml, so editing it and restarting is
+# enough -- nothing here is compiled in.
+#
+# A note on why there is a list at all: this runs on somebody's personal
+# account on a public box. A single pinned model means the section is dead
+# for everyone the moment that model's free tier runs out for the day.
+
+opencode/grok-code
+opencode/code-supernova
