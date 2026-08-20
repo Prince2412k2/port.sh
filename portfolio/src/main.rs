@@ -10,6 +10,7 @@ mod gates;
 mod health;
 mod home;
 mod json;
+mod mcp;
 mod museum;
 mod net;
 mod paint;
