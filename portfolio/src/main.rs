@@ -4,6 +4,8 @@ mod acp;
 mod about;
 mod boot;
 mod ask;
+mod cert;
+mod coffee;
 mod context;
 mod emblems;
 mod gates;
@@ -22,8 +24,8 @@ mod shell;
 mod web;
 mod wire;
 mod taste;
-mod snapshot;
 mod visits;
+mod snapshot;
 
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -167,7 +169,18 @@ fn main() -> io::Result<()> {
     }
 
     if web {
+        visits::boot();
         health::watch();
+        // Both at boot rather than on the first visit.
+        //
+        // They were started from `ask::wake`, which is late enough to lose a
+        // race that showed up in a real log: `place index ready` printed *after*
+        // `offering our tools`, so a visitor who asked about a place in that
+        // first second would have had `locate_place` answer `found:false` and
+        // been told the box could not place a city it knows perfectly well.
+        // Idempotent, so the call in `wake` stays as the belt to this braces.
+        mcp::serve();
+        mcp::warm_index();
         let rt = tokio::runtime::Runtime::new()?;
         return rt
             .block_on(web::serve(&web_addr, web_port))
@@ -178,7 +191,18 @@ fn main() -> io::Result<()> {
         let path = host_key
             .or_else(|| std::env::var("PORTFOLIO_HOST_KEY").ok())
             .unwrap_or_else(|| "data/ssh_host_key".to_string());
+        visits::boot();
         health::watch();
+        // Both at boot rather than on the first visit.
+        //
+        // They were started from `ask::wake`, which is late enough to lose a
+        // race that showed up in a real log: `place index ready` printed *after*
+        // `offering our tools`, so a visitor who asked about a place in that
+        // first second would have had `locate_place` answer `found:false` and
+        // been told the box could not place a city it knows perfectly well.
+        // Idempotent, so the call in `wake` stays as the belt to this braces.
+        mcp::serve();
+        mcp::warm_index();
         let rt = tokio::runtime::Runtime::new()?;
         return rt
             .block_on(net::serve(&ssh_addr, ssh_port, std::path::Path::new(&path)))

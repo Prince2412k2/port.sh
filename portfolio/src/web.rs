@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
@@ -44,7 +45,10 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
     let bind: SocketAddr = format!("{addr}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("portfolio: web terminal on http://{bind}");
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` rather than `into_make_service`:
+    // without it there is no peer address to record, and behind a proxy there
+    // is none worth recording either -- see `client_ip`.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
@@ -52,13 +56,52 @@ async fn page() -> impl IntoResponse {
     Html(INDEX)
 }
 
-async fn upgrade(ws: WebSocketUpgrade, State(state): State<Web>) -> impl IntoResponse {
+/// The visitor's address, preferring what a reverse proxy says over the socket.
+///
+/// Deployed behind nginx or Traefik the socket is the proxy, so every visitor
+/// would look like they came from the same machine. `X-Forwarded-For` is the
+/// first hop and is what the proxy was asked to pass along; it is trusted here
+/// because the only thing in front of this is one we put there.
+fn client_ip(headers: &HeaderMap, socket: SocketAddr) -> String {
+    for h in ["x-forwarded-for", "x-real-ip"] {
+        if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
+            if let Some(first) = v.split(',').next() {
+                let first = first.trim();
+                if !first.is_empty() {
+                    return first.to_string();
+                }
+            }
+        }
+    }
+    socket.ip().to_string()
+}
+
+async fn upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<Web>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let who = crate::visits::Who {
+        via: "web",
+        // A browser has no username to offer and no key to be known by. The
+        // client sends an id it keeps in localStorage; until that arrives this
+        // visitor is simply new, which is the honest default.
+        user: String::new(),
+        id: String::new(),
+        ip: client_ip(&headers, socket),
+        client: headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string(),
+    };
     ws.on_upgrade(move |socket| async move {
         if state.sessions.fetch_add(1, Ordering::SeqCst) >= MAX_SESSIONS {
             state.sessions.fetch_sub(1, Ordering::SeqCst);
             return;
         }
-        drive(socket).await;
+        drive(socket, who).await;
         state.sessions.fetch_sub(1, Ordering::SeqCst);
     })
 }
@@ -70,7 +113,7 @@ async fn upgrade(ws: WebSocketUpgrade, State(state): State<Web>) -> impl IntoRes
 /// would carry), and a short text message starting with `r` carries a resize.
 /// Keeping resize out of band avoids inventing an escape sequence for it and
 /// means the input path stays byte-identical to the SSH one.
-async fn drive(socket: WebSocket) {
+async fn drive(socket: WebSocket, who: crate::visits::Who) {
     use futures_util::{SinkExt, StreamExt};
 
     let (mut sink, mut stream) = socket.split();
@@ -88,12 +131,26 @@ async fn drive(socket: WebSocket) {
     });
 
     // The session needs a size before it can lay anything out, and the browser
-    // only knows it after xterm.js has measured the font. So the first message
-    // is always a resize, and the session does not start until it arrives.
-    let first = stream.next().await;
-    let (cols, rows) = match first {
-        Some(Ok(Message::Text(t))) => parse_resize(&t).unwrap_or((100, 30)),
-        _ => (100, 30),
+    // only knows it after xterm.js has measured the font. So the opening
+    // messages are text: an optional `i<id>` naming the visitor, then the size,
+    // and the session does not start until the size arrives.
+    let mut who = who;
+    let (cols, rows) = loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(t))) => {
+                if let Some(id) = t.strip_prefix('i') {
+                    who.id = sanitise_id(id);
+                    continue;
+                }
+                if let Some(size) = parse_resize(&t) {
+                    break size;
+                }
+            }
+            // Binary before a size is input for a session that does not exist
+            // yet. Dropped rather than buffered.
+            Some(Ok(_)) => continue,
+            _ => break (100, 30),
+        }
     };
 
     let reader_tx = in_tx.clone();
@@ -126,11 +183,48 @@ async fn drive(socket: WebSocket) {
     // use for one, and keeps one visitor's tile decoding from stalling others.
     let done = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-        rt.block_on(async move { session::run(out_tx, in_rx, cols, rows).await.ok() })
+        rt.block_on(async move {
+            // Said out loud. A session that dies of an error used to end exactly
+            // like one that was closed politely -- the socket shut and nothing
+            // written anywhere -- which is how a resize that killed every
+            // session went unnoticed.
+            match session::run(out_tx, in_rx, cols, rows, who).await {
+                Ok(()) => Some(()),
+                Err(e) => {
+                    eprintln!("portfolio: web session ended early: {e:#}");
+                    None
+                }
+            }
+        })
     });
     let _ = done.await;
     reader.abort();
-    writer.abort();
+
+    // Not aborted with the reader. The session's last act is to queue the frame
+    // that turns mouse reporting off and shows the cursor again; killing the
+    // writer here would throw it away, and the visitor's terminal would keep
+    // reporting scroll events to whatever they went back to. The sender is
+    // dropped as the session returns, so the writer drains what is left and
+    // ends on its own -- with a bound, because a browser that has stopped
+    // reading must not hold the task open.
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
+    if drained.is_err() {
+        eprintln!("portfolio: web client did not take the closing frame");
+    }
+}
+
+/// A browser-supplied visitor id, reduced to something safe to key a log on.
+///
+/// This arrives from the page, so it is a stranger's string: bounded, and cut
+/// down to an alphabet that cannot be confused for anything else in the record
+/// it lands in. It identifies a browser that chose to keep it, and clearing it
+/// makes somebody new -- which is the right amount of control to leave with the
+/// person it describes.
+fn sanitise_id(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(64)
+        .collect()
 }
 
 /// `r<cols>x<rows>`, e.g. `r120x40`.
@@ -184,6 +278,16 @@ const INDEX: &str = r##"<!doctype html>
   #term.shaded .xterm-screen { opacity: 0; }
   #glass {
     position: absolute; inset: 0; z-index: 1; display: none;
+    /* Both of these are load-bearing and `inset: 0` is not enough on its own.
+       A canvas is a *replaced* element, so with `width: auto` the used width is
+       its intrinsic width -- the `width` attribute -- and `right` is ignored
+       rather than stretching it. Without this the glass laid out at whatever
+       the attribute happened to say, which `resize()` then read back as
+       `clientWidth` and multiplied by the pixel ratio to set the attribute
+       again: every toggle scaled the tube by another factor of dpr, starting
+       from the 300x150 a canvas defaults to. Sized here, layout is the
+       viewport and the attribute is only ever the backing store. */
+    width: 100%; height: 100%;
     pointer-events: none;      /* mouse still belongs to the terminal */
   }
   #glass.on { display: block; }
@@ -206,6 +310,7 @@ const INDEX: &str = r##"<!doctype html>
     padding: .18rem .5rem; font: inherit; letter-spacing: .06em;
     transition: color .2s ease, border-color .2s ease;
   }
+  #chrome button + button { margin-left: .35rem; }
   #chrome button:hover { color: #60666f; border-color: #33373f; }
   #chrome button[aria-pressed="true"] { color: #ffb040; border-color: #6b4d1c; }
   #chrome button[disabled] { opacity: .35; cursor: default; }
@@ -216,8 +321,9 @@ const INDEX: &str = r##"<!doctype html>
 <canvas id="glass"></canvas>
 <div id="chrome">
   <button id="crt" type="button" aria-pressed="false" title="old tube">crt</button>
+  <button id="full" type="button" aria-pressed="false" title="full screen (ctrl-f)">full</button>
 </div>
-<div id="hint">click to focus &middot; this is the same program you get over ssh</div>
+<div id="hint">click to focus &middot; ctrl-f for full screen &middot; this is the same program you get over ssh</div>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
@@ -272,8 +378,22 @@ const sendSize = () => {
   if (ws.readyState === WebSocket.OPEN) ws.send(`r${term.cols}x${term.rows}`);
 };
 
+// An id this browser keeps, so a returning visitor is recognised as one. Made
+// here rather than handed out by the server: it never leaves this machine
+// except to say "the same browser as last time", and clearing site data is a
+// visitor deciding to be a stranger again, which is theirs to decide.
+let visitorId = null;
+try {
+  visitorId = localStorage.getItem('visitor');
+  if (!visitorId) {
+    visitorId = 'w-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    localStorage.setItem('visitor', visitorId);
+  }
+} catch (e) { /* private mode: a stranger every time, which is fine */ }
+
 ws.onopen = () => {
-  sendSize();                       // must be first: the session waits for it
+  if (visitorId) ws.send('i' + visitorId);
+  sendSize();                       // the session waits for this one
   term.focus();
 };
 ws.onmessage = (e) => term.write(new Uint8Array(e.data));
@@ -301,6 +421,95 @@ addEventListener('resize', () => {
   // costs a full redraw of a full-screen TUI.
   resizeTimer = setTimeout(() => { fit.fit(); sendSize(); tube.resize(); }, 120);
 });
+
+// ---------------------------------------------------------------------------
+// Full screen.
+//
+// The app lays out to the rows and columns it is given, so more of them is the
+// only thing that makes the map bigger. On a laptop this is the difference
+// between a tour that reads and one that does not.
+//
+// `ctrl-f` because it is free: the app binds plain `f` (the map's depth focus)
+// and `ctrl-c`, and nothing binds this. The browser does -- it is Find -- so it
+// has to be taken before either the browser or xterm sees it.
+const fullButton = document.getElementById('full');
+
+const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+
+const setFull = (on) => {
+  const el = document.documentElement;
+  try {
+    if (on) {
+      const go = el.requestFullscreen || el.webkitRequestFullscreen;
+      // A promise on modern browsers, undefined on older ones; a rejection
+      // means the browser declined and there is nothing to recover.
+      if (go) Promise.resolve(go.call(el)).catch(() => {});
+    } else {
+      const stop = document.exitFullscreen || document.webkitExitFullscreen;
+      if (stop) Promise.resolve(stop.call(document)).catch(() => {});
+    }
+  } catch (e) { /* not permitted here */ }
+};
+
+const toggleFull = () => {
+  // The hint below retires itself on the first keystroke, and the listener that
+  // does it never sees this one -- the capture handler stops the key before it
+  // gets there. Since the hint is what advertises this key, using it should put
+  // the hint away.
+  const h = document.getElementById('hint');
+  if (h) h.classList.add('gone');
+  setFull(!isFull());
+};
+
+// Entering and leaving both change how many cells there are, so the terminal is
+// remeasured and the new size sent. Not left to the `resize` event above: that
+// one is debounced for window dragging, and this is a single discrete jump the
+// visitor is watching for.
+const refit = () => {
+  fit.fit();
+  sendSize();
+  tube.resize();
+  fullButton.setAttribute('aria-pressed', isFull() ? 'true' : 'false');
+  term.focus();
+};
+addEventListener('fullscreenchange', refit);
+addEventListener('webkitfullscreenchange', refit);
+
+const wantsFull = (e) =>
+  e.type === 'keydown' &&
+  (e.ctrlKey || e.metaKey) &&
+  !e.altKey && !e.shiftKey &&
+  (e.key === 'f' || e.key === 'F');
+
+// One listener, and in the capture phase deliberately. Capture runs from the
+// window down, so this sees the key before xterm's own handler on the textarea
+// and can stop it there: `preventDefault` keeps the browser from opening Find,
+// `stopPropagation` keeps xterm from turning it into a `\x06` and sending it
+// down the socket. Handling it in both places instead -- xterm's custom key
+// handler *and* a listener here -- fires twice and toggles straight back off.
+addEventListener('keydown', (e) => {
+  if (!wantsFull(e)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  toggleFull();
+}, true);
+
+fullButton.addEventListener('click', () => toggleFull());
+
+// ---------------------------------------------------------------------------
+// No pasting into the question box.
+//
+// Typed questions only. A pasted wall of text is not a question, and the point
+// of the limit is to keep this a conversation rather than a document processor.
+// Capture again, so it is refused before xterm turns it into input -- xterm's
+// own paste handling reads the clipboard itself, so preventing the event is the
+// only place to stop it.
+for (const ev of ['paste', 'drop', 'dragover']) {
+  addEventListener(ev, (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+}
 
 // ---------------------------------------------------------------------------
 // The tube.

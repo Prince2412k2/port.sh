@@ -77,6 +77,16 @@ pub struct Ready {
     /// How the session was restrained, in a word for the screen: `plan`,
     /// `readonly`, or empty if the server offered nothing to set.
     pub mode: String,
+    /// Whether this session was handed our tool server.
+    ///
+    /// The page needs to know because it has a keyword guess for when a map
+    /// belongs on screen, and that guess must be off the moment the *agent* can
+    /// decide instead -- not merely after the agent has decided once. Waiting
+    /// for the first tool call meant a map appeared the instant enter was
+    /// pressed, before the model had said anything, and then vanished when the
+    /// answer turned out to want a different place. Two things deciding one
+    /// panel is worse than either.
+    pub tools: bool,
 }
 
 /// One tool call, as much of it as the UI needs.
@@ -151,7 +161,11 @@ impl Ask {
     /// Start the agent. Returns immediately; `Ready` or `Failed` arrives on the
     /// channel later. Called the first time anyone opens the section, so the
     /// portfolio does not spawn a language model to show a landing page.
-    pub fn spawn(context: String) -> Ask {
+    /// `board` is the token the tool server addresses this session's screen by.
+    /// `None` means no tools are offered -- which is what every test that drives
+    /// this module without a page gets, and what a deployment with the tool
+    /// server down gets.
+    pub fn spawn(context: String, board: Option<String>) -> Ask {
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         // The worker keeps a sender so it can hand one to each attempt's
@@ -167,7 +181,7 @@ impl Ask {
                 return;
             }
 
-            let mut state = Session::new(context);
+            let mut state = Session::new(context, board);
             for (gen, shot) in list.iter().enumerate() {
                 let gen = gen as u64;
                 let last = gen as usize + 1 == list.len();
@@ -234,11 +248,15 @@ struct Session {
     /// rather than dropped -- the visitor asked once and should not have to
     /// notice that the first model was out of quota.
     pending: Option<String>,
+    /// The token that addresses this session's screen, for the tool server.
+    /// `None` when nothing registered one, which is every test that drives this
+    /// module without a page attached.
+    board: Option<String>,
 }
 
 impl Session {
-    fn new(context: String) -> Session {
-        Session { context, first: true, turns: 0, tools: 0, pending: None }
+    fn new(context: String, board: Option<String>) -> Session {
+        Session { context, first: true, turns: 0, tools: 0, pending: None, board }
     }
 }
 
@@ -266,11 +284,85 @@ pub fn initialize_request(id: i64) -> String {
 }
 
 /// `session/new`, rooted where the portfolio's own data lives.
-pub fn session_new_request(id: i64) -> String {
+pub fn session_new_request(id: i64, tools: Option<&str>) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
+    // Our own tools, or none. `None` is not a degraded mode to hide: an agent
+    // that cannot reach an HTTP MCP server gets an empty list and answers in
+    // words, which is what it did before any of this existed.
+    // `headers` is **required** on the http variant, not optional -- the schema
+    // says `required: ["name","url","headers"]`. Leaving it out is what took the
+    // whole ask section down: every `session/new` carrying tools came back
+    // `Invalid params` while the hourly health check, which sends no tools, kept
+    // reporting the tier as healthy. An empty list is the right value; there is
+    // nothing to authenticate to a server inside this process.
+    let servers = match tools {
+        Some(url) => format!(
+            r#"[{{"type":"http","name":{},"url":{},"headers":[]}}]"#,
+            json::quote(crate::mcp::SERVER_NAME),
+            json::quote(url)
+        ),
+        None => "[]".to_string(),
+    };
     format!(
-        r#"{{"jsonrpc":"2.0","id":{id},"method":"session/new","params":{{"cwd":{},"mcpServers":[]}}}}"#,
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"session/new","params":{{"cwd":{},"mcpServers":{servers}}}}}"#,
         json::quote(&cwd.to_string_lossy())
+    )
+}
+
+/// Whether the agent will accept an MCP server reached over HTTP.
+///
+/// Read rather than assumed, and this is the whole reason the tools can live in
+/// this process at all. ACP has three MCP transports; `http` means a URL, which
+/// means the session that owns the screen can answer the tool call itself
+/// instead of a second copy of this binary doing it and having to shout the
+/// answer back. An agent that does not advertise it gets no tools, is logged
+/// saying so, and falls back to prose.
+pub fn takes_http_tools(hello: &Value) -> bool {
+    hello
+        .get("agentCapabilities")
+        .and_then(|c| c.get("mcpCapabilities"))
+        .and_then(|m| m.get("http"))
+        .and_then(|h| h.as_bool())
+        .unwrap_or(false)
+}
+
+/// One way an agent will accept being logged in, as advertised by `initialize`.
+#[derive(Debug, Clone)]
+pub struct AuthMethod {
+    pub id: String,
+    pub name: String,
+    /// What a person would have to do. Copilot's is "Run `copilot login` in the
+    /// terminal", which is the single most useful string in the exchange when
+    /// the tier will not start -- so it is carried out to the log rather than
+    /// dropped.
+    pub description: String,
+}
+
+/// The ways this agent says it can be authenticated.
+pub fn auth_methods(res: &Value) -> Vec<AuthMethod> {
+    let Some(list) = res.get("authMethods").and_then(|m| m.as_array()) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(|v| v.as_str())?.to_string();
+            Some(AuthMethod {
+                id,
+                name: m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                description: m
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn authenticate_request(id: i64, method_id: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"authenticate","params":{{"methodId":{}}}}}"#,
+        json::quote(method_id)
     )
 }
 
@@ -407,6 +499,21 @@ fn attempt(
     out
 }
 
+/// Ask for a session and wait for the answer.
+fn open_session<W: Write>(
+    gen: u64,
+    w: &mut W,
+    rx: &Receiver<In>,
+    state: &mut Session,
+    id: i64,
+    tools: Option<&str>,
+) -> Result<Option<Value>, String> {
+    if !write_line(w, &session_new_request(id, tools)) {
+        return Err("the agent closed its input".into());
+    }
+    wait_for(gen, rx, id, state)
+}
+
 fn converse(
     gen: u64,
     shot: &Shot,
@@ -430,16 +537,88 @@ fn converse(
         .map(|v| v as i64)
         .unwrap_or(PROTOCOL_VERSION);
 
-    // 2. a session.
-    if !write_line(w, &session_new_request(2)) {
-        return Outcome::Broken("the agent closed its input".into());
-    }
-    let res = match wait_for(gen, rx, 2, state) {
-        Ok(v) => v,
-        Err(e) => return Outcome::Broken(e),
+    // 2. a session -- authenticating first if the agent will not open one
+    //    otherwise. Copilot refuses `session/new` outright with
+    //    "Authentication required" and advertises how to fix it in
+    //    `initialize`; without this the tier fails and the next one is tried,
+    //    which is graceful and tells nobody anything.
+    // The tool server, if this agent can reach one and this session has a
+    // screen registered to draw on.
+    let tools = match hello.as_ref().is_some_and(takes_http_tools) {
+        true => state.board.as_deref().and_then(crate::mcp::url_for),
+        false => None,
     };
-    let Some(res) = res else {
-        return Outcome::Broken("the agent opened no session".into());
+    match (&tools, hello.as_ref().is_some_and(takes_http_tools)) {
+        (Some(_), _) => eprintln!("portfolio: offering our tools to `{}`", shot.server.label()),
+        (None, true) => {}
+        (None, false) => eprintln!(
+            "portfolio: `{}` takes no http mcp server, so it gets no tools",
+            shot.server.label()
+        ),
+    }
+
+    let methods = hello.as_ref().map(auth_methods).unwrap_or_default();
+    let mut opened = open_session(gen, w, rx, state, 2, tools.as_deref());
+
+    // A session refused *with our tools attached* is retried without them before
+    // anything else is concluded. Our own extras must never be able to take the
+    // section down: this exact failure did, and it was invisible because the
+    // health check sends no tools and so went on reporting the tier as fine
+    // while every real session died. It also sent the diagnosis somewhere
+    // useless -- the next thing tried was `authenticate`, and `Invalid params`
+    // is emphatically not an authentication problem.
+    let mut offered = tools.clone();
+    if let Err(why) = &opened {
+        if offered.is_some() {
+            eprintln!(
+                "portfolio: `{}` refused a session with our tools attached ({why}); \
+                 retrying without them -- the agent answers, the map does not",
+                shot.server.label()
+            );
+            offered = None;
+            opened = open_session(gen, w, rx, state, 3, None);
+        }
+    }
+
+    if let (Err(why), Some(m)) = (&opened, methods.first()) {
+        eprintln!(
+            "portfolio: `{}` would not open a session ({why}); trying authenticate `{}`",
+            shot.server.label(),
+            m.id
+        );
+        if write_line(w, &authenticate_request(4, &m.id))
+            && wait_for(gen, rx, 4, state).is_ok()
+        {
+            opened = open_session(gen, w, rx, state, 5, offered.as_deref());
+        }
+        if let Err(why) = &opened {
+            // Carefully worded, because the obvious wording was wrong once and
+            // cost an evening. An agent that says "Authentication required" is
+            // not necessarily one that has never been logged in: Copilot
+            // revalidates a perfectly good token against api.github.com on every
+            // session, and when it cannot reach it, it reports exactly the same
+            // thing. Telling the operator to run `copilot login` when they
+            // already had sends them to fix something that is not broken.
+            //
+            // So: report what the agent said, offer what it offered, and do not
+            // assert which of the two it is.
+            let hint = if m.description.is_empty() { &m.name } else { &m.description };
+            eprintln!(
+                "portfolio: `{}` refused a session: {why}. It offers `{}`{}. \
+                 If it is already logged in, check it can reach its own provider \
+                 -- the same message covers a token that is missing and a token \
+                 that could not be verified.",
+                shot.server.label(),
+                m.id,
+                if hint.is_empty() { String::new() } else { format!(" ({hint})") },
+            );
+            return Outcome::Broken(format!("would not authenticate ({why})"));
+        }
+    }
+    let res = match opened {
+        Ok(Some(v)) => v,
+        Ok(None) => return Outcome::Broken("the agent opened no session".into()),
+        Err(e) => return Outcome::Broken(e),
     };
     let Some(sid) = res.get("sessionId").and_then(|v| v.as_str()).map(str::to_string) else {
         return Outcome::Broken("the agent opened no session".into());
@@ -464,6 +643,7 @@ fn converse(
         server: shot.server.label().to_string(),
         version,
         mode: held.as_ref().map(|r| r.label().to_string()).unwrap_or_default(),
+        tools: offered.is_some(),
     }));
 
     let mut id = 10i64;
@@ -705,20 +885,46 @@ fn answer_request<W: Write>(
     // "read_file" rather than "Read configuration". It is optional, so `kind`
     // and then `title` stand in; a title is prose and grants nothing by itself,
     // which is `gates::tool_open`'s business rather than ours.
-    let named_by = ["name", "kind", "title"]
+    // Exactly one field decides, and prose never overrules a machine name. An
+    // earlier version let any field veto the grant, which reads as safer and is
+    // not: with `read` and `view` shut, a perfectly good `web_fetch` whose title
+    // happened to say "Reading https://…" was refused. The `name` is the field
+    // the agent will actually execute; the title is a label for humans.
+    //
+    // With no machine name the title is all there is, and it is judged as prose
+    // -- which almost always means refused, because `tool_open` wants a tool
+    // name and a sentence is not one. That is the safe direction and the reason
+    // the fallback is allowed to be this blunt.
+    // `kind` is **not** a name and must never be read as one. ACP's `ToolCall`
+    // has no `name` field at all -- `toolCallId` and `title` are the only
+    // required ones -- and `kind` is a fixed category: read, edit, delete,
+    // move, search, execute, think, fetch, switch_mode, other. `name` is a
+    // non-standard extra that opencode sends and Copilot does not.
+    //
+    // Reading `kind` as a name is what refused our own map tools. Copilot
+    // follows the spec, so its permission request carried no `name`, and `kind`
+    // came through as `other` -- which is not a tool anybody has ever heard of,
+    // so the gate said no and the model reported that it had no map tools.
+    let tool = ["name", "title"]
         .into_iter()
         .filter_map(|k| call.and_then(|t| t.get(k)).and_then(|t| t.as_str()))
         .find(|s| !s.is_empty())
         .unwrap_or("");
-    // One field decides the grant; any field naming a shut tool vetoes it. A
-    // friendly title must not talk the gate past a `bash` sitting next to it,
-    // and equally must not veto the `name` that legitimately granted the call.
-    let vetoed = ["name", "kind", "title"]
-        .into_iter()
-        .filter_map(|k| call.and_then(|t| t.get(k)).and_then(|t| t.as_str()))
-        .any(gates::tool_shut);
-    let named = gates::tool_open(named_by) && !vetoed;
-    let tool = named_by;
+    // The category, used only to refuse. A tool that says it edits, deletes,
+    // moves or executes is refused whatever it calls itself -- this is the one
+    // thing `kind` is good for, and it is a veto rather than a permit.
+    let kind = call.and_then(|t| t.get("kind")).and_then(|k| k.as_str()).unwrap_or("");
+    let dangerous = matches!(kind, "edit" | "delete" | "move" | "execute");
+    let named = !dangerous && gates::tool_open(tool);
+    if !named {
+        // The whole request, when we say no. A refusal we cannot explain is the
+        // expensive kind: this gate turned our own tools away for an entire
+        // deploy and the only thing on screen was the word `other`.
+        eprintln!(
+            "portfolio: refusing a tool call -- title `{tool}`, kind `{kind}`: {}",
+            call.map(|c| format!("{c:?}")).unwrap_or_default()
+        );
+    }
     let budget = state.tools < GATES.tool_calls;
     let body = if named && budget {
         state.tools += 1;
@@ -932,6 +1138,67 @@ mod tests {
         );
     }
 
+    /// The MCP server we name has every field the protocol says is required.
+    ///
+    /// This is the test that was missing, and its absence was an outage. ACP's
+    /// `McpServerHttp` requires `name`, `url` **and** `headers`; the first
+    /// version of this sent the first two, so every `session/new` carrying tools
+    /// came back `Invalid params` and the ask section was dead for every
+    /// visitor. Nothing caught it: the hourly health check sends no tools, so it
+    /// went on reporting the tier as healthy the whole time.
+    #[test]
+    fn the_mcp_server_we_offer_has_the_fields_the_schema_demands() {
+        let req = session_new_request(2, Some("http://127.0.0.1:9/mcp/abc"));
+        let v = json::parse(&req).expect("not json");
+        let servers = v
+            .get("params")
+            .and_then(|p| p.get("mcpServers"))
+            .and_then(|m| m.as_array())
+            .expect("no mcpServers");
+        assert_eq!(servers.len(), 1);
+        let one = &servers[0];
+        // Straight from schema/v1: required = ["name", "url", "headers"], plus
+        // the `type` that selects the http variant at all.
+        for key in ["type", "name", "url", "headers"] {
+            assert!(one.get(key).is_some(), "`{key}` is required and missing:\n{req}");
+        }
+        assert_eq!(one.get("type").and_then(|t| t.as_str()), Some("http"));
+        assert_eq!(one.get("url").and_then(|u| u.as_str()), Some("http://127.0.0.1:9/mcp/abc"));
+        assert!(one.get("headers").and_then(|h| h.as_array()).is_some(), "headers is not a list");
+
+        // And with no tools it is an empty list, which is what it always was.
+        let bare = session_new_request(2, None);
+        let v = json::parse(&bare).expect("not json");
+        let servers = v
+            .get("params")
+            .and_then(|p| p.get("mcpServers"))
+            .and_then(|m| m.as_array())
+            .expect("no mcpServers");
+        assert!(servers.is_empty(), "a session with no tools named one anyway:\n{bare}");
+    }
+
+    /// Only an agent that says it can take an http server is offered one.
+    #[test]
+    fn http_tools_are_offered_only_where_they_are_advertised() {
+        let yes = json::parse(
+            r#"{"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}}"#,
+        )
+        .unwrap();
+        assert!(takes_http_tools(&yes));
+        for no in [
+            r#"{"agentCapabilities":{"mcpCapabilities":{"http":false}}}"#,
+            r#"{"agentCapabilities":{"mcpCapabilities":{}}}"#,
+            r#"{"agentCapabilities":{}}"#,
+            r#"{}"#,
+            // A string rather than a bool: an agent's malformed capability must
+            // read as "no", not panic and not "yes".
+            r#"{"agentCapabilities":{"mcpCapabilities":{"http":"yes"}}}"#,
+        ] {
+            let v = json::parse(no).unwrap();
+            assert!(!takes_http_tools(&v), "offered tools on {no}");
+        }
+    }
+
     #[test]
     fn a_tool_call_carries_its_url_to_the_screen() {
         let (tx, rx) = channel();
@@ -976,7 +1243,7 @@ mod tests {
     fn asked(req: &str) -> (Vec<Value>, Vec<Event>) {
         let mut out: Vec<u8> = Vec::new();
         let (tx, rx) = channel();
-        let mut state = Session::new(String::new());
+        let mut state = Session::new(String::new(), None);
         let v = json::parse(req).expect("the request itself is not valid JSON");
         answer_request(&mut out, &v, &tx, &mut state);
         drop(tx);
@@ -1057,14 +1324,19 @@ mod tests {
         assert_eq!(outcome.get("optionId").and_then(|o| o.as_str()), Some("allow-always"));
     }
 
-    /// The one that matters. A shell is refused whichever field carries it, and
-    /// a friendly `name` alongside it does not talk the gate past the `bash`.
+    /// The one that matters. A shell is refused under either vocabulary, and a
+    /// friendly title does not get it through.
+    ///
+    /// Note the third case: `name` wins over `kind`, so a shell announcing
+    /// itself as `shell` is refused even where the kind sounds harmless.
     #[test]
-    fn a_shell_is_refused_even_when_something_open_is_named_beside_it() {
+    fn a_shell_is_refused_under_either_name() {
         for call in [
             r#"{"toolCallId":"t","name":"bash","title":"Run a command"}"#,
-            r#"{"toolCallId":"t","name":"webfetch","title":"webfetch then bash"}"#,
-            r#"{"toolCallId":"t","kind":"execute","name":"bash"}"#,
+            r#"{"toolCallId":"t","name":"shell","title":"Check the tests"}"#,
+            r#"{"toolCallId":"t","name":"bash","kind":"execute"}"#,
+            // Title-only, and the title names a shell: refused as prose.
+            r#"{"toolCallId":"t","title":"run bash for me"}"#,
         ] {
             let req = format!(
                 r#"{{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{{"toolCall":{call},"options":[{{"optionId":"ok","kind":"allow_once"}}]}}}}"#
@@ -1100,7 +1372,7 @@ mod tests {
     fn the_tool_budget_runs_out_and_then_refuses() {
         let mut out: Vec<u8> = Vec::new();
         let (tx, rx) = channel();
-        let mut state = Session::new(String::new());
+        let mut state = Session::new(String::new(), None);
         let req = json::parse(
             r#"{"jsonrpc":"2.0","id":4,"method":"session/request_permission","params":{
                "toolCall":{"toolCallId":"t","name":"webfetch"},
@@ -1119,6 +1391,64 @@ mod tests {
         assert_eq!(refused, 3, "the calls past the budget were not refused");
     }
 
+    /// A real `initialize` reply from `copilot --acp` 1.0.80, captured off the
+    /// wire. Copilot refuses `session/new` with "Authentication required" until
+    /// it has been logged in, and this is where it says so and how to fix it.
+    const REAL_COPILOT_INIT: &str = r#"{"jsonrpc":"2.0","id":1,"result":{
+        "protocolVersion":1,
+        "agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true}},
+        "agentInfo":{"name":"Copilot","title":"Copilot","version":"1.0.80"},
+        "authMethods":[{"id":"copilot-login","name":"Log in with Copilot CLI",
+        "description":"Run `copilot login` in the terminal"}]}}"#;
+
+    #[test]
+    fn copilots_advertised_login_is_read_off_its_real_handshake() {
+        let v = json::parse(REAL_COPILOT_INIT).unwrap();
+        let res = v.get("result").unwrap();
+        let m = auth_methods(res);
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].id, "copilot-login");
+        // The description is the actionable half and must survive to the log.
+        assert_eq!(m[0].description, "Run `copilot login` in the terminal");
+        // And its version negotiation is the one we speak.
+        assert_eq!(res.get("protocolVersion").and_then(|v| v.as_f64()), Some(1.0));
+    }
+
+    /// An agent that needs nothing yields no methods, so the authenticate step
+    /// is skipped rather than sent speculatively.
+    #[test]
+    fn an_agent_that_wants_no_login_advertises_none() {
+        let v = upd(r#"{"protocolVersion":1,"agentCapabilities":{}}"#);
+        assert!(auth_methods(&v).is_empty());
+        // A malformed entry with no id is not a method we can name.
+        let v = upd(r#"{"authMethods":[{"name":"nameless"}]}"#);
+        assert!(auth_methods(&v).is_empty());
+    }
+
+    #[test]
+    fn the_authenticate_request_names_the_method_it_was_offered() {
+        let v = json::parse(&authenticate_request(4, "copilot-login")).expect("valid JSON");
+        assert_eq!(v.get("method").and_then(|m| m.as_str()), Some("authenticate"));
+        assert_eq!(
+            v.get("params").and_then(|p| p.get("methodId")).and_then(|m| m.as_str()),
+            Some("copilot-login")
+        );
+    }
+
+    /// Copilot names its tools differently from opencode, and the gate has to
+    /// hold under both vocabularies -- `web_fetch` is the same permission as
+    /// `webfetch`, and `shell` is the same refusal as `bash`.
+    #[test]
+    fn copilots_tool_names_are_gated_the_same_as_opencodes() {
+        for open in ["webfetch", "web_fetch", "websearch", "web_search"] {
+            assert!(gates::tool_open(open), "{open} should be granted");
+        }
+        for shut in ["bash", "shell", "view", "read", "glob", "grep", "task", "str_replace"] {
+            assert!(!gates::tool_open(shut), "{shut} should be refused");
+            assert!(gates::tool_shut(shut), "{shut} should be named as shut");
+        }
+    }
+
     /// Cancellation is cooperative, so the agent still answers -- and the answer
     /// it is entitled to give is the standard cancellation error. Reading that as
     /// the model failing would drop a working tier every time somebody pressed
@@ -1128,7 +1458,7 @@ mod tests {
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         let mut out: Vec<u8> = Vec::new();
-        let mut state = Session::new(String::new());
+        let mut state = Session::new(String::new(), None);
         tx_in
             .send(In::Msg(
                 0,
@@ -1153,7 +1483,7 @@ mod tests {
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         let mut out: Vec<u8> = Vec::new();
-        let mut state = Session::new(String::new());
+        let mut state = Session::new(String::new(), None);
         tx_in.send(In::Cancel).unwrap();
         // The agent finishes anyway, which it is allowed to do.
         tx_in
@@ -1181,6 +1511,55 @@ mod tests {
         assert!(matches!(events.first(), Some(Event::Cancelled)), "{events:?}");
     }
 
+    /// An agent that refuses our tools still gets a session.
+    ///
+    /// The regression this pins took the ask section down for every visitor:
+    /// `session/new` carrying an `mcpServers` entry came back `Invalid params`
+    /// -- the http variant requires `headers` and it was missing -- and the
+    /// client concluded it was an authentication problem and gave up. The
+    /// failure was invisible because the hourly health check names no server, so
+    /// it kept reporting the tier as healthy while nothing worked.
+    ///
+    /// The rule that came out of it: our own extras may degrade, never break.
+    /// A session refused *with* tools attached is retried without them before
+    /// anything else is concluded, and the visitor gets an agent that answers in
+    /// words rather than a section that reports every model as down.
+    #[test]
+    fn tools_the_agent_will_not_take_do_not_cost_us_the_session() {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
+        let mut server = crate::servers::Server::default();
+        // The peer rejects any `session/new` that names an MCP server, which is
+        // exactly what the real agents did. As an argument rather than an
+        // environment variable: env vars are per-process and this suite is
+        // threaded, and two tests fighting over one has already happened twice
+        // in this project.
+        server.command_line(&format!("python3 {script} --refuse-mcp"));
+
+        let shot = Shot { tier: "fake".into(), server, model: "fake/one".into() };
+        let (tx_in, rx_in) = channel::<In>();
+        let (tx_out, rx_out) = channel::<Event>();
+        tx_in.send(In::Prompt("hello".into())).unwrap();
+
+        // A registered board is what makes the client offer tools at all.
+        let (dtx, _drx) = std::sync::mpsc::channel();
+        crate::mcp::serve();
+        let board = crate::mcp::register(dtx, None);
+        let mut state = Session::new("context".into(), Some(board.clone()));
+        let _ = attempt(0, &shot, &rx_in, &tx_in, &tx_out, &mut state);
+        drop(tx_out);
+        let events: Vec<Event> = rx_out.iter().collect();
+        crate::mcp::forget(&board);
+
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Ready(_))),
+            "a refused tool server cost us the whole session: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Failed(_))),
+            "reported as down when only the tools were refused: {events:?}"
+        );
+    }
+
     /// The whole client, against a real ACP server in another process.
     ///
     /// `scripts/fake_agent.py` is not a model, but it is a real peer: real pipes,
@@ -1203,7 +1582,7 @@ mod tests {
         let (tx_out, rx_out) = channel::<Event>();
         tx_in.send(In::Prompt("what may you do?".into())).unwrap();
 
-        let mut state = Session::new("context".into());
+        let mut state = Session::new("context".into(), None);
         // Returns once the agent has answered and exited: the reader sees EOF and
         // the prompt loop gives up waiting for a second question.
         let _ = attempt(0, &shot, &rx_in, &tx_in, &tx_out, &mut state);
@@ -1273,13 +1652,19 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_is_never_empty_and_every_model_is_provider_slash_model() {
+    fn the_plan_is_never_empty_and_every_shot_is_runnable() {
         let list = plan();
         assert!(!list.is_empty(), "no models configured");
         for s in &list {
             assert!(!s.model.starts_with('#'), "{} is a comment", s.model);
-            assert!(s.model.contains('/'), "{} is not provider/model", s.model);
+            assert!(!s.model.is_empty(), "a blank model in tier {}", s.tier);
             assert!(!s.server.label().is_empty(), "a tier with no server command");
         }
+        // The shipped file names Copilot's own ACP server first, reached by
+        // command rather than through opencode.
+        let first = &list[0];
+        assert_eq!(first.server.label(), "copilot", "{:?}", first.server);
+        assert_eq!(first.server.pin, crate::servers::Pin::Flag("--model".into()));
+        assert_eq!(first.server.tool_flag.as_deref(), Some("--available-tools"));
     }
 }

@@ -19,6 +19,24 @@ const MEASURE: u16 = 62;
 /// Between the portrait and the text.
 const GAP: u16 = 5;
 
+/// The badge's own colour, so the mark on this line and the plate behind
+/// `/cert` are recognisably the same object.
+fn cert_mark() -> ratatui::style::Color {
+    let (r, g, b) = crate::cert::PLATE;
+    ratatui::style::Color::Rgb(r, g, b)
+}
+
+/// `FOUNDATIONS` as `Foundations`. The badge sets it in capitals because it is
+/// a badge; a line of prose is not, and a word in caps in the middle of one
+/// reads as shouting.
+fn titlecase(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
 /// The contact row: whichever links exist, joined by a dot.
 ///
 /// Built in one place because two things need it — the row itself, and the
@@ -120,7 +138,10 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
 
     let pitch = wrap(&a.pitch, w as usize);
     let now = wrap(&a.now, w as usize);
-    let body = 3 + pitch.len() + if now.is_empty() { 0 } else { 2 + now.len() } + 2 + 6;
+    // 3 for the name block, the prose, the NOW block if there is one, then the
+    // credential line and its gap, the gap and five ways in, and the contact
+    // row. Counted rather than guessed because it is what centres the column.
+    let body = 3 + pitch.len() + if now.is_empty() { 0 } else { 2 + now.len() } + 2 + 2 + 6;
     let tall = body.max(face.map_or(0, |m| m.rows as usize) + 1);
     let mut y = area.y + ((area.height as usize).saturating_sub(tall) / 2).max(1) as u16;
 
@@ -170,6 +191,20 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     }
 
     y += 1;
+    // One line, and only the fact. The badge itself is a picture and lives
+    // behind `/cert` in the chat -- a landing page that opens with somebody's
+    // certificate is a landing page that is selling, and the rule here is that
+    // the visitor asks first.
+    put(f, y, vec![
+        Span::styled("\u{25c6}  ", Style::default().fg(cert_mark())),
+        Span::styled(crate::cert::NAME.to_string(), Style::default().fg(FG)),
+        Span::styled(
+            format!(" \u{b7} {}", titlecase(crate::cert::TIER)),
+            Style::default().fg(FAINT),
+        ),
+    ]);
+    y += 2;
+
     // The way in. On a server nobody has the keys memorised, and a portfolio
     // that has to be guessed at is one nobody sees past the first screen.
     for (key, label, blurb) in [

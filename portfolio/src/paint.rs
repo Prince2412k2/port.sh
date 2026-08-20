@@ -16,6 +16,28 @@ pub const FAINT: Color = Color::Rgb(58, 62, 70);
 pub const ACCENT: Color = Color::Rgb(255, 176, 64);
 pub const CYAN: Color = Color::Rgb(110, 224, 255);
 
+/// Which of the two the chat leans on, flipped by `/theme`.
+///
+/// Both colours already exist and are already used together; this only decides
+/// which one leads. A whole second palette would be a different design, not a
+/// setting -- and the rest of the app keeps its own colours either way, because
+/// the map's water is not a matter of taste.
+static WARM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Flip it, and report where it landed.
+pub fn flip_theme() -> bool {
+    !WARM.fetch_xor(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The colour the chat leads with.
+pub fn lead() -> Color {
+    if WARM.load(std::sync::atomic::Ordering::Relaxed) {
+        ACCENT
+    } else {
+        CYAN
+    }
+}
+
 /// How fast a baked animation plays, in frames a second.
 ///
 /// Deliberately slow, and the rate is a bandwidth setting as much as a

@@ -108,12 +108,29 @@ def main():
                     "id": rid,
                     "result": {
                         "protocolVersion": msg["params"].get("protocolVersion", 1),
-                        "agentCapabilities": {"loadSession": False},
+                        # Says it can take an MCP server over http, which is
+                        # what makes the client offer its own tools at all.
+                        "agentCapabilities": {
+                            "loadSession": False,
+                            "mcpCapabilities": {"http": True, "sse": False},
+                        },
                     },
                 }
             )
 
         elif method == "session/new":
+            # Refuse a session that names an MCP server, if asked to.
+            #
+            # This is the outage, reproduced: `McpServerHttp` requires `headers`
+            # and the first version of the client left it out, so every real
+            # session came back `Invalid params` while the health check -- which
+            # names no server -- went on reporting the tier as healthy. The
+            # client must retry without its own tools rather than take the
+            # section down, and this is the peer that proves it does.
+            if "--refuse-mcp" in sys.argv and msg["params"].get("mcpServers"):
+                send({"jsonrpc": "2.0", "id": rid,
+                      "error": {"code": -32602, "message": "Invalid params"}})
+                continue
             # Advertised the way opencode really does it -- a `configOptions`
             # entry rather than ACP's own `modes` -- so the client's handling of
             # that shape is exercised by something other than a recorded string.

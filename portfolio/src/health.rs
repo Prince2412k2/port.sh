@@ -97,6 +97,14 @@ pub fn parse(src: &str) -> Vec<Tier> {
                 current(&mut out);
                 out.last_mut().expect("just pushed").server.pin_line(rest.trim());
             }
+            "tools" if !rest.trim().is_empty() => {
+                current(&mut out);
+                out.last_mut().expect("just pushed").server.tools_line(rest.trim());
+            }
+            "secrets" if !rest.trim().is_empty() => {
+                current(&mut out);
+                out.last_mut().expect("just pushed").server.secrets_line(rest.trim());
+            }
             "model" => {
                 let m = rest.trim().to_string();
                 if m.is_empty() {
@@ -115,9 +123,9 @@ pub fn parse(src: &str) -> Vec<Tier> {
 /// What the last check concluded.
 #[derive(Debug, Clone, Default)]
 pub struct State {
-    /// The tier that answered, and the models in it.
+    /// The tier that answered, and the models in it. `None` until a check has
+    /// found one, and again if one stops answering.
     pub tier: Option<Tier>,
-    pub checked: bool,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -135,12 +143,25 @@ pub fn plan() -> Vec<Shot> {
         let s = state().lock().unwrap_or_else(|e| e.into_inner());
         s.tier.clone()
     };
-    // Checked and nothing answered hands back everything anyway rather than
-    // nothing: the check is an hour old at worst, and a tier that just came
-    // back should not have to wait for the next one to be used.
+    // The chosen tier first, and then the others behind it.
+    //
+    // This used to hand back the chosen tier alone, which quietly defeated the
+    // lazy fallback this module's header promises: a tier that answered the
+    // hourly check and then stopped answering left `acp.rs` with nothing to try
+    // next, and the section reported that every model had refused when two
+    // untried tiers were sitting in the file. Copilot revalidating its login
+    // against a network it cannot always reach is exactly that case.
+    //
+    // Checked and nothing answered still hands back everything, for the same
+    // reason as before: the check is an hour old at worst.
+    let all = tiers();
     let list = match chosen {
-        Some(t) => vec![t],
-        None => tiers(),
+        Some(t) => {
+            let mut order = vec![t.clone()];
+            order.extend(all.into_iter().filter(|o| o.name != t.name));
+            order
+        }
+        None => all,
     };
     list.into_iter()
         .flat_map(|t| {
@@ -154,15 +175,6 @@ pub fn plan() -> Vec<Shot> {
         .collect()
 }
 
-/// Whether a check has finished yet.
-///
-/// The difference between "this tier answered forty minutes ago" and "nobody has
-/// asked yet" is worth showing rather than flattening: before the first check the
-/// tier on screen is the file's first line, which is a guess.
-pub fn checked() -> bool {
-    let s = state().lock().unwrap_or_else(|e| e.into_inner());
-    s.checked
-}
 
 /// A line for the ask section to show while it waits.
 pub fn note() -> Option<String> {
@@ -202,7 +214,6 @@ pub fn check() {
             let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
             *s = State {
                 tier: Some(Tier { name: t.name, models: live, server: t.server }),
-                checked: true,
             };
             return;
         }
@@ -210,7 +221,7 @@ pub fn check() {
     }
     eprintln!("portfolio: no agent tier answered ({})", tried.join(", "));
     let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
-    *s = State { tier: None, checked: true };
+    *s = State { tier: None };
 }
 
 /// Kill a child and reap it, so a failed probe does not leave a process behind.
@@ -280,13 +291,59 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
         if !send(&mut w, &crate::acp::initialize_request(1)) {
             return false;
         }
-        if wait(1, deadline).is_none() {
+        let Some(hello) = wait(1, deadline) else {
+            return false;
+        };
+        // What this agent says it needs before it will work, kept for the one
+        // failure that is worth explaining.
+        let methods = crate::acp::auth_methods(&hello);
+        // The check offers the same tool server a real session does, and this is
+        // the whole reason it does.
+        //
+        // It used to send `mcpServers: []` on the grounds that a probe has no
+        // screen to draw on. That was true and it was the wrong call: when the
+        // payload turned out to be malformed -- the http variant requires
+        // `headers` and it was missing -- every real session died on `Invalid
+        // params` while this check, alone in sending no server, went on
+        // reporting the tier as healthy. A probe that negotiates differently
+        // from the thing it is probing is not a probe of it.
+        //
+        // The token names no registered page on purpose. Nothing here calls a
+        // tool; what is being tested is whether the agent will *accept* being
+        // handed one.
+        let tools = crate::acp::takes_http_tools(&hello)
+            .then(|| crate::mcp::url_for("health-check-no-page"))
+            .flatten();
+        if !send(&mut w, &crate::acp::session_new_request(2, tools.as_deref())) {
             return false;
         }
-        if !send(&mut w, &crate::acp::session_new_request(2)) {
-            return false;
+        let mut opened = wait(2, deadline);
+        // Refused with tools attached: say so loudly and carry on without them,
+        // which is what `acp.rs` does for a real session. A tier that works only
+        // without our tools is a working tier and a broken feature, and those
+        // are worth telling apart in the log.
+        if opened.is_none() && tools.is_some() {
+            eprintln!(
+                "portfolio: `{}` will not take our tool server -- the agent works, \
+                 the map does not. Check the mcpServers payload against ACP's schema.",
+                server.label()
+            );
+            if !send(&mut w, &crate::acp::session_new_request(6, None)) {
+                return false;
+            }
+            opened = wait(6, deadline);
         }
-        let Some(res) = wait(2, deadline) else { return false };
+        let Some(res) = opened else {
+            // Copilot refuses to open a session at all until it is logged in,
+            // and a probe that answers "no tier answered" to a machine that has
+            // simply never been authenticated has told the operator nothing.
+            // The agent already said what would fix it, so say that.
+            if let Some(m) = methods.first() {
+                let hint = if m.description.is_empty() { &m.name } else { &m.description };
+                eprintln!("portfolio: `{}` needs authenticating -- {hint}", server.label());
+            }
+            return false;
+        };
         let Some(sid) = res.get("sessionId").and_then(|v| v.as_str()).map(str::to_string) else {
             return false;
         };
@@ -324,7 +381,13 @@ mod tests {
         for tier in &t {
             assert!(!tier.models.is_empty(), "{} is empty", tier.name);
             for m in &tier.models {
-                assert!(m.contains('/'), "{m} is not provider/model");
+                assert!(!m.is_empty(), "{} has a blank model", tier.name);
+                // `provider/model` is opencode's naming, not a rule. Copilot
+                // takes plain names -- `auto`, `claude-sonnet-4.5` -- so the
+                // check applies where the convention does and nowhere else.
+                if tier.server.pin == crate::servers::Pin::OpencodeConfig {
+                    assert!(m.contains('/'), "{m} is not provider/model");
+                }
             }
         }
     }
@@ -356,6 +419,7 @@ mod tests {
     /// list and report the agent as down.
     #[test]
     fn the_plan_before_the_first_check_is_everything_in_order() {
+        let _held = PLAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let all: Vec<String> = tiers().into_iter().flat_map(|t| t.models).collect();
         let got: Vec<String> = plan().into_iter().map(|s| s.model).collect();
         assert_eq!(got, all);
@@ -380,6 +444,41 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].server.label(), "claude-code-acp");
         assert_eq!(t[0].server.pin, crate::servers::Pin::Flag("--model".into()));
+    }
+
+    /// Serialises the two tests that read or write the chosen tier.
+    ///
+    /// It is one global for the whole process and the runner is threaded, so a
+    /// test that sets it and a test that expects it unset are a coin toss --
+    /// which is how this suite spent a while failing only sometimes, and only
+    /// when the whole of it ran. Same shape as `visits::ENV_LOCK`.
+    static PLAN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The chosen tier leads, and the rest queue up behind it. Returning only
+    /// the chosen one silently removed the fallback this module promises, and a
+    /// tier that stops answering between checks took the whole section with it.
+    #[test]
+    fn a_chosen_tier_is_tried_first_and_the_others_are_still_there() {
+        let _held = PLAN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let all = tiers();
+        assert!(all.len() >= 2, "this test needs more than one tier configured");
+        let second = all[1].clone();
+        {
+            let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+            *s = State { tier: Some(second.clone()) };
+        }
+        let got = plan();
+        {
+            let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
+            *s = State::default();
+        }
+        assert_eq!(got[0].tier, second.name, "the chosen tier did not lead");
+        let names: Vec<&str> = got.iter().map(|s| s.tier.as_str()).collect();
+        for t in &all {
+            assert!(names.contains(&t.name.as_str()), "{} has nothing to fall back to", t.name);
+        }
+        // And it appears once, not twice.
+        assert_eq!(names.iter().filter(|n| **n == second.name).count(), second.models.len());
     }
 
     /// A tier that names no server is the shipped file's shape, and must keep

@@ -87,9 +87,16 @@ impl russh::server::Server for Listener {
     type Handler = SessionHandler;
 
     fn new_client(&mut self, peer: Option<std::net::SocketAddr>) -> Self::Handler {
+        let peer = peer.map(|p| p.to_string()).unwrap_or_default();
         SessionHandler {
             sessions: Arc::clone(&self.sessions),
-            peer: peer.map(|p| p.to_string()).unwrap_or_default(),
+            who: crate::visits::Who {
+                via: "ssh",
+                // The address without the ephemeral port, which is noise.
+                ip: peer.rsplit_once(':').map(|(a, _)| a.to_string()).unwrap_or_else(|| peer.clone()),
+                ..Default::default()
+            },
+            peer,
             pty: None,
             tx: None,
         }
@@ -101,6 +108,11 @@ struct SessionHandler {
     peer: String,
     pty: Option<(u16, u16)>,
     tx: Option<UnboundedSender<Wire>>,
+    /// Who is at the other end, as far as the handshake said. Both halves are
+    /// offered by the client rather than taken from it: the username is what
+    /// they typed in front of the `@`, and the key is the one they chose to
+    /// authenticate with.
+    who: crate::visits::Who,
 }
 
 /// What the SSH side hands the running `Shell`.
@@ -117,7 +129,14 @@ impl Handler for SessionHandler {
     /// anyone who shows up gets a session. There is nothing behind this
     /// login worth protecting with a gate, and gating a public CV would only
     /// turn away the people it exists for.
-    async fn auth_publickey(&mut self, _user: &str, _key: &PublicKey) -> Result<Auth, Self::Error> {
+    ///
+    /// Accepting every key does not mean ignoring it. The fingerprint is what
+    /// makes a returning visitor recognisable as one -- it is stable across
+    /// visits and across addresses, and it costs nobody anything, because
+    /// offering it is how they logged in.
+    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+        self.who.user = user.to_string();
+        self.who.id = key.fingerprint(HashAlg::Sha256).to_string();
         Ok(Auth::Accept)
     }
 
@@ -181,6 +200,7 @@ impl Handler for SessionHandler {
         let handle = session.handle();
         let sessions = Arc::clone(&self.sessions);
         let peer = self.peer.clone();
+        let who = self.who.clone();
         // A dedicated OS thread and its own single-threaded runtime, not
         // `tokio::spawn` on the shared one. `Shell` holds termap's tile cache,
         // which shares tiles between draws with `Rc` rather than `Arc` -- fine
@@ -196,7 +216,7 @@ impl Handler for SessionHandler {
                 return;
             };
             rt.block_on(async move {
-                if let Err(e) = run_session(handle.clone(), channel, cols, rows, rx).await {
+                if let Err(e) = run_session(handle.clone(), channel, cols, rows, rx, who).await {
                     eprintln!("portfolio: session from {peer} ended: {e:#}");
                 }
                 sessions.fetch_sub(1, Ordering::SeqCst);
@@ -280,10 +300,11 @@ async fn run_session(
     cols: u16,
     rows: u16,
     mut wire: UnboundedReceiver<Wire>,
+    who: crate::visits::Who,
 ) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
     let out_handle = handle.clone();
-    tokio::spawn(async move {
+    let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
             if out_handle.data(channel, bytes::Bytes::from(frame)).await.is_err() {
                 break;
@@ -305,5 +326,14 @@ async fn run_session(
         }
     });
 
-    session::run(out_tx, in_rx, cols, rows).await
+    let outcome = session::run(out_tx, in_rx, cols, rows, who).await;
+
+    // The last frame a session writes is the one that puts the terminal back --
+    // mouse reporting off, cursor shown. `run` has only queued it: the sender
+    // it held is dropped as it returns, so waiting for the writer here is what
+    // drains that queue. Return without waiting and this handler completes,
+    // russh closes the channel, and the visitor is left scrolling `35;82;28M`
+    // at their shell.
+    let _ = writer.await;
+    outcome
 }
