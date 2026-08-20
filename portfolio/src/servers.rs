@@ -85,6 +85,15 @@ pub struct Server {
     /// if it went looking. It shrinks the blast radius of a leaky or talkative
     /// agent; it is not a sandbox.
     pub secrets: Vec<String>,
+    /// Per-model settings handed to the server, as key/value pairs.
+    ///
+    /// Only opencode has anywhere to put these: its config takes
+    /// `provider.<id>.models.<id>.options`, and that is where a reasoning
+    /// effort or a verbosity goes. Kept as strings and passed through rather
+    /// than modelled, because the set of them belongs to whoever wrote the
+    /// server and changes faster than this file does -- the keys were read off
+    /// the shipped binary, not guessed.
+    pub options: Vec<(String, String)>,
     /// A flag that takes the gates' allow-list of tool names, comma separated --
     /// Copilot's `--available-tools`, for instance.
     ///
@@ -110,6 +119,7 @@ impl Default for Server {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            options: Vec::new(),
         }
     }
 }
@@ -177,12 +187,40 @@ impl Server {
     /// `permission` is what happens if it asks anyway -- both generated from
     /// `gates.rs` so this document cannot claim a policy the client does not
     /// then enforce.
-    pub fn opencode_config(model: &str) -> String {
+    pub fn opencode_config(&self, model: &str) -> String {
+        // `provider/id`. Options are addressed by both halves, so a model named
+        // without a provider gets none -- there is nowhere to hang them.
+        let block = match (model.split_once('/'), self.options.is_empty()) {
+            (Some((provider, id)), false) => {
+                let opts: Vec<String> = self
+                    .options
+                    .iter()
+                    .map(|(k, v)| format!("{}:{}", crate::json::quote(k), crate::json::quote(v)))
+                    .collect();
+                format!(
+                    r#""provider":{{{}:{{"models":{{{}:{{"options":{{{}}}}}}}}}}},"#,
+                    crate::json::quote(provider),
+                    crate::json::quote(id),
+                    opts.join(",")
+                )
+            }
+            _ => String::new(),
+        };
         format!(
-            r#"{{"model":{},{}}}"#,
+            r#"{{"model":{},{block}{}}}"#,
             crate::json::quote(model),
             crate::gates::tool_policy()
         )
+    }
+
+    /// `option reasoningEffort low` from `models.txt`.
+    pub fn option_line(&mut self, rest: &str) {
+        if let Some((key, value)) = rest.trim().split_once(char::is_whitespace) {
+            let (key, value) = (key.trim(), value.trim());
+            if !key.is_empty() && !value.is_empty() {
+                self.options.push((key.to_string(), value.to_string()));
+            }
+        }
     }
 
     /// A command ready to spawn, with the model pinned however this server
@@ -213,7 +251,7 @@ impl Server {
         }
         match &self.pin {
             Pin::OpencodeConfig => {
-                c.env("OPENCODE_CONFIG_CONTENT", Self::opencode_config(model));
+                c.env("OPENCODE_CONFIG_CONTENT", self.opencode_config(model));
             }
             Pin::Flag(flag) => {
                 c.arg(flag).arg(model);
@@ -239,6 +277,46 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+
+    /// A per-model option reaches opencode's config where opencode looks for it.
+    ///
+    /// The shape is `provider.<id>.models.<id>.options`, and both halves of the
+    /// model id address it -- read off the shipped binary rather than guessed,
+    /// along with the key names it accepts.
+    #[test]
+    fn a_model_option_lands_where_opencode_reads_it() {
+        let mut server = Server::default();
+        server.option_line("reasoningEffort low");
+        let doc = server.opencode_config("openai/gpt-5.6-luna");
+        let v = crate::json::parse(&doc).expect("not json");
+
+        assert_eq!(v.get("model").and_then(|m| m.as_str()), Some("openai/gpt-5.6-luna"));
+        let opts = v
+            .get("provider")
+            .and_then(|p| p.get("openai"))
+            .and_then(|p| p.get("models"))
+            .and_then(|m| m.get("gpt-5.6-luna"))
+            .and_then(|m| m.get("options"))
+            .unwrap_or_else(|| panic!("no options in {doc}"));
+        assert_eq!(opts.get("reasoningEffort").and_then(|r| r.as_str()), Some("low"));
+
+        // The tool policy still travels with it -- that is the whole reason this
+        // document exists and an option must not displace it.
+        assert!(doc.contains("bash"), "the tool policy was lost: {doc}");
+
+        // No options, and the document is what it always was.
+        let plain = Server::default().opencode_config("openai/gpt-5.6-luna");
+        assert!(!plain.contains("provider"), "an empty options list wrote a block: {plain}");
+        assert!(crate::json::parse(&plain).is_some(), "not json: {plain}");
+
+        // A model with no provider half has nowhere to hang them, and says so by
+        // writing nothing rather than by writing something malformed.
+        let mut bare = Server::default();
+        bare.option_line("reasoningEffort low");
+        let doc = bare.opencode_config("auto");
+        assert!(!doc.contains("provider"), "{doc}");
+        assert!(crate::json::parse(&doc).is_some(), "not json: {doc}");
+    }
     use super::*;
 
     #[test]
@@ -293,7 +371,7 @@ mod tests {
 
     #[test]
     fn the_opencode_config_pins_the_model_and_carries_the_gates() {
-        let doc = Server::opencode_config("github-copilot/gpt-4.1");
+        let doc = Server::default().opencode_config("github-copilot/gpt-4.1");
         let v = crate::json::parse(&doc).expect("valid JSON");
         assert_eq!(v.get("model").and_then(|m| m.as_str()), Some("github-copilot/gpt-4.1"));
         // The gates came along, and the shell is shut in both blocks.
@@ -311,7 +389,7 @@ mod tests {
     fn a_hostile_model_name_cannot_rewrite_the_config() {
         // The name is quoted, not interpolated. A model called `","bash":true`
         // must stay a model name.
-        let doc = Server::opencode_config(r#"x","tools":{"bash":true},"x":"#);
+        let doc = Server::default().opencode_config(r#"x","tools":{"bash":true},"x":"#);
         let v = crate::json::parse(&doc).expect("valid JSON");
         assert_eq!(
             v.get("tools").and_then(|t| t.get("bash")).and_then(|b| b.as_bool()),

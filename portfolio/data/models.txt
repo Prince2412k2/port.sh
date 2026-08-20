@@ -57,6 +57,34 @@
 # into the server as well; for everything else the client-side gate is the only
 # enforcement, which is what it was always for.
 
+tier  openai luna
+  # First because it is the one chosen on purpose. `openai/gpt-5.6-luna` is in
+  # the registry opencode reads -- checked with `opencode models` in the
+  # container rather than assumed -- and it needs OPENAI_API_KEY, which the
+  # compose file already passes.
+  #
+  # `option` lines become `provider.<id>.models.<id>.options` in the config
+  # document opencode is handed. The keys belong to opencode, not to us: these
+  # were read off the shipped binary (`reasoningEffort`, `reasoningSummary`,
+  # `textVerbosity`) rather than guessed at. `minimal` is also accepted and is
+  # the nearer reading of "no reasoning" if `low` still thinks too hard.
+  option  reasoningEffort low
+  model  openai/gpt-5.6-luna
+  # The fast variant as the fallback inside this tier, so one of them being
+  # busy does not drop the whole tier.
+  model  openai/gpt-5.6-luna-fast
+
+tier  opencode free
+  # Free, and the free tier is a daily allowance rather than a guarantee. These
+  # are the ones the registry actually lists today: `opencode/grok-code` and
+  # `opencode/code-supernova` were in this file and are **gone** -- a tier of
+  # two withdrawn ids is a tier that fails every check and tells nobody why.
+  model  opencode/nemotron-3.5-lightning-free
+  model  opencode/deepseek-v4-flash-free
+  model  opencode/mimo-v2.5-free
+  model  opencode/hy3-free
+  model  opencode/nemotron-3-ultra-free
+
 tier  github copilot
   # Copilot's own ACP server rather than opencode's Copilot provider: it is the
   # first-party path to a seat that is already paid for, it takes the model as a
@@ -75,11 +103,6 @@ tier  github copilot
   # `auto` lets Copilot pick, which is the right default for a seat: the good
   # model on any given week is theirs to know, not ours to pin.
   model  auto
-
-tier  opencode zen
-  # Free, and the free tier is a daily allowance rather than a guarantee.
-  model  opencode/grok-code
-  model  opencode/code-supernova
 
 tier  ollama cloud
   # The backstop. Slower and further away, and still an answer.

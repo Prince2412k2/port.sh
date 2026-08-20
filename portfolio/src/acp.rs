@@ -1660,11 +1660,24 @@ mod tests {
             assert!(!s.model.is_empty(), "a blank model in tier {}", s.tier);
             assert!(!s.server.label().is_empty(), "a tier with no server command");
         }
-        // The shipped file names Copilot's own ACP server first, reached by
-        // command rather than through opencode.
-        let first = &list[0];
-        assert_eq!(first.server.label(), "copilot", "{:?}", first.server);
-        assert_eq!(first.server.pin, crate::servers::Pin::Flag("--model".into()));
-        assert_eq!(first.server.tool_flag.as_deref(), Some("--available-tools"));
+        // The plan follows the file's order, whatever that order currently is.
+        // It used to assert that Copilot came first, which is a fact about
+        // somebody's preference rather than about this code -- and it broke the
+        // moment the tiers were reordered, which is what the file is *for*.
+        let want: Vec<String> = crate::health::tiers().into_iter().map(|t| t.name).collect();
+        let mut seen: Vec<String> = Vec::new();
+        for s in &list {
+            if seen.last() != Some(&s.tier) {
+                seen.push(s.tier.clone());
+            }
+        }
+        assert_eq!(seen, want, "the plan reordered the tiers");
+
+        // Whichever tier names Copilot gets Copilot's shape: a flag for the
+        // model and a flag for the allow-list. That *is* about this code.
+        for s in list.iter().filter(|s| s.server.label() == "copilot") {
+            assert_eq!(s.server.pin, crate::servers::Pin::Flag("--model".into()));
+            assert_eq!(s.server.tool_flag.as_deref(), Some("--available-tools"));
+        }
     }
 }

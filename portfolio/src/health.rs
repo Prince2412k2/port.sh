@@ -105,6 +105,10 @@ pub fn parse(src: &str) -> Vec<Tier> {
                 current(&mut out);
                 out.last_mut().expect("just pushed").server.secrets_line(rest.trim());
             }
+            "option" if !rest.trim().is_empty() => {
+                current(&mut out);
+                out.last_mut().expect("just pushed").server.option_line(rest.trim());
+            }
             "model" => {
                 let m = rest.trim().to_string();
                 if m.is_empty() {
@@ -377,7 +381,25 @@ mod tests {
     fn the_shipped_file_parses_into_ordered_tiers() {
         let t = tiers();
         assert!(t.len() >= 3, "{t:?}");
-        assert_eq!(t[0].name, "github copilot");
+        // Which tier leads is the operator's choice and lives in the file; what
+        // is checked here is that parsing preserves the order it is written in.
+        let src = std::fs::read_to_string("portfolio/data/models.txt")
+            .or_else(|_| std::fs::read_to_string("data/models.txt"))
+            .unwrap_or_else(|_| include_str!("../data/models.txt").to_string());
+        let written: Vec<String> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("tier ").map(|n| n.trim().to_string()))
+            .collect();
+        let parsed: Vec<String> = t.iter().map(|x| x.name.clone()).collect();
+        // A tier with no models is dropped, so the parsed list is a subsequence
+        // of what is written rather than equal to it.
+        assert!(
+            parsed.iter().all(|n| written.contains(n)),
+            "parsed a tier that is not in the file: {parsed:?} vs {written:?}"
+        );
+        let order: Vec<usize> =
+            parsed.iter().filter_map(|n| written.iter().position(|w| w == n)).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "the file's order was not kept");
         for tier in &t {
             assert!(!tier.models.is_empty(), "{} is empty", tier.name);
             for m in &tier.models {
