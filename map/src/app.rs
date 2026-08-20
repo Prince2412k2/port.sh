@@ -109,6 +109,22 @@ pub struct App {
     pub toast: Option<String>,
 }
 
+/// Everything a borrowed camera has to put back.
+///
+/// Opaque on purpose: what belongs in here is whatever `park_camera` had to
+/// disturb, and a caller free to read the fields is a caller free to put half
+/// of them back.
+#[derive(Debug, Clone, Copy)]
+pub struct Parked {
+    vp: crate::geo::Viewport,
+    map_area: Rect,
+    cursor: Option<(u16, u16)>,
+    fit_pending: bool,
+    tour_pending: Option<usize>,
+    auto_view: bool,
+    tour_at: usize,
+}
+
 impl App {
     pub fn new(source: Source) -> Self {
         let b = source.bounds();
@@ -226,11 +242,90 @@ impl App {
         self.tour.open(&vp, i);
     }
 
+    /// The stop the tour will open on, before it has had a canvas to open
+    /// against. Only an embedder asking whether its request landed wants this.
+    pub fn tour_opens_on(&self) -> Option<usize> {
+        self.tour_pending
+    }
+
     pub fn stop_tour(&mut self) {
         self.tour.active = false;
         self.tour_pending = None;
         self.show_panel = self.panel_before_tour;
         self.auto_view = true;
+    }
+
+    /// Point the camera somewhere else for one frame, and remember where it was.
+    ///
+    /// So a second view of the same world costs a viewport rather than a second
+    /// `App` -- which would be a second copy of the terrain, and that is 111 MB.
+    /// The pending flags go with it: the tour's opening descent is framed
+    /// against whatever the viewport was the first time it is drawn, and a
+    /// thumbnail is the wrong size to frame a country against.
+    /// `tilt` in radians and `persp` as a strength, both handed in rather than
+    /// derived here.
+    ///
+    /// The map's own `auto_tilt` is a function of zoom and it is right for a
+    /// full screen you are driving: at the zoom a locator sits on it comes out
+    /// at nine degrees, which is not a lean, it is a rounding error. A thumbnail
+    /// that only ever shows one place can afford a camera angle chosen for the
+    /// picture, and the caller ramps it during the arrival -- travel flat,
+    /// arrival tilted, which is the tour's rule and the reason a small map does
+    /// not turn to mush while the ground is still moving.
+    pub fn park_camera(
+        &mut self,
+        lonlat: (f64, f64),
+        zoom: f64,
+        tilt: f64,
+        persp: f64,
+    ) -> Parked {
+        let was = Parked {
+            vp: self.vp,
+            map_area: self.map_area,
+            cursor: self.cursor,
+            fit_pending: self.fit_pending,
+            tour_pending: self.tour_pending,
+            auto_view: self.auto_view,
+            tour_at: self.tour.at,
+        };
+        // Whichever stop this is a picture of reads as the selected one. Left
+        // alone, the marker under the caption would be a hollow diamond and the
+        // filled one would be wherever the tour happens to be pointing --
+        // usually somewhere off the edge of a thumbnail.
+        self.tour.at = self
+            .tour
+            .places
+            .iter()
+            .enumerate()
+            .find(|(_, p)| {
+                (p.lonlat.0 - lonlat.0).abs() < 0.01 && (p.lonlat.1 - lonlat.1).abs() < 0.01
+            })
+            .map_or(usize::MAX, |(i, _)| i);
+        self.vp.center = crate::geo::lonlat_to_world(lonlat.0, lonlat.1);
+        self.vp.zoom = zoom;
+        self.vp.bearing = 0.0;
+        self.vp.tilt = tilt;
+        self.vp.persp = persp;
+        // Held, not recomputed: `auto_view` would take the camera to the full
+        // lean on the next frame and the ramp would never be seen.
+        self.auto_view = false;
+        self.fit_pending = false;
+        self.tour_pending = None;
+        // A pointer in the chat is not a pointer on the map. Left set, the
+        // hover resolves against a viewport the visitor is not driving.
+        self.cursor = None;
+        was
+    }
+
+    /// Put back what `park_camera` took.
+    pub fn unpark_camera(&mut self, was: Parked) {
+        self.tour.at = was.tour_at;
+        self.vp = was.vp;
+        self.map_area = was.map_area;
+        self.cursor = was.cursor;
+        self.fit_pending = was.fit_pending;
+        self.tour_pending = was.tour_pending;
+        self.auto_view = was.auto_view;
     }
 
     /// Drive the camera from zoom, unless the user has taken it over.

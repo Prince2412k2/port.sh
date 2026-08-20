@@ -110,12 +110,42 @@ fn ssh_client_ip() -> Option<String> {
     (!private).then_some(ip)
 }
 
-fn lookup_by_ip() -> Option<Fix> {
+/// Where an address is, as the geolocation service describes it.
+///
+/// Public because two callers want it now and neither should own a second copy
+/// of the HTTP call: the map puts a marker on it, and the portfolio's visit log
+/// records where somebody connected from. The map wants a point; the log wants
+/// the words.
+#[derive(Debug, Clone, Default)]
+pub struct Where {
+    pub city: String,
+    pub region: String,
+    pub country: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+impl Where {
+    /// "Kapadwanj, Gujarat, India", skipping whatever came back empty.
+    pub fn label(&self) -> String {
+        [self.city.as_str(), self.region.as_str(), self.country.as_str()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Locate one address. An empty string asks the service about this machine.
+///
+/// Plain HTTP over a raw socket, deliberately, for the reason in the module
+/// header: the alternative is a TLS stack for a lookup of an address the far
+/// end already knows.
+pub fn locate(ip: &str) -> Option<Where> {
     const HOST: &str = "ip-api.com";
-    // Ask about the visitor if there is one, otherwise about ourselves.
-    let who = ssh_client_ip().unwrap_or_default();
     let req = format!(
-        "GET /json/{who}?fields=status,city,regionName,country,lat,lon HTTP/1.1\r\n\
+        "GET /json/{ip}?fields=status,city,regionName,country,lat,lon HTTP/1.1\r\n\
          Host: {HOST}\r\nUser-Agent: termap/0.1\r\nConnection: close\r\n\r\n"
     );
 
@@ -131,17 +161,28 @@ fn lookup_by_ip() -> Option<Fix> {
     if field(body, "status")? != "success" {
         return None;
     }
-    let lat: f64 = field(body, "lat")?.parse().ok()?;
-    let lon: f64 = field(body, "lon")?.parse().ok()?;
-    let label = [
-        field(body, "city").unwrap_or_default(),
-        field(body, "regionName").unwrap_or_default(),
-    ]
-    .iter()
-    .filter(|s| !s.is_empty())
-    .cloned()
-    .collect::<Vec<_>>()
-    .join(", ");
+    Some(Where {
+        city: field(body, "city").unwrap_or_default().to_string(),
+        region: field(body, "regionName").unwrap_or_default().to_string(),
+        country: field(body, "country").unwrap_or_default().to_string(),
+        lat: field(body, "lat")?.parse().ok()?,
+        lon: field(body, "lon")?.parse().ok()?,
+    })
+}
+
+fn lookup_by_ip() -> Option<Fix> {
+    // Ask about the visitor if there is one, otherwise about ourselves.
+    let who = ssh_client_ip().unwrap_or_default();
+    let found = locate(&who)?;
+    let (lat, lon) = (found.lat, found.lon);
+    // The marker names the place, not the country: at street zoom "India" under
+    // a dot is noise, and the country is in the log where it is useful.
+    let label = [found.city.as_str(), found.region.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
 
     if let Some(p) = config_path("last-ip-fix") {
         let _ = std::fs::create_dir_all(p.parent()?);

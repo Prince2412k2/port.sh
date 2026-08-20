@@ -26,7 +26,7 @@ pub struct Hit {
 /// Case-insensitive, prefix-first. Deliberately not fuzzy: a fuzzy match over a
 /// few thousand names returns something for every query, and a search that
 /// always succeeds is one you stop trusting.
-fn score(name: &str, q: &str) -> Option<u8> {
+pub(crate) fn score(name: &str, q: &str) -> Option<u8> {
     let n = name.to_lowercase();
     let q = q.to_lowercase();
     if n == q {
@@ -43,7 +43,7 @@ fn score(name: &str, q: &str) -> Option<u8> {
 }
 
 /// Centre and a zoom that frames the feature, from its own bounding box.
-fn frame(pts: &[[f64; 2]], sw: f64) -> ([f64; 2], f64) {
+pub(crate) fn frame(pts: &[[f64; 2]], sw: f64) -> ([f64; 2], f64) {
     let (mut x0, mut y0) = (f64::MAX, f64::MAX);
     let (mut x1, mut y1) = (f64::MIN, f64::MIN);
     for p in pts {
@@ -118,6 +118,49 @@ pub fn search(
     out.sort_by(|a, b| a.rank.cmp(&b.rank).then(a.name.len().cmp(&b.name.len())));
     out.truncate(limit);
     out
+}
+
+#[cfg(test)]
+mod probe {
+    #[test]
+    fn what_is_in_the_place_layer_at_country_zoom() {
+        use crate::data::Layer;
+        let mut src = crate::tiles::Source::open(None);
+        if !src.has_basemap() {
+            println!("PROBE no basemap");
+            return;
+        }
+        for zoom in [4.0f64, 5.0, 6.0, 7.0, 8.0] {
+            let mut vp = crate::geo::Viewport::new([0.5, 0.5], zoom);
+            vp.sw = 2000.0;
+            vp.sh = 1200.0;
+            vp.fit(src.bounds());
+            vp.zoom = zoom;
+            let tiles = src.tiles(&vp);
+            let mut names: Vec<String> = Vec::new();
+            for t in &tiles {
+                for &i in &t.by_layer[Layer::Place.index()] {
+                    if let Some(n) = t.features[i as usize].name.as_deref() {
+                        names.push(n.to_string());
+                    }
+                }
+            }
+            names.sort();
+            names.dedup();
+            println!(
+                "PROBE zoom {zoom}: {} tiles, {} place names, e.g. {:?}",
+                tiles.len(),
+                names.len(),
+                names.iter().take(14).collect::<Vec<_>>()
+            );
+            for want in ["Jaipur", "Bengaluru", "Bangalore", "Chennai", "Kolkata", "Surat", "Kapadvanj", "Ahmedabad", "Mumbai", "Delhi"] {
+                if names.iter().any(|n| n.eq_ignore_ascii_case(want)) {
+                    print!("  has {want};");
+                }
+            }
+            println!();
+        }
+    }
 }
 
 #[cfg(test)]

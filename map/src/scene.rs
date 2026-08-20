@@ -618,11 +618,26 @@ fn rank_floor(zoom: f64) -> u16 {
     }
 }
 
-/// Ceilings on labels per frame. Landmarks and places get separate budgets so a
-/// dense cluster of amber cannot crowd the geography off the map -- with one
-/// shared budget, an OSM extract's landmark ranks simply win every slot.
+/// Ceilings on labels, at a full screen. Landmarks and places have separate
+/// budgets so a dense cluster of amber cannot crowd the geography off the map --
+/// with one shared budget, an OSM extract's landmark ranks simply win every
+/// slot.
 const MAX_LANDMARK_LABELS: usize = 9;
 const MAX_PLACE_LABELS: usize = 20;
+
+/// The screen those ceilings were chosen against.
+const REFERENCE_CELLS: f64 = 160.0 * 44.0;
+
+/// The same density on a smaller canvas.
+///
+/// Per unit of screen rather than per frame: nine landmark labels across a full
+/// terminal is a sparse map, and the same nine in the chat's 46-column
+/// thumbnail is a wall of amber with a map somewhere behind it. Never below
+/// two, because a map of a city with nothing named on it is not a locator.
+fn label_budget(full: usize, cw: usize, ch: usize) -> usize {
+    let room = (cw * ch) as f64 / REFERENCE_CELLS;
+    (((full as f64) * room).round() as usize).clamp(2, full)
+}
 
 /// Longest label drawn. Some OSM names run to 40+ characters and a single one
 /// can span a third of the viewport.
@@ -647,11 +662,11 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
         if !o.layers[layer.index()] {
             continue;
         }
-        let budget = if layer == Layer::Landmark {
-            MAX_LANDMARK_LABELS
-        } else {
-            MAX_PLACE_LABELS
-        };
+        let budget = label_budget(
+            if layer == Layer::Landmark { MAX_LANDMARK_LABELS } else { MAX_PLACE_LABELS },
+            canvas.cw,
+            canvas.ch,
+        );
         let start = cands.len();
         let st = style::style(layer);
         if o.vp.zoom < st.min_zoom {

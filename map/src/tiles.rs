@@ -92,6 +92,25 @@ impl Source {
         }
     }
 
+    /// The always-resident overlays -- every Indian state, by name. Not in the
+    /// tile pyramid, so a sweep of the pyramid alone would miss all of them.
+    pub fn overlay_tiles(&self) -> Vec<Rc<Tile>> {
+        self.overlays.clone()
+    }
+
+    /// One tile, straight off the archive and *not* into the cache.
+    ///
+    /// For the gazetteer's one-time sweep. Going through `tiles()` would work
+    /// and would evict the ninety-six tiles somebody is currently looking at,
+    /// to index names that are then thrown away with the geometry.
+    pub fn read_uncached(&mut self, id: crate::pmtiles::TileId) -> Option<Tile> {
+        let Backend::Tiled(t) = &mut self.backend else { return None };
+        match t.archive.tile(id) {
+            Ok(Some(bytes)) => Some(Tile::new(mvt::decode(&bytes, id))),
+            _ => None,
+        }
+    }
+
     /// Tiles covering the viewport, loading whatever is missing.
     pub fn tiles(&mut self, vp: &Viewport) -> Vec<Rc<Tile>> {
         let mut out = match &mut self.backend {

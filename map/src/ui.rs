@@ -35,9 +35,97 @@ pub fn render(f: &mut Frame, app: &mut App) {
 pub fn render_map_only(f: &mut Frame, area: Rect, app: &mut App) {
     Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
     map_view(f, area, app);
+    overlays(f, area, app);
     if app.show_help {
         help(f, area);
     }
+}
+
+/// Draw a still map of one point, and leave the camera where it was.
+///
+/// A thumbnail, for somewhere that is not the map section: the portfolio's chat
+/// puts one at the side when a visitor asks where something is. It borrows the
+/// caller's `App` rather than taking one of its own, because a second `App` is a
+/// second copy of the terrain and the overlays -- so the whole of the borrowing
+/// is `park_camera` and `unpark_camera` around one draw.
+///
+/// `tilt` is radians and `persp` a strength. `pin` drops a marker on the centre:
+/// 0 has it high above the point and 1 has it landed. Neither is a decision this function
+/// makes -- both are read off a clock by the caller, so a frame is a pure
+/// function of its time like everything else here.
+///
+/// The pin exists because a view of a city with nothing on it does not read as
+/// pointing at anywhere. Tour stops draw their own from the places sheet; a
+/// point handed to us by an agent has nothing but this.
+pub struct Camera {
+    /// Longitude then latitude, in that order.
+    pub lonlat: (f64, f64),
+    pub zoom: f64,
+    /// Radians. Zero looks straight down.
+    pub tilt: f64,
+    /// Convergence strength. Zero is a parallel projection.
+    pub persp: f64,
+}
+
+pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin: Option<f32>) {
+    let Camera { lonlat, zoom, tilt, persp } = cam;
+    if area.width < 8 || area.height < 4 {
+        return;
+    }
+    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    let was = app.park_camera(lonlat, zoom, tilt, persp);
+    map_view(f, area, app);
+    app.unpark_camera(was);
+
+    if let Some(drop) = pin {
+        drop_pin(f, area, drop);
+    }
+}
+
+/// A marker falling onto the middle of the map.
+///
+/// Two cells while it is in the air -- the head and a streak under it -- and one
+/// once it has landed, with a ring that opens and fades. Bounded, like
+/// everything else that moves in this project: it plays once on arrival and then
+/// it is a marker sitting on a point.
+fn drop_pin(f: &mut Frame, area: Rect, drop: f32) {
+    let (cx, cy) = (area.x + area.width / 2, area.y + area.height / 2);
+    let k = drop.clamp(0.0, 1.0);
+
+    if k < 1.0 {
+        // Accelerating, so it falls rather than drifts: the eye reads constant
+        // speed as a hover.
+        let fall = 1.0 - k * k;
+        let up = (fall * (area.height as f32 / 2.0).min(7.0)).round() as u16;
+        let y = cy.saturating_sub(up);
+        let cell = |f: &mut Frame, y: u16, ch: &str, c: Color, bold: bool| {
+            if y >= area.y && y < area.y + area.height {
+                let mut st = Style::default().fg(c);
+                if bold {
+                    st = st.add_modifier(Modifier::BOLD);
+                }
+                f.render_widget(
+                    Paragraph::new(Span::styled(ch.to_string(), st)),
+                    Rect { x: cx, y, width: 1, height: 1 },
+                );
+            }
+        };
+        cell(f, y, "\u{25be}", ACCENT, true);
+        if up > 0 {
+            cell(f, y.saturating_sub(1), "\u{2502}", DIM, false);
+        }
+        return;
+    }
+
+    // Landed. The same glyph the tour uses for the stop you are on, so the two
+    // maps in this app agree about what "here" looks like.
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            "\u{25c8}".to_string(),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Rect { x: cx, y: cy, width: 1, height: 1 },
+    );
 }
 
 /// Draw the whole map UI into `area` rather than the whole frame.
@@ -69,6 +157,7 @@ pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
         side_panel(f, p, app);
     }
     map_view(f, map, app);
+    overlays(f, map, app);
     status(f, foot, app);
 
     if app.show_help {
@@ -289,6 +378,15 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(sb) = sb {
         draw_scalebar(f, area, &sb);
     }
+}
+
+/// The things that sit on top of the map rather than in it: the tour's card,
+/// the search box, the one-time nudge.
+///
+/// Split out of `map_view` for the thumbnail. A locator is a picture of a
+/// place, and a picture of a place with somebody else's tour caption across it
+/// -- which is what it drew at first -- is a picture of nothing in particular.
+fn overlays(f: &mut Frame, area: Rect, app: &App) {
     place_card(f, area, app);
     search_box(f, area, app);
     hint(f, area, app);
