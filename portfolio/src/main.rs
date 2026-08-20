@@ -22,6 +22,7 @@ mod web;
 mod wire;
 mod taste;
 mod snapshot;
+mod visits;
 
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};

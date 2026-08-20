@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Read the visit log. Meant to be run on the box that serves the thing.
+
+    bin/visits                    everyone, most recent first
+    bin/visits --who alice        one person, every visit and every question
+    bin/visits --days 7           only the last week
+    bin/visits --chats            the conversations, in full
+    bin/visits --places           where people came from
+    bin/visits --raw              the lines, for piping into jq
+
+Reads `$PORTFOLIO_VISITS`, or `/app/messages/visits.jsonl` in the container, or
+`data/visits.jsonl` beside the source. Point it somewhere else with --file.
+
+Nothing here writes. It is safe to run against a live log while sessions are
+being appended to it, because appends are whole lines and a half-written last
+line is skipped rather than crashing the report.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+
+CANDIDATES = [
+    os.environ.get("PORTFOLIO_VISITS"),
+    "/app/messages/visits.jsonl",
+    "data/visits.jsonl",
+    "portfolio/data/visits.jsonl",
+]
+
+# Enough colour to make a table scannable, and none if this is a pipe.
+TTY = sys.stdout.isatty()
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else str(s)
+
+
+DIM = lambda s: c("38;5;244", s)
+BOLD = lambda s: c("1", s)
+CYAN = lambda s: c("38;5;44", s)
+WARM = lambda s: c("38;5;215", s)
+GREEN = lambda s: c("38;5;114", s)
+
+
+def find_log(explicit):
+    if explicit:
+        return explicit
+    for p in CANDIDATES:
+        if p and os.path.exists(p):
+            return p
+    sys.exit(
+        "no visit log found. Tried:\n  "
+        + "\n  ".join(p for p in CANDIDATES if p)
+        + "\nPass one with --file."
+    )
+
+
+def load(path, days):
+    """Group every event by session. Bad lines are skipped, not fatal."""
+    cutoff = time.time() - days * 86400 if days else 0
+    sessions = {}
+    for line in open(path, encoding="utf-8", errors="replace"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue  # a torn last line, or something that is not ours
+        sid = e.get("session")
+        if not sid:
+            continue
+        s = sessions.setdefault(
+            sid,
+            {"id": sid, "at": 0, "who": "", "ident": "", "via": "", "ip": "",
+             "client": "", "where": "", "secs": 0, "turns": 0, "chat": [],
+             "returning": False, "seen_before": 0},
+        )
+        ev = e.get("event")
+        if ev == "arrive":
+            s["at"] = e.get("at", 0)
+            s["who"] = e.get("user") or ""
+            s["ident"] = e.get("id") or ""
+            s["via"] = e.get("via") or ""
+            s["ip"] = e.get("ip") or ""
+            s["client"] = e.get("client") or ""
+            s["returning"] = bool(e.get("returning"))
+            s["seen_before"] = e.get("seen_before") or 0
+        elif ev == "where":
+            s["where"] = ", ".join(
+                x for x in (e.get("city"), e.get("region"), e.get("country")) if x
+            )
+        elif ev == "ask":
+            s["chat"].append((e.get("q", ""), e.get("a", "")))
+        elif ev == "leave":
+            s["secs"] = e.get("secs", 0)
+            s["turns"] = e.get("turns", 0)
+
+    out = [s for s in sessions.values() if s["at"] >= cutoff]
+    out.sort(key=lambda s: s["at"], reverse=True)
+    return out
+
+
+def when(ts):
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
+
+
+def howlong(secs):
+    if secs <= 0:
+        return "-"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def name_of(s):
+    return s["who"] or ("browser" if s["via"] == "web" else "anonymous")
+
+
+def cut(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def table(sessions):
+    if not sessions:
+        print(DIM("nobody yet."))
+        return
+    print(
+        BOLD(
+            f"{'when':<17}{'who':<16}{'via':<5}{'from':<26}"
+            f"{'stayed':<8}{'asked':<6}{'back':<5}"
+        )
+    )
+    print(DIM("─" * 83))
+    for s in sessions:
+        back = f"#{s['seen_before'] + 1}" if s["returning"] else ""
+        row = (
+            f"{when(s['at']):<17}"
+            f"{cut(name_of(s), 15):<16}"
+            f"{s['via']:<5}"
+            f"{cut(s['where'] or s['ip'] or '?', 25):<26}"
+            f"{howlong(s['secs']):<8}"
+            f"{s['turns'] or len(s['chat']):<6}"
+        )
+        print(row + (WARM(back) if back else ""))
+
+    people = {s["ident"] for s in sessions if s["ident"]}
+    asked = sum(s["turns"] or len(s["chat"]) for s in sessions)
+    print(DIM("─" * 83))
+    print(
+        f"{len(sessions)} visit(s), "
+        f"{CYAN(len(people))} known visitor(s), "
+        f"{GREEN(asked)} question(s)"
+    )
+
+
+def places(sessions):
+    counts = defaultdict(int)
+    for s in sessions:
+        counts[s["where"] or "(not looked up)"] += 1
+    if not counts:
+        print(DIM("nobody yet."))
+        return
+    width = max(len(k) for k in counts)
+    for place, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        bar = "█" * min(n, 40)
+        print(f"{place:<{width}}  {CYAN(bar)} {n}")
+
+
+def chats(sessions, who):
+    shown = 0
+    for s in sessions:
+        if who and who.lower() not in (name_of(s) + " " + s["ident"]).lower():
+            continue
+        if not s["chat"]:
+            continue
+        shown += 1
+        head = f"{when(s['at'])}  {name_of(s)}  {s['where'] or s['ip']}"
+        print(BOLD(head))
+        if s["ident"]:
+            print(DIM(f"  {s['ident']}"))
+        for q, a in s["chat"]:
+            print(f"  {CYAN('>')} {q}")
+            for para in str(a).split("\n"):
+                if para.strip():
+                    print(f"    {para}")
+            print()
+        print(DIM("─" * 60))
+    if not shown:
+        print(DIM("no conversations recorded yet."))
+
+
+def person(sessions, who):
+    mine = [
+        s for s in sessions
+        if who.lower() in (name_of(s) + " " + s["ident"] + " " + s["ip"]).lower()
+    ]
+    if not mine:
+        print(DIM(f"nobody matching {who!r}."))
+        return
+    first, last = mine[-1], mine[0]
+    total = sum(s["secs"] for s in mine)
+    asked = sum(s["turns"] or len(s["chat"]) for s in mine)
+    print(BOLD(name_of(last)))
+    for label, value in [
+        ("identity", last["ident"] or "(none offered)"),
+        ("visits", len(mine)),
+        ("first seen", when(first["at"])),
+        ("last seen", when(last["at"])),
+        ("total time", howlong(total)),
+        ("questions", asked),
+        ("from", ", ".join(sorted({s["where"] or s["ip"] for s in mine if s["where"] or s["ip"]}))),
+        ("client", cut(last["client"], 60) or "-"),
+    ]:
+        print(f"  {label:<12}{value}")
+    print()
+    chats(mine, None)
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--file")
+    ap.add_argument("--days", type=float, default=0, help="only the last N days")
+    ap.add_argument("--who", help="one person, by name, identity or address")
+    ap.add_argument("--chats", action="store_true", help="every conversation in full")
+    ap.add_argument("--places", action="store_true", help="where people came from")
+    ap.add_argument("--raw", action="store_true", help="the lines, for jq")
+    args = ap.parse_args()
+
+    path = find_log(args.file)
+    if args.raw:
+        sys.stdout.write(open(path, encoding="utf-8", errors="replace").read())
+        return
+
+    sessions = load(path, args.days)
+    print(DIM(f"{path}\n"))
+    if args.who:
+        person(sessions, args.who)
+    elif args.chats:
+        chats(sessions, None)
+    elif args.places:
+        places(sessions)
+    else:
+        table(sessions)
+
+
+if __name__ == "__main__":
+    main()
