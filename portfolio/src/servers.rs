@@ -49,12 +49,51 @@ impl Default for Pin {
     }
 }
 
+/// Every credential this image passes into the container.
+///
+/// Listed in one place so that scoping can be done by subtraction: a spawned
+/// agent keeps the ones its tier declares and has the rest removed from its
+/// environment. Adding a variable to the compose file and forgetting it here
+/// means it reaches every agent, which is the failure this list exists to make
+/// hard to arrive at by accident.
+pub const SECRETS: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "OLLAMA_API_KEY",
+    "OPENCODE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+];
+
 /// One ACP server: what to run, and how to tell it which model to use.
 #[derive(Debug, Clone)]
 pub struct Server {
     pub command: String,
     pub args: Vec<String>,
     pub pin: Pin,
+    /// The credentials this server is allowed to see. Everything else in
+    /// `SECRETS` is stripped from its environment before it starts.
+    ///
+    /// The directories were already separate -- Copilot's under `COPILOT_HOME`,
+    /// opencode's under `XDG_DATA_HOME` -- but separate paths are not isolation
+    /// while every process inherits every token. A GitHub PAT with Copilot
+    /// Requests on it has no business being visible to a process talking to
+    /// ollama.com, and an ollama key has none inside Copilot.
+    ///
+    /// Worth being exact about what this is: the agents run as one user in one
+    /// container, so this scopes what each is *handed*, not what it could reach
+    /// if it went looking. It shrinks the blast radius of a leaky or talkative
+    /// agent; it is not a sandbox.
+    pub secrets: Vec<String>,
+    /// A flag that takes the gates' allow-list of tool names, comma separated --
+    /// Copilot's `--available-tools`, for instance.
+    ///
+    /// Optional because it is the server's own second opinion, not the
+    /// enforcement. `acp.rs` refuses a tool by name whatever this said; this
+    /// just means the agent is never offered the tool in the first place, which
+    /// is a better experience than watching it reach for something and be
+    /// refused.
+    pub tool_flag: Option<String>,
 }
 
 impl Default for Server {
@@ -63,6 +102,14 @@ impl Default for Server {
             command: "opencode".into(),
             args: vec!["acp".into()],
             pin: Pin::OpencodeConfig,
+            // opencode's policy travels in its config document instead.
+            tool_flag: None,
+            // opencode fronts the provider tiers, so it gets the provider keys
+            // and not the GitHub PAT.
+            secrets: ["OPENCODE_API_KEY", "OLLAMA_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -85,6 +132,26 @@ impl Server {
             if self.pin == Pin::OpencodeConfig && self.command != "opencode" {
                 self.pin = Pin::None;
             }
+        }
+    }
+
+    /// Parse a `secrets` line: the credentials this server may see, or `none`.
+    pub fn secrets_line(&mut self, line: &str) {
+        if line.trim() == "none" {
+            self.secrets.clear();
+            return;
+        }
+        self.secrets = line.split_whitespace().map(|s| s.to_string()).collect();
+    }
+
+    /// Parse a `tools` line: the flag that carries the allow-list, or `none`.
+    pub fn tools_line(&mut self, line: &str) {
+        let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let rest = rest.trim();
+        match word {
+            "flag" if !rest.is_empty() => self.tool_flag = Some(rest.to_string()),
+            "none" => self.tool_flag = None,
+            _ => {}
         }
     }
 
@@ -123,6 +190,27 @@ impl Server {
     pub fn spawn_command(&self, model: &str) -> Command {
         let mut c = Command::new(&self.command);
         c.args(&self.args);
+        // Least privilege by subtraction. Everything else about the environment
+        // is inherited -- PATH, HOME, the XDG paths -- because an agent needs
+        // all of that to run at all; only the credentials are pruned.
+        for var in SECRETS {
+            if !self.secrets.iter().any(|s| s == var) {
+                c.env_remove(var);
+            }
+        }
+        if let Some(flag) = &self.tool_flag {
+            let list = crate::gates::open_tool_names().join(",");
+            // Printed once, because the contents are load-bearing and were
+            // silently wrong: Copilot's `--available-tools` is "only these", by
+            // exact name, and it renames MCP tools to `<server>-<tool>`. A list
+            // that omits the prefixed spelling hides the tool from the model
+            // with nothing anywhere reporting a problem.
+            static SAID: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            if SAID.set(()).is_ok() {
+                eprintln!("portfolio: tools offered as `{flag} {list}`");
+            }
+            c.arg(flag).arg(list);
+        }
         match &self.pin {
             Pin::OpencodeConfig => {
                 c.env("OPENCODE_CONFIG_CONTENT", Self::opencode_config(model));
@@ -240,6 +328,92 @@ mod tests {
         let c = s.spawn_command("sonnet");
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert_eq!(args, ["--stdio", "--model", "sonnet"]);
+    }
+
+    /// Copilot takes its allow-list on the command line, and it must be the
+    /// gates' list rather than a second one written out by hand.
+    #[test]
+    fn a_tool_flag_carries_the_gates_allow_list() {
+        let mut s = Server::default();
+        s.command_line("copilot --acp");
+        s.pin_line("flag --model");
+        s.tools_line("flag --available-tools");
+        let c = s.spawn_command("auto");
+        let args: Vec<String> =
+            c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+
+        let at = args.iter().position(|a| a == "--available-tools").expect("no tool flag");
+        let list = &args[at + 1];
+        // Copilot's spelling has to be in there, or it is handed a list of names
+        // it does not recognise and quietly loses its web tools.
+        assert!(list.contains("web_fetch"), "{list}");
+        assert!(list.contains("web_search"), "{list}");
+        // And nothing shut may appear in an allow-list.
+        for shut in ["bash", "shell", "view", "grep", "write"] {
+            assert!(!list.split(',').any(|n| n == shut), "{shut} is in the allow-list: {list}");
+        }
+        // The model still gets pinned alongside it.
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "auto"), "{args:?}");
+    }
+
+    /// Each agent is handed its own credentials and stripped of everybody
+    /// else's. Separate directories were never the isolation that mattered --
+    /// every spawned process inherited every token.
+    #[test]
+    fn an_agent_is_handed_only_the_credentials_its_tier_declares() {
+        // Copilot's tier: the PAT, and nothing from the providers.
+        let mut copilot = Server::default();
+        copilot.command_line("copilot --acp");
+        copilot.secrets_line("GH_TOKEN GITHUB_TOKEN");
+        let removed = |c: &Command| -> Vec<String> {
+            c.get_envs()
+                .filter(|(_, v)| v.is_none())
+                .map(|(k, _)| k.to_string_lossy().to_string())
+                .collect()
+        };
+        let cleared = removed(&copilot.spawn_command("auto"));
+        for gone in ["OLLAMA_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+            assert!(cleared.contains(&gone.to_string()), "{gone} still reaches copilot: {cleared:?}");
+        }
+        for kept in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(!cleared.contains(&kept.to_string()), "{kept} was taken from copilot");
+        }
+
+        // And the other way: opencode fronts the providers and has no business
+        // holding a GitHub PAT.
+        let cleared = removed(&Server::default().spawn_command("a/b"));
+        for gone in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(cleared.contains(&gone.to_string()), "{gone} still reaches opencode: {cleared:?}");
+        }
+        for kept in ["OPENCODE_API_KEY", "OLLAMA_API_KEY"] {
+            assert!(!cleared.contains(&kept.to_string()), "{kept} was taken from opencode");
+        }
+    }
+
+    /// `secrets none` means exactly that, and every known credential goes.
+    #[test]
+    fn a_server_can_be_given_no_credentials_at_all() {
+        let mut s = Server::default();
+        s.secrets_line("none");
+        assert!(s.secrets.is_empty());
+        let c = s.spawn_command("a/b");
+        let cleared: Vec<String> = c
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().to_string())
+            .collect();
+        for var in SECRETS {
+            assert!(cleared.contains(&var.to_string()), "{var} survived `secrets none`");
+        }
+    }
+
+    #[test]
+    fn a_server_without_a_tool_flag_passes_none() {
+        let s = Server::default();
+        let c = s.spawn_command("a/b");
+        let args: Vec<String> =
+            c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(!args.iter().any(|a| a.starts_with("--available")), "{args:?}");
     }
 
     #[test]

@@ -46,6 +46,11 @@
 # `pin` line says otherwise, because handing OPENCODE_CONFIG_CONTENT to
 # something else is at best ignored and at worst silently relied upon.
 #
+# `secrets` lists the credentials that tier's process may see; every other one
+# the container carries is removed from its environment before it starts.
+# `secrets none` gives it nothing. Separate credential directories are not
+# isolation on their own -- without this every agent inherited every token.
+#
 # What a server may do is NOT set here. That is `portfolio/src/gates.rs`,
 # compiled in, and it applies to every server in this file -- adding one cannot
 # widen what an agent is allowed to do. Only `opencode-config` pushes the policy
@@ -53,11 +58,23 @@
 # enforcement, which is what it was always for.
 
 tier  github copilot
-  # A seat, not a metered key. Needs `opencode auth login github-copilot` once
-  # -- see deploy/README.md, the credential lives on a volume so it survives a
-  # restart.
-  model  github-copilot/gpt-4.1
-  model  github-copilot/gpt-4o
+  # Copilot's own ACP server rather than opencode's Copilot provider: it is the
+  # first-party path to a seat that is already paid for, it takes the model as a
+  # flag, and it accepts the gates' allow-list directly.
+  #
+  # It will not open a session until it has been logged in -- it answers
+  # `session/new` with "Authentication required" and advertises `copilot-login`.
+  # Either put a fine-grained PAT with "Copilot Requests" in GH_TOKEN, or run
+  # `copilot login` once in the container. See deploy/README.md.
+  command  copilot --acp
+  pin      flag --model
+  tools    flag --available-tools
+  # Only the GitHub PAT. The provider keys below are stripped from this
+  # process's environment before it starts, and its PAT from theirs.
+  secrets  GH_TOKEN GITHUB_TOKEN
+  # `auto` lets Copilot pick, which is the right default for a seat: the good
+  # model on any given week is theirs to know, not ours to pin.
+  model  auto
 
 tier  opencode zen
   # Free, and the free tier is a daily allowance rather than a guarantee.
@@ -66,5 +83,12 @@ tier  opencode zen
 
 tier  ollama cloud
   # The backstop. Slower and further away, and still an answer.
-  model  ollama/gpt-oss:120b-cloud
-  model  ollama/qwen3-coder:480b-cloud
+  #
+  # `ollama-cloud`, not `ollama`: there is no plain `ollama` provider in the
+  # registry opencode reads. And the ids carried a `-cloud` suffix, which is how
+  # a *local* ollama daemon names the cloud models it proxies -- there is no
+  # daemon in this image, so that spelling asked a provider that does not exist
+  # for a model that does not exist. This goes straight to ollama.com, which
+  # wants OLLAMA_API_KEY. See deploy/README.md.
+  model  ollama-cloud/gpt-oss:120b
+  model  ollama-cloud/qwen3.5:397b

@@ -61,10 +61,16 @@ services:
       # `opencode auth login github-copilot` is done once and serves both.
       - agent:/app/agent
 
-    # opencode insists on a writable HOME for its cache and its logs. This is
-    # scratch and none of it survives a restart -- but without it the ask
-    # section fails at spawn on a read-only filesystem, with an error nobody
-    # sees because its stderr goes nowhere.
+    # opencode insists on a writable HOME for its logs and scratch. None of it
+    # survives a restart -- but without it the ask section fails at spawn on a
+    # read-only filesystem, with an error nobody sees because its stderr goes
+    # nowhere.
+    #
+    # The agents' *cache* is deliberately not here: XDG_CACHE_HOME points at the
+    # volume instead. Copilot unpacks 209 MB of itself into it on first run,
+    # which 64m cannot hold, and then has to map a native addon out of it, which
+    # a noexec tmpfs will not allow. Raising the size fixes neither. See
+    # deploy/Dockerfile.
     tmpfs:
       - /tmp:size=64m,mode=1777
 
@@ -81,6 +87,18 @@ services:
       # every other section carries on. That is deliberate: a missing key
       # should cost one tab, not the site.
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      # Copilot's own ACP server takes either of these: a fine-grained PAT
+      # with the "Copilot Requests" permission, in precedence order. Set one
+      # and the Copilot tier needs no login step at all. Leave both empty and
+      # it falls back to whatever `copilot login` put on the agent volume;
+      # with neither, the tier reports that it needs authenticating and the
+      # zen and ollama tiers carry the section.
+      GH_TOKEN: ${GH_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # The ollama-cloud tier. A key from ollama.com, which talks to
+      # https://ollama.com/v1 directly -- there is no ollama daemon in
+      # this image for the local provider to reach.
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # The visitor's own address is geolocated to put a marker on the map.
@@ -146,6 +164,8 @@ services:
       - messages:/app/messages
       - agent:/app/agent
 
+    # As above: scratch only. The agents' cache lives on the volume, because
+    # Copilot cannot unpack itself into a small noexec tmpfs.
     tmpfs:
       - /tmp:size=64m,mode=1777
 
@@ -161,6 +181,18 @@ services:
       # every other section carries on. That is deliberate: a missing key
       # should cost one tab, not the site.
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      # Copilot's own ACP server takes either of these: a fine-grained PAT
+      # with the "Copilot Requests" permission, in precedence order. Set one
+      # and the Copilot tier needs no login step at all. Leave both empty and
+      # it falls back to whatever `copilot login` put on the agent volume;
+      # with neither, the tier reports that it needs authenticating and the
+      # zen and ollama tiers carry the section.
+      GH_TOKEN: ${GH_TOKEN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      # The ollama-cloud tier. A key from ollama.com, which talks to
+      # https://ollama.com/v1 directly -- there is no ollama daemon in
+      # this image for the local provider to reach.
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # A browser tab left open in the background answers everything and would

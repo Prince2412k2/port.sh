@@ -177,17 +177,92 @@ docker compose exec portfolio portfolio --probe
 That prints the tiers, runs one check, and says which one it would use. It is
 the same code the server runs on its timer.
 
-**Logging Copilot in.** Once, interactively — it is a device flow you finish in
-a browser:
+**Logging Copilot in.** The Copilot tier runs Copilot's own ACP server
+(`copilot --acp`) rather than opencode's Copilot provider, so it authenticates
+Copilot's way, not opencode's. It will not open a session until it has: it
+answers `session/new` with `Authentication required` and advertises
+`copilot-login` in the handshake. Two ways in, and either is enough.
+
+A token, which needs no login step and no interactive terminal:
 
 ```bash
-docker compose exec -it portfolio opencode auth login github-copilot
+# .env beside docker-compose.yml — compose reads it, git does not get it
+GH_TOKEN=github_pat_...
 ```
 
-The credential lands in the `agent` volume (`XDG_DATA_HOME=/app/agent`) and
-both services share it. Keep that volume: on the tmpfs everything else uses,
-this would work perfectly until the first restart and then silently drop the
-whole Copilot tier.
+A fine-grained PAT with the **Copilot Requests** permission. `GH_TOKEN` wins
+over `GITHUB_TOKEN` if both are set.
+
+Or interactively, once:
+
+```bash
+docker compose exec -it portfolio copilot login
+```
+
+That credential lands in the `agent` volume via `COPILOT_HOME=/app/agent/copilot`,
+and both services share it. Keep that volume, and keep `COPILOT_HOME` pointed
+into it: Copilot defaults its config directory to `~/.copilot`, and `HOME` here
+is the tmpfs — where a login works perfectly until the first restart and then
+silently drops the whole tier. The opencode credential learned this the same way.
+
+To check which way it went, and whether it took:
+
+```bash
+docker compose exec -T portfolio portfolio --probe
+```
+
+**Copilot unpacks itself, and needs somewhere real to do it.** `copilot` is a
+Node single-executable: on first run it extracts ~209 MB to
+`$XDG_CACHE_HOME/copilot/pkg/…`. The tmpfs fails that twice over — 64 MB is far
+too small, and even given room the tmpfs is `noexec`, so loading the native
+`runtime.node` fails with `failed to map segment from shared object`. Raising
+the tmpfs size fixes only the first half, and costs RAM against a 512 MB limit.
+
+So `XDG_CACHE_HOME` is on the `agent` volume. If you ever move it back to
+scratch, Copilot fails at spawn with a wall of
+`TAR_ENTRY_ERROR(ENOSPC): no space left on device` — which reads like a full
+disk and is not one. Check the *mount*, not `df` on the host.
+
+The unpacking happens once per volume, not per restart. The very first run pays
+for it, so a probe against a freshly created volume can time out and report the
+tier down; the next one will not.
+
+**Keys for the other tiers.** Everything below Copilot is reached through
+opencode, which takes credentials two ways — an environment variable, or its own
+login. Either is enough.
+
+| tier | provider | variable |
+|---|---|---|
+| opencode zen | `opencode` | `OPENCODE_API_KEY` |
+| ollama cloud | `ollama-cloud` | `OLLAMA_API_KEY` |
+
+Put them in a `.env` beside `docker-compose.yml` — compose reads it on its own,
+and it is not a file to commit:
+
+```bash
+OLLAMA_API_KEY=...
+OPENCODE_API_KEY=...
+```
+
+Or log in instead, which writes to `auth.json` on the `agent` volume and so
+survives a restart:
+
+```bash
+docker compose exec -it portfolio opencode auth login -p ollama-cloud
+docker compose exec -T  portfolio opencode auth list      # what it has
+```
+
+**`ollama-cloud`, not `ollama`.** There is no plain `ollama` provider in the
+registry opencode reads: the local daemon and the hosted service are one name in
+Ollama's own tooling and two different things here. A key from ollama.com goes to
+`https://ollama.com/v1` directly, which is what `ollama-cloud` talks to. The
+`-cloud` suffix on model ids (`gpt-oss:120b-cloud`) belongs to the *local*
+daemon proxying hosted models, and means nothing here — this image has no daemon.
+Use the bare id, `ollama-cloud/gpt-oss:120b`.
+
+opencode still serves the zen and ollama tiers underneath, and still has its own
+login (`opencode auth login <provider>`) if you ever point a tier at a provider
+that needs one.
 
 **What it may do.** One table, `portfolio/src/gates.rs`, and everything else
 derives from it: the `clientCapabilities` in the ACP handshake, the server's own
@@ -218,6 +293,49 @@ the lever is `models.txt` — empty it and the section turns itself off.
 **Which server.** Any ACP server, not just opencode. A tier in `models.txt` may
 name a `command` and how the model is pinned; left out, it is `opencode acp`. The
 gates apply to all of them, so adding a server cannot widen what an agent may do.
+
+## Who came
+
+Visits are logged, so there is an answer to the question a portfolio exists to
+ask: is anybody looking, and from where. Append-only JSONL beside the messages,
+on the same volume:
+
+```bash
+docker compose exec portfolio cat /app/messages/visits.jsonl | jq
+```
+
+Four kinds of line, all keyed by `session`:
+
+| event | what |
+|---|---|
+| `arrive` | transport, username, identity, address, client, and whether they have been here before |
+| `where` | city, region, country, lat/lon — appended when the lookup returns |
+| `ask` | one exchange, question and answer |
+| `leave` | how long they stayed and how many questions they asked |
+
+**What identifies somebody.** Over SSH, two things arrive as part of logging in
+and neither is taken behind anyone's back: the username they typed in front of
+the `@`, and the fingerprint of the key they authenticated with. The fingerprint
+is what makes a return visit recognisable, because it is stable across addresses.
+In a browser there is no equivalent, so the page keeps a random id in
+`localStorage` and sends it — clearing site data makes somebody a new visitor,
+which is the right amount of control to leave with them.
+
+**Where** reuses the geolocation the map already had (`ip-api.com`, plain HTTP),
+so this codebase has one such call and not two. It runs on its own thread and is
+appended when it returns; nothing waits on it. Private addresses are never sent.
+
+A useful thing to run:
+
+```bash
+# everyone who has been here more than once
+jq -r 'select(.event=="arrive" and .returning) | "\(.user) \(.id)"' visits.jsonl | sort | uniq -c | sort -rn
+```
+
+One thing to decide rather than inherit: nothing on screen tells visitors this is
+kept. That is a one-line change to `OPENING` in `ask.rs` if you want it, and in
+some jurisdictions it is the difference between analytics and a problem. Your
+call, not mine — but it is easier to add now than to explain later.
 
 ## Messages
 

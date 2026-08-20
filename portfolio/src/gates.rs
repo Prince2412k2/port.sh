@@ -61,10 +61,37 @@ pub const GATES: Gates = Gates {
 
 /// A tool the agent may reach for, and whether it may.
 pub struct Tool {
+    /// What it is called on screen. One name per capability, not per spelling.
     pub name: &'static str,
+    /// The same capability under another agent's spelling.
+    ///
+    /// Tool names are not standardised and the differences are not cosmetic:
+    /// opencode calls fetching a page `webfetch`, Copilot calls it `web_fetch`,
+    /// and neither string contains the other. Without these the gate would
+    /// refuse Copilot every web tool it has -- and, worse, refuse its shell
+    /// under the name `shell` only because the table happened to say `bash`.
+    pub aka: &'static [&'static str],
     pub open: bool,
     /// Shown on screen next to the tool. Present tense, lower case, short.
     pub blurb: &'static str,
+    /// Served by us, over our own MCP server, rather than being one of the
+    /// agent's own.
+    ///
+    /// It matters because an agent renames what it did not write. Copilot
+    /// namespaces every MCP tool as `<server>-<tool>`, so `show_map` reaches
+    /// the model as `portfolio-show_map` -- and its `--available-tools`
+    /// allow-list is by exact name, so a list of bare names hid every tool we
+    /// serve while the server itself connected perfectly. Nothing looked wrong
+    /// anywhere: the log said the tools were offered, the agent said it had no
+    /// map tools, and both were true.
+    pub ours: bool,
+}
+
+impl Tool {
+    /// Every spelling of this tool.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        std::iter::once(self.name).chain(self.aka.iter().copied())
+    }
 }
 
 /// Every tool this client has an opinion about.
@@ -74,22 +101,76 @@ pub struct Tool {
 /// missing from a list and a tool switched off look identical in a diff; only
 /// one of them is a decision somebody made.
 pub const TOOLS: &[Tool] = &[
-    Tool { name: "webfetch", open: true, blurb: "read a page" },
-    Tool { name: "websearch", open: true, blurb: "search the web" },
+    // Aliases are generous on the shut side and stingy on the open side, because
+    // the two mistakes are not the same size: an over-broad shut name costs a
+    // refused fetch, an over-broad open name grants something. `fetch` alone is
+    // deliberately *not* here -- it is an ordinary English word, and matching it
+    // by containment would let a tool called anything at all be granted by a
+    // label that merely mentions fetching.
+    Tool { name: "webfetch", aka: &["web_fetch"], open: true, ours: false, blurb: "read a page" },
+    Tool { name: "websearch", aka: &["web_search"], open: true, ours: false, blurb: "search the web" },
+    // Ours, served from this process -- see `mcp.rs`. Open because the whole
+    // point of them is that the agent decides when a map belongs on screen, and
+    // neither one can do anything but draw: `locate_place` reads an index built
+    // from the basemap, and `show_map` posts a point to the page that asked. No
+    // filesystem, no network, no shell.
+    //
+    // Named exactly, with no aliases. The rule on the open side is stinginess,
+    // and these are names we chose ourselves -- there is no upstream that might
+    // rename them and no prose that should ever match one.
+    Tool { name: "locate_place", aka: &[], open: true, ours: true, blurb: "find a place" },
+    Tool { name: "show_map", aka: &[], open: true, ours: true, blurb: "draw a map" },
+    Tool { name: "locate_visitor", aka: &[], open: true, ours: true, blurb: "where you are" },
+    Tool { name: "hide_map", aka: &[], open: true, ours: true, blurb: "put the map away" },
     // Nothing provides this one. `/reach` is handled in ask.rs before the
     // agent ever sees the line, deliberately: a message meant for a person
     // should arrive whether or not a model is up, and word for word rather
     // than as something's summary of it. Off, so that if a tool by this name
     // ever does appear it arrives shut and somebody decides on purpose.
-    Tool { name: "reach_out", open: false, blurb: "leave Prince a message" },
+    Tool { name: "reach_out", aka: &[], open: false, ours: false, blurb: "leave Prince a message" },
     // Named and shut so the refusal is visible rather than implied. This is
-    // the one that matters: `bash` on a box that accepts any username is
-    // arbitrary code execution for anyone who can type.
-    Tool { name: "bash", open: false, blurb: "run a command" },
-    Tool { name: "edit", open: false, blurb: "change a file" },
-    Tool { name: "write", open: false, blurb: "create a file" },
-    Tool { name: "patch", open: false, blurb: "apply a diff" },
+    // the one that matters: a shell on a box that accepts any username is
+    // arbitrary code execution for anyone who can type, and it answers to at
+    // least two names depending on who is asking.
+    Tool { name: "bash", aka: &["shell"], open: false, ours: false, blurb: "run a command" },
+    Tool { name: "edit", aka: &["str_replace"], open: false, ours: false, blurb: "change a file" },
+    Tool { name: "write", aka: &[], open: false, ours: false, blurb: "create a file" },
+    Tool { name: "patch", aka: &[], open: false, ours: false, blurb: "apply a diff" },
+    // Reading the filesystem is not the same risk as writing it, and it is
+    // still not this agent's business: the context it needs is pushed into the
+    // first prompt, and everything else on this disk is either source control
+    // or somebody's messages.
+    Tool { name: "view", aka: &["read"], open: false, ours: false, blurb: "read a file" },
+    Tool { name: "glob", aka: &[], open: false, ours: false, blurb: "find files by name" },
+    Tool { name: "grep", aka: &[], open: false, ours: false, blurb: "search the files" },
+    Tool { name: "task", aka: &[], open: false, ours: false, blurb: "spawn a sub-agent" },
 ];
+
+/// Every spelling of every tool that is open, for a server that takes its
+/// allow-list on the command line.
+///
+/// All spellings rather than the display names, because the flag is read by an
+/// agent that knows its own vocabulary and not ours. Extra names an agent does
+/// not recognise are ignored by it, which is the harmless direction.
+/// Every name an agent might use for a tool that is open, for an allow-list.
+///
+/// Ours appear twice: bare, and prefixed with the MCP server's name. An agent
+/// that namespaces its MCP tools will only match the prefixed form and one that
+/// does not will only match the bare one, and there is no way to tell which
+/// from the handshake -- so both go in. An allow-list with a name in it that
+/// nothing answers to costs nothing; a missing one costs the whole feature.
+pub fn open_tool_names() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in TOOLS.iter().filter(|t| t.open) {
+        for n in t.names() {
+            out.push(n.to_string());
+            if t.ours {
+                out.push(format!("{}-{n}", crate::mcp::SERVER_NAME));
+            }
+        }
+    }
+    out
+}
 
 /// The protocol capabilities, as label-and-state pairs for the screen.
 ///
@@ -118,8 +199,8 @@ pub fn capabilities() -> [(&'static str, bool); 5] {
 /// Under-granting is the safe direction here and the direction this errs in --
 /// a refused fetch is a worse answer, an unrecognised shell is a broken box.
 pub fn tool_open(name: &str) -> bool {
-    let t = name.to_ascii_lowercase();
-    !tool_shut(name) && TOOLS.iter().any(|x| x.open && t.contains(x.name))
+    let t = flatten(name);
+    !tool_shut(name) && TOOLS.iter().any(|x| x.open && x.names().any(|n| t.contains(&flatten(n))))
 }
 
 /// Whether a string names a tool that is shut.
@@ -129,8 +210,28 @@ pub fn tool_open(name: &str) -> bool {
 /// them naming a closed tool is enough to refuse. "webfetch, then bash" must not
 /// be granted on the strength of its first word.
 pub fn tool_shut(name: &str) -> bool {
-    let t = name.to_ascii_lowercase();
-    TOOLS.iter().any(|x| !x.open && t.contains(x.name))
+    let t = flatten(name);
+    TOOLS.iter().any(|x| !x.open && x.names().any(|n| t.contains(&flatten(n))))
+}
+
+/// Lower case, and with the separators taken out.
+///
+/// Because an agent spells a tool however it likes and this has now cost two
+/// deploys. opencode says `webfetch` and Copilot says `web_fetch`; Copilot also
+/// prefixes MCP tools with the server name, and ACP's `ToolCall` has no `name`
+/// field at all -- only a `title`, which may be prose. `Locate place`,
+/// `locate_place` and `portfolio-locate_place` are one tool and the gate has to
+/// know it.
+///
+/// This widens the shut side and the open side together, which is the point:
+/// the names in the table are specific identifiers rather than words, so
+/// flattening them cannot make `bash` match anything that is not a shell, and
+/// the shut side is checked first either way.
+fn flatten(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 /// What we will do with an inbound method.
@@ -194,15 +295,22 @@ pub fn client_capabilities() -> String {
 /// it arrives, because a config key renamed upstream should cost a refused
 /// tool call rather than a shell.
 pub fn tool_policy() -> String {
-    let list = |render: fn(&Tool) -> String| {
-        TOOLS.iter().map(render).collect::<Vec<_>>().join(",")
+    // Every spelling gets an entry. opencode ignores keys it does not know, and
+    // a policy that names only our word for a tool is a policy with a hole in it
+    // the day the agent renames one.
+    let list = |render: fn(&Tool, &str) -> String| {
+        TOOLS
+            .iter()
+            .flat_map(|t| t.names().map(move |n| render(t, n)))
+            .collect::<Vec<_>>()
+            .join(",")
     };
     format!(
         r#""tools":{{{}}},"permission":{{{}}}"#,
-        list(|t| format!("{}:{}", crate::json::quote(t.name), t.open)),
-        list(|t| format!(
+        list(|t, n| format!("{}:{}", crate::json::quote(n), t.open)),
+        list(|t, n| format!(
             "{}:{}",
-            crate::json::quote(t.name),
+            crate::json::quote(n),
             if t.open { "\"allow\"" } else { "\"deny\"" }
         )),
     )
@@ -210,6 +318,81 @@ pub fn tool_policy() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// However the agent spells it, it is the same tool.
+    ///
+    /// Every spelling here is one that has actually turned up or is one step
+    /// from it: opencode's `webfetch` against Copilot's `web_fetch`, Copilot's
+    /// `<server>-<tool>` namespacing, and a `title` that is prose because ACP's
+    /// `ToolCall` carries no name field and prose is all there is.
+    #[test]
+    fn a_tool_is_the_same_tool_however_it_is_spelled() {
+        for open in [
+            "show_map",
+            "portfolio-show_map",
+            "portfolio_show_map",
+            "Show map",
+            "mcp__portfolio__show_map",
+            "web_fetch",
+            "webfetch",
+            "locate_visitor",
+            "portfolio-locate_visitor",
+        ] {
+            assert!(tool_open(open), "`{open}` was refused");
+        }
+        // And the shut side widens with it rather than being left behind, which
+        // is the half that matters: a flatten that only helped the open side
+        // would be a way through the gate.
+        for shut in [
+            "bash",
+            "Bash",
+            "portfolio-bash",
+            "str_replace",
+            "str-replace",
+            "strreplace",
+            "Str Replace Editor",
+            "shell",
+            "read",
+            "read_file",
+        ] {
+            assert!(tool_shut(shut), "`{shut}` got through");
+            assert!(!tool_open(shut), "`{shut}` was granted");
+        }
+        // A category is not a name. This is the exact string that refused our
+        // own tools for a whole deploy.
+        assert!(!tool_open("other"), "`other` is a tool kind, not a tool");
+        assert!(!tool_open(""), "an empty name granted something");
+    }
+
+    /// The allow-list has to carry the name the *agent* will use.
+    ///
+    /// The regression: `--available-tools` on Copilot means "only these tools
+    /// will be available to the model", matched by exact name -- and Copilot
+    /// renames every MCP tool to `<server>-<tool>`. So a list of bare names
+    /// connected the server, negotiated the tools, and hid all of them from the
+    /// model. The agent then said, correctly, that it had no map tools.
+    #[test]
+    fn the_allow_list_carries_the_namespaced_names_of_our_own_tools() {
+        let names = open_tool_names();
+        for t in TOOLS.iter().filter(|t| t.open && t.ours) {
+            let bare = t.name.to_string();
+            let owned = format!("{}-{}", crate::mcp::SERVER_NAME, t.name);
+            assert!(names.contains(&bare), "`{bare}` missing from {names:?}");
+            assert!(names.contains(&owned), "`{owned}` missing -- Copilot will not see it");
+        }
+        // The agent's own tools are not ours to rename.
+        assert!(names.contains(&"web_fetch".to_string()));
+        assert!(
+            !names.iter().any(|n| n == &format!("{}-web_fetch", crate::mcp::SERVER_NAME)),
+            "namespaced a tool we do not serve: {names:?}"
+        );
+        // And nothing shut leaked in under either spelling.
+        for t in TOOLS.iter().filter(|t| !t.open) {
+            for n in t.names() {
+                assert!(!names.contains(&n.to_string()), "`{n}` is shut and on the allow-list");
+            }
+        }
+    }
     use super::*;
 
     #[test]

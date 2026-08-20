@@ -36,21 +36,30 @@ FROM debian:bookworm-slim
 # were wrong on the first try and only the download said so, so: the tag, the
 # owner and the extension here are all load-bearing. `--version` at the end
 # means a bad URL fails the build rather than the ask section.
+# Two ACP servers, because data/models.txt names two. Copilot's own CLI serves
+# the Copilot tier -- first-party, and the only way to that seat that does not
+# route a paid seat through somebody else's provider shim. opencode serves the
+# zen and ollama tiers underneath it, so a Copilot outage still has somewhere to
+# go. Both are single binaries in a tarball, so neither needs node or unzip.
 ARG OPENCODE_VERSION=1.17.20
+ARG COPILOT_VERSION=1.0.80
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
       | tar xz -C /usr/local/bin opencode \
- && chmod +x /usr/local/bin/opencode \
+ && curl -fsSL "https://github.com/github/copilot-cli/releases/download/v${COPILOT_VERSION}/copilot-linux-x64.tar.gz" \
+      | tar xz -C /usr/local/bin copilot \
+ && chmod +x /usr/local/bin/opencode /usr/local/bin/copilot \
  && apt-get purge -y curl \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/* \
- && HOME=/tmp /usr/local/bin/opencode --version
+ && HOME=/tmp /usr/local/bin/opencode --version \
+ && HOME=/tmp /usr/local/bin/copilot --version
 
 # A system account with no shell, purely so the process is not root. Nothing
 # ever logs into it -- there is no login path here at all any more.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin portfolio \
- && mkdir -p /app/keys /app/messages /app/agent \
+ && mkdir -p /app/keys /app/messages /app/agent /app/agent/copilot /app/agent/cache \
  && chown -R portfolio:portfolio /app/keys /app/messages /app/agent
 
 WORKDIR /app
@@ -68,12 +77,31 @@ ENV TERMAP_DATA=/app/data
 # writes that anybody wants to keep, and the filesystem is otherwise read-only.
 ENV PORTFOLIO_MESSAGES=/app/messages/messages.jsonl
 
-# opencode wants somewhere to write. Most of it is cache and belongs on the
+# Who came, from where, and what they asked. Append-only JSONL on the same
+# volume as the messages, because both are things somebody wants to still have
+# next month and neither belongs in an image layer.
+ENV PORTFOLIO_VISITS=/app/messages/visits.jsonl
+
+# opencode wants somewhere to write. Most of it is scratch and belongs on the
 # tmpfs the compose file mounts -- without it opencode fails at spawn on a
 # read-only filesystem, and the ask section dies before the first question.
 ENV HOME=/tmp
-ENV XDG_CACHE_HOME=/tmp/cache
 ENV XDG_CONFIG_HOME=/tmp/config
+
+# The cache is the exception, and it is Copilot's doing. `copilot` is a Node
+# single-executable that unpacks itself to `$XDG_CACHE_HOME/copilot/pkg/...`
+# on first run, and the tmpfs fails it twice over:
+#
+#   209 MB of package against a 64 MB tmpfs -- ENOSPC, over and over, three
+#   attempts and out; and then, given room, `failed to map segment from shared
+#   object` loading `runtime.node`, because compose mounts tmpfs `noexec` and
+#   that file is a native addon that has to be mapped executable.
+#
+# The volume is neither small nor noexec, so the cache goes there. It also
+# means the unpacking happens once for the life of the volume instead of once
+# per restart. Note the first run pays for it: allow for that when a probe of a
+# freshly created volume times out and reports the tier as down.
+ENV XDG_CACHE_HOME=/app/agent/cache
 
 # Except the credential. `opencode auth login github-copilot` is a device
 # flow somebody completes in a browser, and auth.json lands under
@@ -82,6 +110,14 @@ ENV XDG_CONFIG_HOME=/tmp/config
 # whole Copilot tier, which is the sort of failure that gets diagnosed as
 # "Copilot is down" a week later.
 ENV XDG_DATA_HOME=/app/agent
+
+# Copilot keeps its credential under its config directory, which defaults to
+# `~/.copilot` -- and HOME here is the tmpfs below. On tmpfs `copilot login`
+# works perfectly until the first restart and then the Copilot tier silently
+# stops answering, which is exactly the trap the opencode credential already
+# taught us. So it is pointed at the volume instead. Supersedes `--config-dir`,
+# which is deprecated.
+ENV COPILOT_HOME=/app/agent/copilot
 
 # The image is both services. ENTRYPOINT is the binary alone and the flags
 # come from `command:` in docker-compose.yml, so the ssh and web containers
