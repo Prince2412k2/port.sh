@@ -1,7 +1,13 @@
 # Build output.
 target/
 __pycache__/
+.claude
 
+# Credentials. The deployment reads GH_TOKEN, OLLAMA_API_KEY and friends from
+# here, so this file is the one thing in the tree that must never be committed.
+# It was untracked and unignored for a while, which is one `git add .` away from
+# being in the history for good.
+.env
 # Snapshots. Every rendering decision in here was checked by dumping a frame to
 # PNG (see map/scripts/ansi2png.py); none of those frames are source.
 *.png
