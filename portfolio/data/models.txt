@@ -60,8 +60,20 @@
 tier  openai luna
   # First because it is the one chosen on purpose. `openai/gpt-5.6-luna` is in
   # the registry opencode reads -- checked with `opencode models` in the
-  # container rather than assumed -- and it needs OPENAI_API_KEY, which the
-  # compose file already passes.
+  # container rather than assumed.
+  #
+  # Its credential is an **OAuth login**, not a key: `opencode auth login` once
+  # inside the container, pick openai, and the token lands in
+  # `$XDG_DATA_HOME/opencode/auth.json` -- `/app/agent/opencode/auth.json`,
+  # which is on the `agent` named volume and so survives restarts and rebuilds.
+  # Nothing needs to go in `.env` for this tier.
+  #
+  # Note what that means for `secrets` below: compose passes
+  # `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`, so the variable exists and is empty
+  # whenever the host does not set one. An empty credential is worse than an
+  # absent one -- a server that checks whether a key is present rather than
+  # usable would take it and stop looking, past a perfectly good OAuth token.
+  # `spawn_command` strips empty secrets for exactly that reason.
   #
   # `option` lines become `provider.<id>.models.<id>.options` in the config
   # document opencode is handed. The keys belong to opencode, not to us: these

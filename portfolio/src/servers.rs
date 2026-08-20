@@ -232,7 +232,17 @@ impl Server {
         // is inherited -- PATH, HOME, the XDG paths -- because an agent needs
         // all of that to run at all; only the credentials are pruned.
         for var in SECRETS {
-            if !self.secrets.iter().any(|s| s == var) {
+            let declared = self.secrets.iter().any(|s| s == var);
+            // Removed if this tier does not declare it -- and removed if it is
+            // declared but empty, which is the case that bites. Compose passes
+            // `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`, so the variable exists with
+            // no value whenever the host does not set one, and a server that
+            // tests whether a credential is *present* rather than whether it is
+            // *usable* will take that empty string and stop looking. The real
+            // credential here is an OAuth login in opencode's own store on the
+            // volume, and an empty environment variable must not shadow it.
+            let usable = std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+            if !declared || !usable {
                 c.env_remove(var);
             }
         }
@@ -277,6 +287,55 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+
+    /// An empty credential is stripped, not passed on.
+    ///
+    /// Compose passes `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`, so the variable
+    /// exists with no value whenever the host does not set one -- and the real
+    /// credential for that provider is an OAuth login in opencode's own store.
+    /// A server that checks whether a key is *present* rather than *usable*
+    /// would take the empty string and stop looking, past a working token.
+    #[test]
+    fn an_empty_credential_is_not_handed_to_an_agent() {
+        let _held = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let server = Server::default();
+        assert!(server.secrets.iter().any(|s| s == "OPENAI_API_KEY"), "not declared");
+
+        let seen = |c: &Command| -> Vec<(String, Option<String>)> {
+            c.get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().to_string(),
+                        v.map(|v| v.to_string_lossy().to_string()),
+                    )
+                })
+                .collect()
+        };
+        // `None` in the override list means "remove this from the child".
+        let removed = |c: &Command, var: &str| {
+            seen(c).iter().any(|(k, v)| k == var && v.is_none())
+        };
+
+        unsafe { std::env::set_var("OPENAI_API_KEY", "") };
+        let c = server.spawn_command("openai/gpt-5.6-luna");
+        assert!(removed(&c, "OPENAI_API_KEY"), "an empty key was passed through");
+
+        unsafe { std::env::set_var("OPENAI_API_KEY", "   ") };
+        let c = server.spawn_command("openai/gpt-5.6-luna");
+        assert!(removed(&c, "OPENAI_API_KEY"), "whitespace counted as a credential");
+
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-real") };
+        let c = server.spawn_command("openai/gpt-5.6-luna");
+        assert!(!removed(&c, "OPENAI_API_KEY"), "a real key was stripped");
+
+        // And a secret this tier never declared stays gone whatever its value.
+        unsafe { std::env::set_var("GH_TOKEN", "ghp-real") };
+        let c = server.spawn_command("openai/gpt-5.6-luna");
+        assert!(removed(&c, "GH_TOKEN"), "an undeclared secret leaked in");
+
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+        unsafe { std::env::remove_var("GH_TOKEN") };
+    }
 
     /// A per-model option reaches opencode's config where opencode looks for it.
     ///
@@ -439,6 +498,15 @@ mod tests {
     /// every spawned process inherited every token.
     #[test]
     fn an_agent_is_handed_only_the_credentials_its_tier_declares() {
+        // Every secret set to something, because "declared" is no longer enough
+        // on its own: an empty credential is stripped too, and this test used to
+        // assert that a *declared* one survives while never setting it. It
+        // passed only because the old rule never looked at the value.
+        let _held = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in SECRETS {
+            unsafe { std::env::set_var(var, "set-for-this-test") };
+        }
+
         // Copilot's tier: the PAT, and nothing from the providers.
         let mut copilot = Server::default();
         copilot.command_line("copilot --acp");
@@ -465,6 +533,10 @@ mod tests {
         }
         for kept in ["OPENCODE_API_KEY", "OLLAMA_API_KEY"] {
             assert!(!cleared.contains(&kept.to_string()), "{kept} was taken from opencode");
+        }
+
+        for var in SECRETS {
+            unsafe { std::env::remove_var(var) };
         }
     }
 
