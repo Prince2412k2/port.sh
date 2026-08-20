@@ -185,7 +185,7 @@ fn tool_list() -> String {
     format!(
         r#"{{"tools":[
         {{"name":"locate_place",
-          "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it. Use this rather than recalling coordinates yourself -- a wrong coordinate puts the map in the sea and nothing on screen says so. It knows settlements, not buildings or monuments: asked for the Taj Mahal it will return found:false, and the right move is to look up Agra instead and say that is what you are showing. On found:false with no city to fall back on, say you cannot place it rather than guessing.",
+          "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it. Use this rather than recalling coordinates yourself -- a wrong coordinate puts the map in the sea and nothing on screen says so. It knows settlements, not buildings or monuments: asked for the Taj Mahal, Ward's Lake or a waterfall it will return found:false. On found:false, do not give up -- search the web for that place's coordinates and pass them to show_map, saying the point came from a search rather than from the map data. Falling back to the town it is in is also fine if you say so.",
           "inputSchema":{{"type":"object","properties":{{
             "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}}
           }},"required":["name"]}}}},

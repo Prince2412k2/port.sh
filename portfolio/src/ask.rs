@@ -720,9 +720,17 @@ impl Ask {
                     // carries no tool name and Copilot leaves the title empty,
                     // so these arrived as `\u{2713} tool` -- three of them in a
                     // row, telling a visitor only that *something* happened.
-                    // Ours come in named, through the tool server; anything else
-                    // nameless is dropped rather than drawn as furniture.
                     if c.title.trim().is_empty() && c.detail.trim().is_empty() {
+                        return;
+                    }
+                    // And a row for a tool we serve is a *second* row for a call
+                    // we already describe better. The agent's version carries
+                    // the name it renamed ours to and no arguments; ours carries
+                    // what it was actually asked for. Eight lookups in a turn
+                    // came out as eight `portfolio-locate_place` beside eight
+                    // `locate_place  Ward's Lake` -- the same eight calls,
+                    // twice, once uselessly.
+                    if crate::gates::ours(&c.title) {
                         return;
                     }
                     if let Some(t) = self.turns.last_mut() {
@@ -1439,8 +1447,35 @@ fn transcript(
     }
     lines.push(vec![]);
 
-    for c in &t.calls {
-        let (glyph, colour) = match c.status {
+    // Grouped by tool, not one flat row per call. An answer that walks a
+    // visitor through eight places calls the same tool eight times, and eight
+    // rows repeating the same name is a wall with the interesting part -- which
+    // places -- hidden in the right-hand column. The name is said once and its
+    // arguments listed under it.
+    const NAME_COL: usize = 15;
+    let mut at = 0;
+    while at < t.calls.len() {
+        let title = t.calls[at].title.as_str();
+        let mut run = at;
+        while run < t.calls.len() && t.calls[run].title == title {
+            run += 1;
+        }
+        let group = &t.calls[at..run];
+        at = run;
+
+        // The worst status in the group leads it: one failure among eight
+        // successes is the thing worth seeing.
+        let status = group
+            .iter()
+            .map(|c| c.status)
+            .max_by_key(|s| match s {
+                Status::Running => 3,
+                Status::Refused => 2,
+                Status::Failed => 1,
+                Status::Done => 0,
+            })
+            .unwrap_or(Status::Done);
+        let (glyph, colour) = match status {
             Status::Running => (
                 ["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"][((a.t * 6.0) as usize) % 4],
                 lead,
@@ -1449,17 +1484,32 @@ fn transcript(
             Status::Failed => ("\u{00d7}", ACCENT),
             Status::Refused => ("\u{2300}", ACCENT),
         };
-        let label = if c.title.is_empty() { "tool" } else { c.title.as_str() };
-        let room = (w as usize).saturating_sub(label.chars().count() + 4);
-        let detail = ellipsis(&c.detail, room);
+        let label = if title.is_empty() { "tool" } else { title };
+        // A count only when there is one, and only when the arguments do not
+        // already say it: `locate_place x8` above eight named places is telling
+        // the reader something they can see.
+        let named: Vec<&Call> = group.iter().filter(|c| !c.detail.trim().is_empty()).collect();
+        let head = if named.is_empty() && group.len() > 1 {
+            format!("{label}  \u{00d7}{}", group.len())
+        } else {
+            label.to_string()
+        };
+        let room = (w as usize).saturating_sub(NAME_COL + 4);
+
+        let first = named.first().map(|c| ellipsis(&c.detail, room)).unwrap_or_default();
         lines.push(vec![
             Span::styled(format!("{glyph} "), Style::default().fg(colour)),
-            Span::styled(label.to_string(), Style::default().fg(DIM)),
-            Span::styled(
-                if detail.is_empty() { String::new() } else { format!("  {detail}") },
-                Style::default().fg(FAINT),
-            ),
+            Span::styled(format!("{head:<NAME_COL$}"), Style::default().fg(DIM)),
+            Span::styled(first, Style::default().fg(FAINT)),
         ]);
+        // The rest sit under the first, in the argument column, so the eye reads
+        // a list of places rather than a list of calls.
+        for c in named.iter().skip(1) {
+            lines.push(vec![
+                Span::raw(" ".repeat(NAME_COL + 2)),
+                Span::styled(ellipsis(&c.detail, room), Style::default().fg(FAINT)),
+            ]);
+        }
     }
     if !t.calls.is_empty() {
         lines.push(vec![]);
@@ -2780,6 +2830,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Eight lookups in one answer read as one block, not eight rows.
+    #[test]
+    fn calls_of_one_tool_are_grouped_under_its_name() {
+        let mut a = Ask::new();
+        let places = ["Ward's Lake", "Shillong Peak", "Elephant Falls", "Umiam Lake"];
+        let mut calls: Vec<Call> = places
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Call {
+                id: format!("c{i}"),
+                title: "locate_place".into(),
+                status: Status::Done,
+                detail: (*p).to_string(),
+            })
+            .collect();
+        calls.push(Call {
+            id: "s".into(),
+            title: "show_map".into(),
+            status: Status::Done,
+            detail: "Shillong  25.576, 91.883".into(),
+        });
+        a.turns.push(Turn { q: "tour me".into(), a: "Here.".into(), calls, done: true, ..Default::default() });
+        a.state = State::Ready;
+
+        let out = drawn(&a, 110, 30);
+        // The tool's name once, its arguments each on their own line.
+        assert_eq!(out.matches("locate_place").count(), 1, "the name repeated:\n{out}");
+        for p in places {
+            assert!(out.contains(p), "`{p}` is missing:\n{out}");
+        }
+        assert!(out.contains("show_map"), "the second tool vanished:\n{out}");
+    }
+
+    /// The agent's own row for a tool we serve is dropped: it is the same call,
+    /// with a renamed title and no arguments.
+    #[test]
+    fn a_tool_we_serve_is_reported_once() {
+        let mut a = Ask::new();
+        a.turns.push(Turn { q: "where".into(), ..Default::default() });
+        a.apply(Event::Tool(Call {
+            id: "acp".into(),
+            title: "portfolio-locate_place".into(),
+            status: Status::Running,
+            detail: String::new(),
+        }));
+        assert!(a.turns[0].calls.is_empty(), "the agent's duplicate was kept");
+
+        // Something the agent really does own still shows.
+        a.apply(Event::Tool(Call {
+            id: "w".into(),
+            title: "web_fetch".into(),
+            status: Status::Done,
+            detail: "https://example.com".into(),
+        }));
+        assert_eq!(a.turns[0].calls.len(), 1, "a real tool call was dropped");
     }
 
     /// A tool call is reported several times as it runs. Each report carries

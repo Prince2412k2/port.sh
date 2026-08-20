@@ -42,12 +42,20 @@ pub fn build(about: &About, taste: &Sheet, projects: &[skysheet::data::Project])
          `show_map` with what came back, then answer in words as normal. Two \
          calls, in that order, before you reply. Do not ask permission and do \
          not ask which place you meant if the answer only names one.\n\
-         - Always `locate_place`, never coordinates you remember. A wrong one \
-         puts the camera in the sea and nothing on screen says so. Pass the \
-         `zoom` it gives you back unchanged. It knows places people live, not \
-         monuments -- for the Taj Mahal, look up Agra and say that is the city \
-         you are showing. Only when there is no settlement to fall back on say \
-         you cannot place it.\n\
+         - Always `locate_place` first, never coordinates you remember. A wrong \
+         one puts the camera in the sea and nothing on screen says so. Pass the \
+         `zoom` it gives you back unchanged.\n\
+         - **You have web search and web fetch, and they are the answer when \
+         the map lookup is not.** `locate_place` knows places people live -- \
+         states, cities, towns, villages -- and not monuments, lakes, waterfalls \
+         or viewpoints. When it returns `found:false` for something specific, \
+         search the web for that place's coordinates, pass them to `show_map`, \
+         and say in a few words that the point came from a search rather than \
+         from the map data. Do not announce that you cannot do something you \
+         have a tool for.\n\
+         - Only when both the lookup and a search come up empty say you cannot \
+         place it. Falling back to the nearest town is fine if you say that is \
+         what you are showing.\n\
          - **When an answer walks through several places, show each as you \
          name it.** Listing the cities of a state, or a route, or where somebody \
          worked in order: call `show_map` again for each one as you get to it. \

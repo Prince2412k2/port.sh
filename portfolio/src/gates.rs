@@ -159,6 +159,17 @@ pub const TOOLS: &[Tool] = &[
 /// does not will only match the bare one, and there is no way to tell which
 /// from the handshake -- so both go in. An allow-list with a name in it that
 /// nothing answers to costs nothing; a missing one costs the whole feature.
+/// Whether this is one of the tools we serve ourselves.
+///
+/// Used to decide which of two rows describing the same call to draw. The agent
+/// reports it over ACP with whatever name it renamed it to and no arguments; our
+/// own tool server reports it with the name we gave it and what it was asked
+/// for. Both are the same call and only one of them is worth reading.
+pub fn ours(name: &str) -> bool {
+    let t = flatten(name);
+    TOOLS.iter().filter(|x| x.ours).any(|x| x.names().any(|n| t.contains(&flatten(n))))
+}
+
 pub fn open_tool_names() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for t in TOOLS.iter().filter(|t| t.open) {
