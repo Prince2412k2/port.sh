@@ -228,6 +228,58 @@ pub fn veil(f: &mut Frame, area: Rect, k: f32) {
     }
 }
 
+/// Dissolve a region into the page from the inside out.
+///
+/// The panel used to be a rectangle of map with a hard edge, which reads as a
+/// window cut into the page -- a frame, with the picture behind it. What is
+/// wanted is one surface: the map at full strength in the middle, thinning to
+/// nothing before it reaches any edge, so there is no line anywhere for the eye
+/// to catch on.
+///
+/// The boundary is deliberately not an ellipse. A perfect oval is as obviously
+/// a shape as a rectangle is; two low harmonics of the angle push it in and out
+/// by a few percent, which is enough to read as torn rather than cut. It is a
+/// pure function of position -- no clock -- so it does not shimmer, and a
+/// snapshot is the same picture every time.
+///
+/// `strength` scales the whole thing, so a panel arriving fades and feathers in
+/// one pass rather than being dimmed twice.
+pub fn feather(f: &mut Frame, area: Rect, strength: f32) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    // Where the falloff begins, as a fraction of the way out. Inside this the
+    // map is untouched; the remainder is the dissolve.
+    const CORE: f32 = 0.52;
+    let (cx, cy) = (area.width as f32 / 2.0, area.height as f32 / 2.0);
+    let buf = f.buffer_mut();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            // Half a cell in, so the middle of a cell is what is measured and
+            // the shape is symmetric about the centre of the rect rather than a
+            // corner of one.
+            let u = (x as f32 + 0.5 - cx) / cx;
+            let v = (y as f32 + 0.5 - cy) / cy;
+            let r = u.hypot(v);
+            let ang = v.atan2(u);
+            let wobble = 0.07 * (ang * 3.0).sin() + 0.05 * (ang * 5.0 + 1.7).cos();
+            let edge = 1.0 + wobble;
+            let a = if r <= CORE * edge {
+                1.0
+            } else if r >= edge {
+                0.0
+            } else {
+                let t = (r - CORE * edge) / (edge - CORE * edge);
+                1.0 - t * t * (3.0 - 2.0 * t)
+            };
+            let k = (a * strength).clamp(0.0, 1.0);
+            let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) else { continue };
+            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            cell.set_fg(fg).set_bg(bg);
+        }
+    }
+}
+
 /// Smootherstep, the easing used everywhere else in this project.
 pub fn ease(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
@@ -255,6 +307,90 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The panel has no edge to catch the eye on.
+    ///
+    /// The failure this pins is a rectangle of map sitting on the page like a
+    /// window cut into it. Filled solid and feathered, the middle must survive
+    /// untouched and every corner must be gone -- and the boundary must not be
+    /// the same distance out in every direction, or it is an ellipse, which is
+    /// as obviously a shape as the rectangle was.
+    #[test]
+    fn the_map_panel_dissolves_into_the_page_rather_than_ending() {
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+
+        let (w, h) = (46u16, 20u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let area = Rect { x: 0, y: 0, width: w, height: h };
+        let ink = Color::Rgb(220, 220, 220);
+        term.draw(|f| {
+            for y in 0..h {
+                for x in 0..w {
+                    if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
+                        c.set_char('#').set_fg(ink);
+                    }
+                }
+            }
+            feather(f, area, 1.0);
+        })
+        .unwrap();
+
+        let buf = term.backend().buffer().clone();
+        // Through the same converter the blend uses: a neutral grey comes back
+        // as a palette index rather than a triple, and reading only `Rgb` made
+        // the middle of a fully lit panel measure zero.
+        let bright = |x: u16, y: u16| -> u16 {
+            match buf.cell((x, y)).and_then(|c| termap::canvas::rgb_of(c.fg)) {
+                Some((r, g, b)) => r as u16 + g as u16 + b as u16,
+                None => 0,
+            }
+        };
+        let full = bright(w / 2, h / 2);
+        assert!(full > 600, "the middle was dimmed: {full}");
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            let corner = bright(x, y);
+            assert!(corner < 60, "a corner survived at {x},{y}: {corner} against {full}");
+        }
+
+        // Not an ellipse: the distance at which it gives out differs by
+        // direction. Measured along two rays from the centre.
+        let reach = |dx: i32, dy: i32| -> u16 {
+            let (mut n, mut x, mut y) = (0u16, w as i32 / 2, h as i32 / 2);
+            while x >= 0 && y >= 0 && x < w as i32 && y < h as i32 {
+                if bright(x as u16, y as u16) < 60 {
+                    break;
+                }
+                n += 1;
+                x += dx;
+                y += dy;
+            }
+            n
+        };
+        let (right, up) = (reach(1, 0), reach(0, -1));
+        assert!(right > 2 && up > 2, "it gave out immediately: {right}, {up}");
+
+        // And a strength of zero takes the whole thing, so the arrival fade and
+        // the falloff are one pass rather than two.
+        term.draw(|f| {
+            for y in 0..h {
+                for x in 0..w {
+                    if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
+                        c.set_char('#').set_fg(ink);
+                    }
+                }
+            }
+            feather(f, area, 0.0);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let mid = buf
+            .cell((w / 2, h / 2))
+            .and_then(|c| termap::canvas::rgb_of(c.fg))
+            .map_or(0u16, |(r, g, b)| r as u16 + g as u16 + b as u16);
+        assert!(mid < 60, "an invisible panel still drew: {mid}");
+    }
     use super::*;
 
     /// portraits.rs is written by a Python script, so nothing but this checks

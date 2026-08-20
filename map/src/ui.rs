@@ -375,9 +375,6 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono);
     app.frame_us = t0.elapsed().as_micros();
 
-    if let Some(sb) = sb {
-        draw_scalebar(f, area, &sb);
-    }
 }
 
 /// The things that sit on top of the map rather than in it: the tour's card,
@@ -387,6 +384,14 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
 /// place, and a picture of a place with somebody else's tour caption across it
 /// -- which is what it drew at first -- is a picture of nothing in particular.
 fn overlays(f: &mut Frame, area: Rect, app: &App) {
+    // The scalebar is an instrument, and instruments are chrome. It stayed in
+    // `map_view` on the grounds that scale belongs to the map -- true of a map
+    // you are driving, and wrong for a thumbnail that is trying to read as part
+    // of the page rather than as a window onto one. A ruled bar in the corner is
+    // the most frame-like thing on it.
+    if let Some(sb) = scalebar_geom(area, app) {
+        draw_scalebar(f, area, &sb);
+    }
     place_card(f, area, app);
     search_box(f, area, app);
     hint(f, area, app);

@@ -613,9 +613,9 @@ impl Shell {
                     // anywhere else has nothing but ours.
                     termap::ui::render_locator(f, at, &mut self.map, cam, pin.then_some(drop));
                     // Composited afterwards, like the section dissolve: the map
-                    // renderer knows nothing about this page's fade and should
-                    // not have to.
-                    paint::veil(f, at, fade);
+                    // renderer knows nothing about this page's fade, or about
+                    // having no edges, and should not have to.
+                    paint::feather(f, at, fade);
                 }
             }
             Section::Experience => termap::ui::render_map_only(f, body, &mut self.map),
