@@ -202,6 +202,18 @@ impl Locator {
         }
     }
 
+    /// A journey: set out from somewhere the agent named rather than from
+    /// wherever the camera happened to be.
+    ///
+    /// The span is the path's, not the arrival's fixed beat -- the point of
+    /// being given both ends is that the distance between them decides how long
+    /// watching it should take.
+    fn journey(from: (f64, f64), from_zoom: f64, to: (f64, f64), zoom: f64, sw: f64) -> Locator {
+        let path = Self::path(from, from_zoom, to, zoom, sw);
+        let span = path.duration();
+        Locator { to, to_zoom: zoom, path, t: 0.0, span, sw }
+    }
+
     fn flying(&self) -> bool {
         self.t < self.span
     }
@@ -469,11 +481,25 @@ impl Shell {
                     || (loc.to.1 - spot.lonlat.1).abs() > 1e-6
                     || (loc.to_zoom - spot.zoom).abs() > 1e-3;
                 if moved {
-                    loc.go(spot.lonlat, spot.zoom);
+                    // A stop that names its own start is flown from there even
+                    // when a camera is already up: the agent asked for a
+                    // journey, and starting it from wherever the last answer
+                    // left the map would be a different journey.
+                    match spot.from {
+                        Some((from, from_zoom)) => {
+                            *loc = Locator::journey(from, from_zoom, spot.lonlat, spot.zoom, sw)
+                        }
+                        None => loc.go(spot.lonlat, spot.zoom),
+                    }
                 }
             }
             (Some(spot), None) => {
-                self.locator = Some(Locator::arriving(spot.lonlat, spot.zoom, sw))
+                self.locator = Some(match spot.from {
+                    Some((from, from_zoom)) => {
+                        Locator::journey(from, from_zoom, spot.lonlat, spot.zoom, sw)
+                    }
+                    None => Locator::arriving(spot.lonlat, spot.zoom, sw),
+                })
             }
             // The panel has gone. Dropped rather than kept, so the next map
             // arrives where it was asked for instead of flying in from whatever
@@ -1083,6 +1109,70 @@ mod tests {
         s.tick(1.0);
         assert!(s.ask.panel.is_none(), "it never finished leaving");
         assert!(s.locator.is_none(), "the camera outlived the panel");
+    }
+
+    /// A stop that names its own start is flown from there.
+    ///
+    /// The journey is the answer to "how far is Kapadwanj from Ahmedabad" in a
+    /// way a still of the destination is not, so the camera has to set out from
+    /// the place the agent named rather than from wherever the last answer left
+    /// it -- otherwise it is a different journey that happens to end in the
+    /// right place.
+    #[test]
+    fn a_stop_with_a_start_is_flown_from_it() {
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "how far is kapadwanj from ahmedabad".into();
+        s.ask.submit();
+        let board = s.ask.board_token().expect("no board").to_string();
+
+        // Somewhere else entirely first, so "from wherever the camera was" and
+        // "from the named start" cannot be confused.
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":26.91,"lon":75.79,"label":"Jaipur"}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+        s.tick(4.0);
+
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":23.020,"lon":73.070,"label":"Kapadwanj",
+                            "note":"two hours out of the city",
+                            "from":{"lat":23.022,"lon":72.580,"zoom":10.0}}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+
+        // The first frame of the flight is at the start it was given -- not at
+        // Jaipur, where the camera was sitting.
+        let ((lon, lat), _, _, _) = s.locator.expect("no camera").now();
+        assert!((lon - 72.580).abs() < 0.05, "set out from lon {lon}, not the named start");
+        assert!((lat - 23.022).abs() < 0.05, "set out from lat {lat}, not the named start");
+        assert!(s.locator.unwrap().flying(), "a journey that was over before it began");
+
+        // And it ends where it was told to.
+        s.tick(6.0);
+        let ((lon, lat), _, _, pin) = s.locator.unwrap().now();
+        assert!((lon - 73.070).abs() < 1e-6 && (lat - 23.020).abs() < 1e-6, "{lon},{lat}");
+        assert_eq!(pin, 1.0, "the pin never landed");
+
+        // Without a start it still flies from wherever it is, which is the
+        // ordinary case and must not have changed.
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":22.300,"lon":73.200,"label":"Vadodara"}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+        let ((lon, _), _, _, _) = s.locator.unwrap().now();
+        assert!((lon - 73.070).abs() < 0.2, "it did not set out from where it had landed: {lon}");
     }
 
     /// A route: several places in one call, walked with ctrl-n and ctrl-b.

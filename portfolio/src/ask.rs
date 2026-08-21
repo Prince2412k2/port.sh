@@ -146,6 +146,9 @@ pub struct Spot {
     pub note: String,
     pub lonlat: (f64, f64),
     pub zoom: f64,
+    /// Where to set out from, as ((lon, lat), zoom), when the agent asked for a
+    /// journey rather than a destination.
+    pub from: Option<((f64, f64), f64)>,
 }
 
 /// What this file knows about the world, so a question can be turned into a
@@ -185,6 +188,8 @@ fn spot_of(p: &termap::place::Place) -> Spot {
         name: p.name.clone(),
         note,
         lonlat: p.lonlat,
+        // The sheet describes places, not journeys.
+        from: None,
         // A little further out than the tour lands: the tour arrives at a
         // building and this is answering "where is that", which is a question
         // about a neighbourhood.
@@ -315,6 +320,7 @@ pub fn spot_for(q: &str, atlas: &Atlas) -> Option<Spot> {
             name: w.label(),
             note: "as near as an address can place you".into(),
             lonlat,
+            from: None,
             // A city and the country around it: the lookup is accurate to
             // about that, and a street view of a guess is a lie about it.
             zoom: 9.5,
@@ -684,6 +690,7 @@ impl Ask {
                         note: s.note,
                         lonlat: (s.lon, s.lat),
                         zoom: s.zoom,
+                        from: s.from.map(|(lat, lon, zoom)| ((lon, lat), zoom)),
                     })
                     .collect();
                 if stops.is_empty() {

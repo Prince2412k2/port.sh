@@ -82,6 +82,14 @@ pub struct Stop {
     pub lat: f64,
     pub lon: f64,
     pub zoom: f64,
+    /// Where the camera should set out from, as (lat, lon, zoom).
+    ///
+    /// Without it a stop is somewhere to be and the camera gets there from
+    /// wherever it was. With it the stop is the *end of a journey*, and the
+    /// flight is the answer: how far Kapadwanj is from Ahmedabad, which way
+    /// somebody moved, the first leg of a route. The path between two points is
+    /// a thing you can watch, and a still of the destination is not.
+    pub from: Option<(f64, f64, f64)>,
     pub label: String,
     /// A sentence about the place, shown under its name. This is what makes the
     /// map worth having: a pin says where, and the line under it says why the
@@ -298,6 +306,9 @@ fn tool_list() -> String {
             "zoom":{{"type":"number","description":"How close to look, 3 to 16.5. Yours to choose, and worth choosing: 5 a region, 7 a state, 10 a city and its surroundings, 12 a neighbourhood, 14 a few streets, 16 a single corner. `locate_place` suggests one that frames what it found -- pass it back for a place somebody named, and pick your own when the answer is about something smaller than the thing you looked up. A cafe shown at city zoom is a dot in a smudge."}},
             "label":{{"type":"string","description":"The place's name, written under the map."}},
             "note":{{"type":"string","description":"One sentence on why this place matters to the answer. Shown under the name. This is what makes the map worth looking at -- a pin says where, this says why you mentioned it."}},
+            "from":{{"type":"object","description":"Where to fly *from*, as {{lat, lon}} and optionally zoom. Use it when the journey is the answer rather than the destination: how far one place is from another, which way somebody moved, the first leg of a route. The camera travels the path between the two and the visitor watches it go; leave it out and the map simply arrives at the place. Do not use it to show a single place -- an unnecessary journey is a long wait for a pin.","properties":{{
+              "lat":{{"type":"number"}},"lon":{{"type":"number"}},"zoom":{{"type":"number"}}
+            }},"required":["lat","lon"]}},
             "places":{{"type":"array","description":"Several places at once, each {{lat, lon, label, note, zoom}}. Use this instead of lat/lon when the answer walks through more than one -- the visitor can step between them, and they stay together as one route rather than arriving as unrelated calls.","items":{{"type":"object","properties":{{
               "lat":{{"type":"number"}},"lon":{{"type":"number"}},
               "zoom":{{"type":"number"}},
@@ -386,9 +397,21 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
                     continue;
                 }
+                // `from` is optional and its zoom more so: the flight's own
+                // derivation decides how high to climb between two points, so a
+                // caller that has not thought about it gets the right arc by
+                // saying nothing.
+                let start = one.get("from").and_then(|f| {
+                    let n = |k: &str| f.get(k).and_then(|v| v.as_f64());
+                    let (lat, lon) = (n("lat")?, n("lon")?);
+                    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then(|| {
+                        (lat, lon, n("zoom").unwrap_or(num("zoom").unwrap_or(11.5)).clamp(3.0, 16.5))
+                    })
+                });
                 stops.push(Stop {
                     lat,
                     lon,
+                    from: start,
                     // The agent's to choose, within what the archive can draw.
                     // It was clamped to a narrow band because the panel was 46
                     // columns and street zoom in that space was four roads and
@@ -445,6 +468,13 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
     let num_of = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_f64());
     match name {
         "locate_place" => str_of("name").to_string(),
+        "show_map" if args.and_then(|a| a.get("from")).is_some() => {
+            let label = str_of("label");
+            match label.is_empty() {
+                true => "a journey".to_string(),
+                false => format!("to {label}"),
+            }
+        }
         "show_map" => {
             if let Some(list) = args.and_then(|a| a.get("places")).and_then(|p| p.as_array()) {
                 let names: Vec<&str> = list
