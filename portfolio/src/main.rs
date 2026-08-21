@@ -65,6 +65,8 @@ fn main() -> io::Result<()> {
                 println!("  --plain          snapshot without colour");
                 println!("  --at SECONDS     how far into the section's animation to draw");
                 println!("  --probe          check which agent tier is answering, and exit");
+                println!("  --tools          serve our tools and print what an agent calls, and");
+                println!("                   exit on ctrl-c. For pointing an agent at by hand");
                 println!();
                 println!("  --serve                  run the SSH server instead of a local terminal");
                 println!("  --ssh-addr ADDR          bind address for --serve (default 0.0.0.0)");
@@ -147,6 +149,46 @@ fn main() -> io::Result<()> {
                 match health::note() {
                     Some(t) => println!("using: {t}"),
                     None => println!("using: nothing -- no tier answered"),
+                }
+                return Ok(());
+            }
+            "--tools" => {
+                // The tool server, with a screen that prints instead of
+                // drawing. This exists because "the agent can reach our tools"
+                // and "our tools work for that agent" are different claims, and
+                // the second one used to be checked by opening the section in a
+                // terminal and looking -- which is how a malformed `session/new`
+                // reached production once already.
+                //
+                // Point an agent at the URL this prints and every call it makes
+                // arrives here, named, with what it asked for.
+                mcp::warm_index();
+                mcp::serve();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let board = mcp::register(tx, None);
+                match mcp::url_for(&board) {
+                    None => {
+                        eprintln!("portfolio: the tool server did not start");
+                        return Ok(());
+                    }
+                    Some(url) => println!("{url}"),
+                }
+                println!("waiting for calls; ctrl-c to stop");
+                while let Ok(d) = rx.recv() {
+                    match d {
+                        mcp::Directive::Called { tool, detail } => {
+                            println!("  called  {tool}  {detail}")
+                        }
+                        mcp::Directive::Map { stops } => {
+                            for s in stops {
+                                println!(
+                                    "  map     {:.4},{:.4} z{:.1}  {}  {}",
+                                    s.lat, s.lon, s.zoom, s.label, s.note
+                                );
+                            }
+                        }
+                        mcp::Directive::Clear => println!("  map     cleared"),
+                    }
                 }
                 return Ok(());
             }
