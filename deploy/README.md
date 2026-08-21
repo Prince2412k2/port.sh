@@ -227,6 +227,48 @@ The unpacking happens once per volume, not per restart. The very first run pays
 for it, so a probe against a freshly created volume can time out and report the
 tier down; the next one will not.
 
+**Our own agent is the first tier.** `envoy`, from `ai-sdk/` in this
+repository: it speaks the same ACP over stdio as the others, and the turn loop,
+the tool calls and the compaction are all code somebody here can fix. It is
+built into the image by its own `cargo build` -- a separate workspace, so a
+broken experiment in there cannot stop the portfolio compiling.
+
+Two things about it are unlike the other tiers, and both are lines in
+`models.txt`:
+
+- `pin flag --model` -- it takes the model as a flag and refuses to start when
+  no tier in its own catalogue matches, which is a loud failure rather than a
+  quiet fall back to something else.
+- `tools env ENVOY_MCP_HTTP` -- it does not advertise `mcpCapabilities.http`, so
+  it cannot be handed our tool server in `session/new` the way opencode and
+  Copilot are. It reads the address out of that variable instead. **Without that
+  line the map and web tools do not exist on this tier and nothing says so** --
+  the agent simply never mentions a map.
+
+Its model catalogue is `ai-sdk/envoy.json`, mounted at `/app/data/envoy.json`
+and pointed at by `ENVOY_CONFIG`. That file is the only place endpoints, context
+windows and credentials live; `models.txt` says which tiers to try and in what
+order. Two catalogues that can disagree about which models exist would be worse
+than one in a second file.
+
+Its credential is the **opencode login already on the volume** -- the catalogue
+names it `$XDG_DATA_HOME/opencode/auth.json`, which resolves to
+`/app/agent/opencode/auth.json` here and to `~/.local/share/opencode/auth.json`
+on a laptop. So `opencode auth login` (pick openai) is the one step, and it
+serves both this tier and the one below it. Nothing needs to go in `.env`, and
+the tier declares `secrets none`: a key it does not use is a key it should not
+see.
+
+To check it end to end rather than by reading:
+
+```bash
+portfolio --probe                 # says which tier is answering, and via what
+portfolio --tools                 # prints a tool server URL and names every call
+```
+
+`--tools` is the one that answers "can that agent actually use them". Point an
+agent at the URL it prints; every call arrives named, with its arguments.
+
 **Keys for the other tiers.** Everything below Copilot is reached through
 opencode, which takes credentials two ways — an environment variable, or its own
 login. Either is enough.

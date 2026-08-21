@@ -52,6 +52,11 @@ services:
       # The agent's model list. Mounted so the order can change, or a model
       # that has stopped being free can go, without a rebuild.
       - ./portfolio/data/models.txt:/app/data/models.txt:ro
+      # Our own agent's model catalogue -- endpoints, context windows and which
+      # credential each of its tiers uses. Mounted for the same reason, and
+      # deliberately the only place those live: models.txt says which tiers to
+      # try and in what order, this says what a model actually is.
+      - ./ai-sdk/envoy.json:/app/data/envoy.json:ro
 
       # Where `/reach` appends. The only thing the process writes that anyone
       # wants to keep, and the only writable path outside the tmpfs below.
@@ -169,6 +174,7 @@ services:
       - ./portfolio/data/taste.txt:/app/data/taste.txt:ro
       - ./map/data/places.txt:/app/data/places.txt:ro
       - ./portfolio/data/models.txt:/app/data/models.txt:ro
+      - ./ai-sdk/envoy.json:/app/data/envoy.json:ro
       # The same volumes as the ssh service: it should not matter which way in
       # somebody came to leave a message, and the agent logs in once.
       - messages:/app/messages

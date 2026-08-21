@@ -13,7 +13,10 @@ size. This does both transports.
 
 Arguments after the port are sent one at a time, with a pause between, and the
 bytes that came back are searched for a marker per section. `x` skips the
-opening.
+opening. An argument is written to the far end verbatim, so a whole question is
+one argument and `$'\r'` is Enter -- which is how the ask section gets driven.
+`@20` waits twenty seconds instead of sending anything, for an answer that takes
+longer than the pause between keys.
 
 Caution, learned the hard way: do not test by scraping for a phrase and
 concluding a key is broken when it is absent. crossterm sends only the cells
@@ -84,6 +87,9 @@ def over_ssh(port, keys):
                 except OSError: return
     pump(3.0)
     for k in keys:
+        if k.startswith("@"):
+            pump(float(k[1:]))
+            continue
         os.write(fd, k.encode())
         pump(5.0)
     report(bytes(buf))
@@ -109,6 +115,9 @@ def over_web(port, keys):
             await ws.send("r180x46")
             await drain(3.0)
             for k in keys:
+                if k.startswith("@"):
+                    await drain(float(k[1:]))
+                    continue
                 await ws.send(k.encode())
                 await drain(5.0)
             report(bytes(buf))

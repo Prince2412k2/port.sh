@@ -19,6 +19,11 @@ WORKDIR /src
 COPY . .
 # Only the one binary; map and skills build as libraries under it.
 RUN cargo build --release -p portfolio
+# The agent, from its own workspace. Separate on purpose -- see ai-sdk/Cargo.toml
+# -- so a broken experiment in there cannot stop the portfolio compiling, and
+# two lockfiles are not held hostage to each other. Two invocations rather than
+# one for exactly that reason.
+RUN cargo build --release --manifest-path ai-sdk/Cargo.toml -p envoy
 
 FROM debian:bookworm-slim
 
@@ -64,6 +69,11 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin portfolio \
 
 WORKDIR /app
 COPY --from=build /src/target/release/portfolio /usr/local/bin/portfolio
+# `envoy`, the first tier in models.txt. `ENVOY_CONFIG` below says where its
+# model catalogue is; without it, it looks for ./envoy.json and the tier is
+# skipped with a line on stderr rather than taking the section down.
+COPY --from=build /src/ai-sdk/target/release/envoy /usr/local/bin/envoy
+COPY ai-sdk/envoy.json /app/data/envoy.json
 COPY portfolio/data/ /app/data/
 COPY map/data/places.txt /app/data/places.txt
 RUN chown -R portfolio:portfolio /app
@@ -118,6 +128,13 @@ ENV XDG_DATA_HOME=/app/agent
 # taught us. So it is pointed at the volume instead. Supersedes `--config-dir`,
 # which is deprecated.
 ENV COPILOT_HOME=/app/agent/copilot
+
+# Where `envoy` finds its model catalogue. Mounted from `ai-sdk/envoy.json`, so
+# a tier can be reordered or an endpoint corrected without a rebuild -- the same
+# arrangement as models.txt. Its credential is the opencode login on the volume
+# above: the catalogue names it as `$XDG_DATA_HOME/opencode/auth.json`, which is
+# one path that resolves both here and on a laptop.
+ENV ENVOY_CONFIG=/app/data/envoy.json
 
 # The image is both services. ENTRYPOINT is the binary alone and the flags
 # come from `command:` in docker-compose.yml, so the ssh and web containers
