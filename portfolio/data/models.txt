@@ -57,6 +57,38 @@
 # into the server as well; for everything else the client-side gate is the only
 # enforcement, which is what it was always for.
 
+tier  envoy luna
+  # Our own agent, `ai-sdk/`. First because it is ours: the turn loop, the tool
+  # calls and the compaction are all in this repository, so a bug in any of them
+  # is a bug somebody here can fix rather than wait on.
+  #
+  # It speaks real ACP over stdio like every other server in this file. Two
+  # things are different and both are lines below:
+  #
+  #   `pin flag --model` -- it takes the model as a flag, and refuses to start
+  #   if no tier in its own catalogue matches, which is a loud failure rather
+  #   than a quiet fallback to something else.
+  #
+  #   `tools env ENVOY_MCP_HTTP` -- it does not advertise
+  #   `mcpCapabilities.http`, so it cannot be handed our tool server in
+  #   `session/new`. It reads the address from that variable instead. Without
+  #   this line the map tools do not exist on this tier and nothing says so.
+  #
+  # Its model catalogue is its own -- endpoints, context windows and which
+  # credential each tier uses live in `envoy.json`, mounted beside this file.
+  # Deliberately not duplicated here: two catalogues that can disagree about
+  # which models exist is worse than one in a second file.
+  #
+  # Its credential is the same opencode OAuth login the tier below uses. It
+  # reads `auth.json` directly rather than going through opencode.
+  command  envoy
+  pin      flag --model
+  tools    env ENVOY_MCP_HTTP
+  # It reads the login from the volume, not from the environment. Nothing here
+  # needs a key, and a key it does not use is a key it should not see.
+  secrets  none
+  model  gpt-5.6-luna
+
 tier  openai luna
   # First because it is the one chosen on purpose. `openai/gpt-5.6-luna` is in
   # the registry opencode reads -- checked with `opencode models` in the

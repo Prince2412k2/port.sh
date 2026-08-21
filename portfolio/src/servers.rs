@@ -102,6 +102,19 @@ pub struct Server {
     /// server and changes faster than this file does -- the keys were read off
     /// the shipped binary, not guessed.
     pub options: Vec<(String, String)>,
+    /// The variable a server reads *our* tool server's address from.
+    ///
+    /// ACP's only route for handing an agent a tool is an MCP server named in
+    /// `session/new`, and an agent that does not advertise
+    /// `mcpCapabilities.http` cannot be given one that way. Some can be told
+    /// where it is by other means -- `envoy` takes `ENVOY_MCP_HTTP` -- and that
+    /// is strictly better than the alternative, which is the map tools silently
+    /// not existing on that tier.
+    ///
+    /// The address is per session: it carries the token that says whose screen
+    /// this is, so it cannot live in a config file and cannot be shared between
+    /// two visitors.
+    pub tools_env: Option<String>,
     /// A flag that takes the gates' allow-list of tool names, comma separated --
     /// Copilot's `--available-tools`, for instance.
     ///
@@ -121,6 +134,9 @@ impl Default for Server {
             pin: Pin::OpencodeConfig,
             // opencode's policy travels in its config document instead.
             tool_flag: None,
+            // opencode takes an MCP server in `session/new`, which is the
+            // protocol's own way and needs nothing here.
+            tools_env: None,
             // opencode fronts the provider tiers, so it gets the provider keys
             // and not the GitHub PAT.
             secrets: ["OPENCODE_API_KEY", "OLLAMA_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
@@ -162,15 +178,35 @@ impl Server {
         self.secrets = line.split_whitespace().map(|s| s.to_string()).collect();
     }
 
-    /// Parse a `tools` line: the flag that carries the allow-list, or `none`.
+    /// Parse a `tools` line: how this server learns what it may call, and where
+    /// our own tool server is.
+    ///
+    /// `flag` and `env` are different things and both are called `tools` because
+    /// from `models.txt`'s side they are the same question -- "how do the tools
+    /// reach this server". One is a list of names it is allowed to use, the
+    /// other is an address to fetch ours from.
     pub fn tools_line(&mut self, line: &str) {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let rest = rest.trim();
         match word {
             "flag" if !rest.is_empty() => self.tool_flag = Some(rest.to_string()),
-            "none" => self.tool_flag = None,
+            "env" if !rest.is_empty() => self.tools_env = Some(rest.to_string()),
+            "none" => {
+                self.tool_flag = None;
+                self.tools_env = None;
+            }
             _ => {}
         }
+    }
+
+    /// Whether this server is handed our tool server outside `session/new`.
+    ///
+    /// Asked by `acp.rs` for two decisions: whether to name the server in
+    /// `session/new` at all, and whether the agent has our tools -- which is
+    /// what stops the keyword guess from drawing a map the agent never asked
+    /// for.
+    pub fn tools_by_env(&self) -> bool {
+        self.tools_env.is_some()
     }
 
     /// Parse a `pin` line.
@@ -233,7 +269,7 @@ impl Server {
 
     /// A command ready to spawn, with the model pinned however this server
     /// wants it and stdio wired for JSON-RPC.
-    pub fn spawn_command(&self, model: &str) -> Command {
+    pub fn spawn_command(&self, model: &str, tools: Option<&str>) -> Command {
         let mut c = Command::new(&self.command);
         c.args(&self.args);
         // Least privilege by subtraction. Everything else about the environment
@@ -267,6 +303,19 @@ impl Server {
             }
             c.arg(flag).arg(list);
         }
+        // Our tool server, for a server that takes it this way. Nothing is set
+        // when there is no session to draw on -- the hourly health check has no
+        // screen -- and an empty variable would be worse than an absent one for
+        // the same reason it is for a credential.
+        match (&self.tools_env, tools) {
+            (Some(var), Some(url)) => {
+                c.env(var, format!("{}={url}", crate::mcp::SERVER_NAME));
+            }
+            (Some(var), None) => {
+                c.env_remove(var);
+            }
+            (None, _) => {}
+        }
         match &self.pin {
             Pin::OpencodeConfig => {
                 c.env("OPENCODE_CONFIG_CONTENT", self.opencode_config(model));
@@ -295,6 +344,59 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+
+    /// A server told where our tool server is gets the address, with the name
+    /// the tools are namespaced under -- and gets nothing at all when there is
+    /// no screen to draw on, rather than an empty variable.
+    #[test]
+    fn a_server_that_takes_our_tools_in_its_environment_is_told_where_they_are() {
+        use super::*;
+        let mut server = Server::default();
+        server.command_line("envoy");
+        server.tools_line("env ENVOY_MCP_HTTP");
+        assert!(server.tools_by_env());
+
+        let set = |c: &Command, var: &str| -> Option<String> {
+            c.get_envs().find(|(k, _)| *k == var).and_then(|(_, v)| {
+                v.map(|v| v.to_string_lossy().to_string())
+            })
+        };
+        let removed = |c: &Command, var: &str| {
+            c.get_envs().any(|(k, v)| k == var && v.is_none())
+        };
+
+        let c = server.spawn_command("gpt-5.6-luna", Some("http://127.0.0.1:9/mcp/tok"));
+        assert_eq!(
+            set(&c, "ENVOY_MCP_HTTP").as_deref(),
+            Some("portfolio=http://127.0.0.1:9/mcp/tok"),
+            "the address did not reach the agent, or lost the server name it \
+             namespaces our tools under"
+        );
+
+        // No screen: the check has none, and neither does a session whose page
+        // has gone. An empty variable would configure a server at no address.
+        let c = server.spawn_command("gpt-5.6-luna", None);
+        assert!(removed(&c, "ENVOY_MCP_HTTP"), "an empty tool address was passed");
+
+        // A server that does not take them this way is never given the variable
+        // whatever we know.
+        let plain = Server::default();
+        let c = plain.spawn_command("openai/gpt", Some("http://127.0.0.1:9/mcp/tok"));
+        assert!(set(&c, "ENVOY_MCP_HTTP").is_none() && !removed(&c, "ENVOY_MCP_HTTP"));
+    }
+
+    /// `tools none` means neither route, not just the flag.
+    #[test]
+    fn tools_none_clears_both_routes() {
+        use super::*;
+        let mut server = Server::default();
+        server.tools_line("flag --available-tools");
+        server.tools_line("env ENVOY_MCP_HTTP");
+        assert!(server.tool_flag.is_some() && server.tools_by_env());
+        server.tools_line("none");
+        assert!(server.tool_flag.is_none(), "the flag survived `tools none`");
+        assert!(!server.tools_by_env(), "the address survived `tools none`");
+    }
 
     /// An empty credential is stripped, not passed on.
     ///
@@ -325,20 +427,20 @@ mod tests {
         };
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "") };
-        let c = server.spawn_command("openai/gpt-5.6-luna");
+        let c = server.spawn_command("openai/gpt-5.6-luna", None);
         assert!(removed(&c, "OPENAI_API_KEY"), "an empty key was passed through");
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "   ") };
-        let c = server.spawn_command("openai/gpt-5.6-luna");
+        let c = server.spawn_command("openai/gpt-5.6-luna", None);
         assert!(removed(&c, "OPENAI_API_KEY"), "whitespace counted as a credential");
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-real") };
-        let c = server.spawn_command("openai/gpt-5.6-luna");
+        let c = server.spawn_command("openai/gpt-5.6-luna", None);
         assert!(!removed(&c, "OPENAI_API_KEY"), "a real key was stripped");
 
         // And a secret this tier never declared stays gone whatever its value.
         unsafe { std::env::set_var("GH_TOKEN", "ghp-real") };
-        let c = server.spawn_command("openai/gpt-5.6-luna");
+        let c = server.spawn_command("openai/gpt-5.6-luna", None);
         assert!(removed(&c, "GH_TOKEN"), "an undeclared secret leaked in");
 
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -470,7 +572,7 @@ mod tests {
         let mut s = Server::default();
         s.command_line("claude-code-acp --stdio");
         s.pin_line("flag --model");
-        let c = s.spawn_command("sonnet");
+        let c = s.spawn_command("sonnet", None);
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert_eq!(args, ["--stdio", "--model", "sonnet"]);
     }
@@ -483,7 +585,7 @@ mod tests {
         s.command_line("copilot --acp");
         s.pin_line("flag --model");
         s.tools_line("flag --available-tools");
-        let c = s.spawn_command("auto");
+        let c = s.spawn_command("auto", None);
         let args: Vec<String> =
             c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
 
@@ -525,7 +627,7 @@ mod tests {
                 .map(|(k, _)| k.to_string_lossy().to_string())
                 .collect()
         };
-        let cleared = removed(&copilot.spawn_command("auto"));
+        let cleared = removed(&copilot.spawn_command("auto", None));
         for gone in ["OLLAMA_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
             assert!(cleared.contains(&gone.to_string()), "{gone} still reaches copilot: {cleared:?}");
         }
@@ -535,7 +637,7 @@ mod tests {
 
         // And the other way: opencode fronts the providers and has no business
         // holding a GitHub PAT.
-        let cleared = removed(&Server::default().spawn_command("a/b"));
+        let cleared = removed(&Server::default().spawn_command("a/b", None));
         for gone in ["GH_TOKEN", "GITHUB_TOKEN"] {
             assert!(cleared.contains(&gone.to_string()), "{gone} still reaches opencode: {cleared:?}");
         }
@@ -554,7 +656,7 @@ mod tests {
         let mut s = Server::default();
         s.secrets_line("none");
         assert!(s.secrets.is_empty());
-        let c = s.spawn_command("a/b");
+        let c = s.spawn_command("a/b", None);
         let cleared: Vec<String> = c
             .get_envs()
             .filter(|(_, v)| v.is_none())
@@ -568,7 +670,7 @@ mod tests {
     #[test]
     fn a_server_without_a_tool_flag_passes_none() {
         let s = Server::default();
-        let c = s.spawn_command("a/b");
+        let c = s.spawn_command("a/b", None);
         let args: Vec<String> =
             c.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert!(!args.iter().any(|a| a.starts_with("--available")), "{args:?}");
@@ -579,7 +681,7 @@ mod tests {
         let mut s = Server::default();
         s.command_line("some-acp-server");
         s.pin_line("env ACP_MODEL");
-        let c = s.spawn_command("a/b");
+        let c = s.spawn_command("a/b", None);
         let env: Vec<_> = c
             .get_envs()
             .map(|(k, v)| {

@@ -468,7 +468,11 @@ fn attempt(
     tx: &Sender<Event>,
     state: &mut Session,
 ) -> Outcome {
-    let mut child = match shot.server.spawn_command(&shot.model).spawn() {
+    // Our tool server for this session, if there is a screen to draw on. Needed
+    // before the spawn because some servers are told where it is in their
+    // environment rather than in `session/new`.
+    let ours = state.board.as_deref().and_then(crate::mcp::url_for);
+    let mut child = match shot.server.spawn_command(&shot.model, ours.as_deref()).spawn() {
         Ok(c) => c,
         Err(e) => {
             return Outcome::Broken(format!(
@@ -544,17 +548,38 @@ fn converse(
     //    which is graceful and tells nobody anything.
     // The tool server, if this agent can reach one and this session has a
     // screen registered to draw on.
-    let tools = match hello.as_ref().is_some_and(takes_http_tools) {
-        true => state.board.as_deref().and_then(crate::mcp::url_for),
-        false => None,
+    // Two routes, and a server takes one of them. `session/new` is the
+    // protocol's own and needs the agent to advertise `mcpCapabilities.http`;
+    // the environment is for an agent that does not, and was already handed the
+    // address at spawn -- see `attempt`.
+    let ours = state.board.as_deref().and_then(crate::mcp::url_for);
+    let by_env = shot.server.tools_by_env();
+    let tools = match (by_env, hello.as_ref().is_some_and(takes_http_tools)) {
+        (true, _) => None,
+        (false, true) => ours.clone(),
+        (false, false) => None,
     };
-    match (&tools, hello.as_ref().is_some_and(takes_http_tools)) {
-        (Some(_), _) => eprintln!("portfolio: offering our tools to `{}`", shot.server.label()),
-        (None, true) => {}
-        (None, false) => eprintln!(
+    // Whether the agent has our tools at all, which is a different question
+    // from which route they took. `ask.rs` reads it to switch off the keyword
+    // guess, so getting it wrong here is a map that appears unasked for.
+    let handed = match by_env {
+        true => ours.clone(),
+        false => tools.clone(),
+    };
+    match (&handed, by_env, hello.as_ref().is_some_and(takes_http_tools)) {
+        (Some(_), true, _) => eprintln!(
+            "portfolio: `{}` was handed our tools in its environment",
+            shot.server.label()
+        ),
+        (Some(_), false, _) => {
+            eprintln!("portfolio: offering our tools to `{}`", shot.server.label())
+        }
+        (None, _, true) => {}
+        (None, false, false) => eprintln!(
             "portfolio: `{}` takes no http mcp server, so it gets no tools",
             shot.server.label()
         ),
+        (None, true, _) => {}
     }
 
     let methods = hello.as_ref().map(auth_methods).unwrap_or_default();
@@ -567,9 +592,12 @@ fn converse(
     // while every real session died. It also sent the diagnosis somewhere
     // useless -- the next thing tried was `authenticate`, and `Invalid params`
     // is emphatically not an authentication problem.
-    let mut offered = tools.clone();
+    let mut offered = handed.clone();
     if let Err(why) = &opened {
-        if offered.is_some() {
+        // Only the `session/new` route can be retried without them. Tools that
+        // travelled in the environment were configured before the process
+        // started, so there is nothing to take back out of the request.
+        if tools.is_some() {
             eprintln!(
                 "portfolio: `{}` refused a session with our tools attached ({why}); \
                  retrying without them -- the agent answers, the map does not",
@@ -1525,8 +1553,45 @@ mod tests {
     /// anything else is concluded, and the visitor gets an agent that answers in
     /// words rather than a section that reports every model as down.
     #[test]
-    fn tools_the_agent_will_not_take_do_not_cost_us_the_session() {
+fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
+        let mut server = crate::servers::Server::default();
+        // The peer refuses any `session/new` that names an MCP server. So this
+        // one test proves both halves: the session opening at all says our
+        // server was *not* named in the request, and `tools` being true says it
+        // was handed over anyway -- which is what switches the keyword guess
+        // off. Get either wrong and this fails.
+        server.command_line(&format!("python3 {script} --refuse-mcp"));
+        server.tools_line("env FAKE_MCP_HTTP");
+
+        let shot = Shot { tier: "fake".into(), server, model: "fake/one".into() };
+        let (tx_in, rx_in) = channel::<In>();
+        let (tx_out, rx_out) = channel::<Event>();
+        tx_in.send(In::Prompt("hello".into())).unwrap();
+
+        let (dtx, _drx) = std::sync::mpsc::channel();
+        crate::mcp::serve();
+        let board = crate::mcp::register(dtx, None);
+        let mut state = Session::new("context".into(), Some(board.clone()));
+        let _ = attempt(0, &shot, &rx_in, &tx_in, &tx_out, &mut state);
+        drop(tx_out);
+        let events: Vec<Event> = rx_out.iter().collect();
+        crate::mcp::forget(&board);
+
+        let ready = events.iter().find_map(|e| match e {
+            Event::Ready(r) => Some(r),
+            _ => None,
+        });
+        let ready = ready.expect(&format!("no session opened at all: {events:?}"));
+        assert!(
+            ready.tools,
+            "the agent was handed our tools and reported as having none, so the \
+             keyword guess stays on and draws maps nobody asked for"
+        );
+    }
+
+    #[test]
+    fn tools_the_agent_will_not_take_do_not_cost_us_the_session() {        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
         let mut server = crate::servers::Server::default();
         // The peer rejects any `session/new` that names an MCP server, which is
         // exactly what the real agents did. As an argument rather than an

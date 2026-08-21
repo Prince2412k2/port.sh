@@ -240,7 +240,14 @@ fn reap(mut c: Child) {
 /// Ask one model one word, through the server its tier names. True if it
 /// answered at all.
 fn ask_one_word(server: &Server, model: &str) -> bool {
-    let Ok(mut child) = server.spawn_command(model).spawn() else {
+    // The same tool server a real session is handed, for a server that takes it
+    // in the environment rather than in `session/new`. Same principle as the
+    // `mcpServers` block below: a probe that negotiates differently from the
+    // thing it is probing is not a probe of it. The token names no registered
+    // page, so a call would be refused -- what is being checked is whether the
+    // agent starts and answers with our server configured.
+    let ours = crate::mcp::url_for("health-check-no-page");
+    let Ok(mut child) = server.spawn_command(model, ours.as_deref()).spawn() else {
         return false;
     };
 
