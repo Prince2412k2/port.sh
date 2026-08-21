@@ -65,15 +65,21 @@ pub struct Camera {
     pub tilt: f64,
     /// Convergence strength. Zero is a parallel projection.
     pub persp: f64,
+    /// Radians clockwise from north-up.
+    pub bearing: f64,
 }
 
 pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin: Option<f32>) {
-    let Camera { lonlat, zoom, tilt, persp } = cam;
+    let Camera { lonlat, zoom, tilt, persp, bearing } = cam;
     if area.width < 8 || area.height < 4 {
         return;
     }
     Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
-    let was = app.park_camera(lonlat, zoom, tilt, persp);
+    let mut vp = crate::geo::Viewport::new(crate::geo::lonlat_to_world(lonlat.0, lonlat.1), zoom);
+    vp.tilt = tilt;
+    vp.persp = persp;
+    vp.bearing = bearing;
+    let was = app.park_viewport(vp);
     map_view(f, area, app);
     app.unpark_camera(was);
 

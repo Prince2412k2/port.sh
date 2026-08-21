@@ -108,10 +108,12 @@ pub struct Shell {
     since: f64,
     /// Where the chat's map thumbnail is looking, when there is one.
     locator: Option<Locator>,
-    /// How far over the visitor has leaned the chat map, as a multiplier on the
-    /// arrival's own lean. Theirs to set and kept across stops -- a camera angle
-    /// somebody chose should survive them walking the route.
-    lean: f64,
+    /// The camera the visitor has driven the chat map to, once they have.
+    ///
+    /// While this is set it *is* the chat map's camera and the flight is not
+    /// consulted: somebody who has panned somewhere has said where they want to
+    /// be. Cleared when the agent asks for a new place, and by ctrl-g.
+    manual: Option<termap::geo::Viewport>,
 }
 
 /// The chat's map thumbnail, and the flight it is on.
@@ -285,7 +287,7 @@ impl Shell {
             clock: 0.0,
             since: 0.0,
             locator: None,
-            lean: 1.0,
+            manual: None,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         // The chat turns a question into a point on its own -- but only the map
@@ -481,6 +483,7 @@ impl Shell {
                     || (loc.to.1 - spot.lonlat.1).abs() > 1e-6
                     || (loc.to_zoom - spot.zoom).abs() > 1e-3;
                 if moved {
+                    self.manual = None;
                     // A stop that names its own start is flown from there even
                     // when a camera is already up: the agent asked for a
                     // journey, and starting it from wherever the last answer
@@ -494,6 +497,8 @@ impl Shell {
                 }
             }
             (Some(spot), None) => {
+                // A new place is the agent taking the camera back.
+                self.manual = None;
                 self.locator = Some(match spot.from {
                     Some((from, from_zoom)) => {
                         Locator::journey(from, from_zoom, spot.lonlat, spot.zoom, sw)
@@ -559,30 +564,24 @@ impl Shell {
             // The map's own camera, before the chat gets the key. Ctrl because
             // every bare key here is a letter somebody is typing, and these have
             // to work mid-question like the route keys do.
-            if k.modifiers.contains(KeyModifiers::CONTROL) {
-                // The map's own controls, as close to the experience section's
-                // as this transport allows. The map pans on `hjkl` there and
-                // those are unreachable here: ctrl-h is backspace, ctrl-j is a
-                // newline, ctrl-l is a redraw, and a modified arrow key does not
-                // survive `wire.rs` at all -- only BackTab carries a modifier.
-                // So the pan is ctrl and the letters around it that no terminal
-                // has already claimed.
+            // Hold ctrl and the chat speaks the experience section's own map
+            // vocabulary, because it is literally the same handler: the key goes
+            // to `termap::app::App::on_key` with the modifier stripped. So `u`
+            // and `o` tilt, `+` and `-` zoom, `hjkl` pans, `,` and `.` swing the
+            // bearing, and a layer toggle is whatever that section says it is --
+            // none of it restated here to drift.
+            if k.modifiers.contains(KeyModifiers::CONTROL) && self.ask.panel.is_some() {
                 match k.code {
-                    KeyCode::Char('a') => return self.pan_locator(-1.0, 0.0),
-                    KeyCode::Char('d') => return self.pan_locator(1.0, 0.0),
-                    KeyCode::Char('w') => return self.pan_locator(0.0, 1.0),
-                    KeyCode::Char('x') => return self.pan_locator(0.0, -1.0),
-                    KeyCode::Char('e') => return self.zoom_locator(0.7),
-                    KeyCode::Char('y') => return self.zoom_locator(-0.7),
-                    KeyCode::Char('k') => return self.tilt_locator(0.18),
-                    KeyCode::Char('t') => return self.tilt_locator(-0.18),
-                    // Back to the framing the stop arrived with, which is the
-                    // way out of having driven the camera somewhere unhelpful.
+                    // Ours, not the map's: `n` and `b` step the route the agent
+                    // sent, which is a different thing from the tour's own stops.
+                    KeyCode::Char('n') => return self.ask.walk(1),
+                    KeyCode::Char('b') => return self.ask.walk(-1),
+                    // Hand the camera back to the flight.
                     KeyCode::Char('g') => {
-                        self.lean = 1.0;
-                        self.locator = None;
+                        self.manual = None;
                         return;
                     }
+                    KeyCode::Char(_) => return self.map_key(k),
                     _ => {}
                 }
             }
@@ -642,42 +641,53 @@ impl Shell {
         }
     }
 
-    /// Drive the chat map's camera by hand.
+    /// Where the chat map's camera is this frame.
     ///
-    /// Applied to the flight's destination rather than to the frame on screen,
-    /// so a nudge mid-arrival lands where it was asked to instead of fighting
-    /// the descent -- and so the zoom survives stepping to the next stop and
-    /// back.
-    fn zoom_locator(&mut self, by: f64) {
-        if let Some(l) = &mut self.locator {
-            let to = l.to;
-            let zoom = (l.to_zoom + by).clamp(3.0, 16.5);
-            // Snapped rather than flown: a wheel notch is a nudge, and flying a
-            // Van Wijk path for a tenth of a zoom level would feel like syrup.
-            l.path = Locator::path(to, zoom, to, zoom, l.sw);
-            l.to_zoom = zoom;
-            l.t = l.span;
+    /// The visitor's viewport if they have driven one, otherwise the flight's.
+    fn chat_camera(&self) -> Option<termap::ui::Camera> {
+        if let Some(vp) = self.manual {
+            let (lon, lat) = vp.center_lonlat();
+            return Some(termap::ui::Camera {
+                lonlat: (lon, lat),
+                zoom: vp.zoom,
+                tilt: vp.tilt,
+                persp: vp.persp,
+                bearing: vp.bearing,
+            });
         }
+        let l = self.locator?;
+        let (lonlat, zoom, lean, _) = l.now();
+        Some(termap::ui::Camera {
+            lonlat,
+            zoom,
+            tilt: LEAN_DEG.to_radians() * lean,
+            persp: CONVERGE * lean,
+            bearing: 0.0,
+        })
     }
 
-    /// Slide the camera off the stop it landed on, in screen-relative steps.
-    fn pan_locator(&mut self, dx: f64, dy: f64) {
-        if let Some(l) = &mut self.locator {
-            // A step is a fraction of what is on screen, so it feels the same at
-            // every zoom rather than crossing a state at one and a street at
-            // another.
-            let span = 360.0 / 2f64.powf(l.to_zoom) * 0.55;
-            let to = (l.to.0 + dx * span, (l.to.1 + dy * span).clamp(-84.0, 84.0));
-            let zoom = l.to_zoom;
-            l.path = Locator::path(to, zoom, to, zoom, l.sw);
-            l.to = to;
-            l.t = l.span;
-        }
-    }
+    /// Give one key to the map and keep what it did with it.
+    ///
+    /// Parked, handled, read back, unparked: the map's own `on_key` is the only
+    /// thing that decides what a key means or how far it moves, and the
+    /// experience section's camera is left exactly as it was. Anything that is
+    /// not the viewport -- a layer toggled, terrain switched off -- is shared on
+    /// purpose. It is one map.
+    fn map_key(&mut self, k: KeyEvent) {
+        let Some(cam) = self.chat_camera() else { return };
+        let mut vp = termap::geo::Viewport::new(
+            termap::geo::lonlat_to_world(cam.lonlat.0, cam.lonlat.1),
+            cam.zoom,
+        );
+        vp.tilt = cam.tilt;
+        vp.persp = cam.persp;
+        vp.bearing = cam.bearing;
 
-    /// Lean the camera further over, or back towards straight down.
-    fn tilt_locator(&mut self, by: f64) {
-        self.lean = (self.lean + by).clamp(0.0, 1.35);
+        let was = self.map.park_viewport(vp);
+        self.map.on_key(KeyEvent::new(k.code, KeyModifiers::NONE));
+        let after = self.map.vp;
+        self.map.unpark_camera(was);
+        self.manual = Some(after);
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -701,10 +711,20 @@ impl Shell {
                 // is not covered in prose.
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     let up = m.kind == MouseEventKind::ScrollUp;
-                    let over_map = crate::ask::map_rect(self.body, &self.ask)
-                        .is_some_and(|at| m.column >= at.x + at.width / 4);
-                    match over_map {
-                        true => self.zoom_locator(if up { 0.6 } else { -0.6 }),
+                    // Ctrl held, or the pointer over the map's own side: either
+                    // way it is the map being scrolled. Ctrl is the one that
+                    // works no matter where the pointer happens to be, which is
+                    // why the modifiers had to start surviving `wire.rs`.
+                    let held = m.modifiers.contains(KeyModifiers::CONTROL);
+                    let over = crate::ask::map_rect(self.body, &self.ask)
+                        .is_some_and(|at| m.column >= at.x + at.width / 3);
+                    match (held || over) && self.ask.panel.is_some() {
+                        // Through the map's own zoom keys, so a notch here moves
+                        // exactly as far as a notch there.
+                        true => self.map_key(KeyEvent::new(
+                            KeyCode::Char(if up { '+' } else { '-' }),
+                            KeyModifiers::NONE,
+                        )),
                         false => self.ask.on_scroll(up),
                     }
                 }
@@ -756,18 +776,19 @@ impl Shell {
                     let pin = spot.id.is_none();
                     // Mid-flight the camera is between two places, so it is the
                     // flight that says where to draw, not the destination.
-                    let (lonlat, zoom, lean, drop) = self
-                        .locator
-                        .map_or((spot.lonlat, spot.zoom, 1.0, 1.0), |l| l.now());
-                    let cam = termap::ui::Camera {
-                        lonlat,
-                        zoom,
-                        tilt: LEAN_DEG.to_radians() * lean * self.lean,
-                        persp: CONVERGE * lean * self.lean,
-                    };
-                    // The tour draws its own marker for a stop on the sheet;
-                    // anywhere else has nothing but ours.
-                    termap::ui::render_locator(f, at, &mut self.map, cam, pin.then_some(drop));
+                    let drop = self.locator.map_or(1.0, |l| l.now().3);
+                    let cam = self.chat_camera().unwrap_or(termap::ui::Camera {
+                        lonlat: spot.lonlat,
+                        zoom: spot.zoom,
+                        tilt: 0.0,
+                        persp: 0.0,
+                        bearing: 0.0,
+                    });
+                    // The pin marks the middle of the frame, so it is only the
+                    // truth while the frame is centred on the place. Somebody
+                    // who has panned away is looking at somewhere else.
+                    let mark = (pin && self.manual.is_none()).then_some(drop);
+                    termap::ui::render_locator(f, at, &mut self.map, cam, mark);
                     // Composited afterwards, like the section dissolve: the map
                     // renderer knows nothing about this page's fade, or about
                     // having no edges, and should not have to.
@@ -778,10 +799,14 @@ impl Shell {
                     // a suggestion of it under the text and the whole thing
                     // everywhere else. Lighter than it was, because the map no
                     // longer covers the reading column, only breaks into it.
-                    let prose = ask::prose_rect(body, &self.ask);
-                    if let Some(over) = prose.intersection(at).into() {
-                        paint::veil(f, over, 0.42);
-                    }
+                    // Ramped across the overlap rather than flat over it. A
+                    // flat dim is a rectangle, and a rectangle of darker map on
+                    // top of a soft fade is a hard line down the middle of the
+                    // screen -- which was the seam this whole shape exists to
+                    // avoid. It arrives gradually now: heaviest where the words
+                    // are, nothing by the time the map is on its own.
+                    let over = ask::prose_rect(body, &self.ask).intersection(at);
+                    paint::veil_ramp(f, over, 0.34, 1.0);
                 }
                 ask::render(f, body, &self.ask);
             }
@@ -1111,6 +1136,83 @@ mod tests {
         assert!(s.locator.is_none(), "the camera outlived the panel");
     }
 
+    /// Ctrl and a key is the experience section's own map handler.
+    ///
+    /// Not a second set of bindings to keep in step with that one -- the key
+    /// really goes to `termap::app::App::on_key`, so `u` and `o` tilt by
+    /// whatever that file says a tilt step is. What this checks is the plumbing:
+    /// that the camera handed over is the one the chat is looking through, that
+    /// what came back is kept, and that the experience section's own camera is
+    /// exactly where it was afterwards.
+    #[test]
+    fn ctrl_and_a_key_drives_the_map_with_the_maps_own_handler() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "where is jaipur".into();
+        s.ask.submit();
+        let board = s.ask.board_token().expect("no board").to_string();
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+        s.tick(3.0);
+
+        let section = s.map.vp;
+        let before = s.chat_camera().expect("no camera");
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        s.on_key(ctrl('u'));
+        let after = s.chat_camera().expect("no camera");
+        assert!(after.tilt > before.tilt, "ctrl-u did not lean it: {} to {}", before.tilt, after.tilt);
+        s.on_key(ctrl('o'));
+        s.on_key(ctrl('o'));
+        assert!(s.chat_camera().unwrap().tilt < after.tilt, "ctrl-o did not flatten it");
+
+        let z = s.chat_camera().unwrap().zoom;
+        s.on_key(ctrl('+'));
+        assert!(s.chat_camera().unwrap().zoom > z, "ctrl-+ did not zoom in");
+        let lon = s.chat_camera().unwrap().lonlat.0;
+        s.on_key(ctrl('l'));
+        assert!(s.chat_camera().unwrap().lonlat.0 > lon, "ctrl-l did not pan east");
+        s.on_key(ctrl('.'));
+        assert_ne!(s.chat_camera().unwrap().bearing, 0.0, "ctrl-. did not swing the bearing");
+
+        // Through all of that, the experience section's camera never moved.
+        assert_eq!(s.map.vp.center, section.center, "the section's camera was dragged along");
+        assert_eq!(s.map.vp.zoom, section.zoom);
+        assert_eq!(s.map.vp.tilt, section.tilt);
+
+        // ctrl-g hands it back to the flight.
+        s.on_key(ctrl('g'));
+        let back = s.chat_camera().expect("no camera");
+        assert!((back.lonlat.0 - 75.79).abs() < 1e-6, "ctrl-g did not return to the place");
+        assert_eq!(back.bearing, 0.0);
+
+        // A ctrl-wheel zooms wherever the pointer is, which is why the decoder
+        // had to start keeping the modifiers at all.
+        let wheel = |mods| MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: mods,
+        };
+        let z = s.chat_camera().unwrap().zoom;
+        s.on_mouse(wheel(KeyModifiers::CONTROL));
+        assert!(s.chat_camera().unwrap().zoom > z, "ctrl-wheel over the words did not zoom");
+
+        // Without ctrl, over the words, it is the transcript that scrolls.
+        let z = s.chat_camera().unwrap().zoom;
+        s.on_mouse(wheel(KeyModifiers::NONE));
+        assert_eq!(s.chat_camera().unwrap().zoom, z, "a plain wheel moved the map");
+    }
+
     /// A stop that names its own start is flown from there.
     ///
     /// The journey is the answer to "how far is Kapadwanj from Ahmedabad" in a
@@ -1330,7 +1432,8 @@ mod tests {
         let at = Rect { x: 0, y: 0, width: 46, height: 20 };
         let shot = |m: &mut termap::app::App, lonlat: (f64, f64)| {
             let mut t = Terminal::new(TestBackend::new(at.width, at.height)).unwrap();
-            let cam = termap::ui::Camera { lonlat, zoom: 13.0, tilt: 0.0, persp: 0.0 };
+            let cam =
+                termap::ui::Camera { lonlat, zoom: 13.0, tilt: 0.0, persp: 0.0, bearing: 0.0 };
             t.draw(|f| termap::ui::render_locator(f, at, m, cam, None)).unwrap();
             termap::snapshot::plain(t.backend().buffer())
         };

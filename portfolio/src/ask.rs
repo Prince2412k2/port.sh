@@ -944,10 +944,11 @@ impl Ask {
                         esc    stop         tab  take one    wheel / pgup  scroll\n\
                         ctrl-u clear the line              tab  leave the section\n\
                         \n\
-                        the map, when there is one:\n\
-                        ctrl-n next place   ctrl-b  back\n\
-                        ctrl-a/d/w/x pan    ctrl-e/y  zoom   wheel over it  zoom\n\
-                        ctrl-k lean over    ctrl-t  flatten  ctrl-g  put it back"
+                        hold ctrl and the map answers to the keys it does in the\n\
+                        experience section -- hjkl or the arrows pan, + and - zoom,\n\
+                        u and o tilt, , and . swing it round, and the layer keys\n\
+                        work too. ctrl and the wheel zooms from anywhere.\n\
+                        ctrl-n next place   ctrl-b  back    ctrl-g  give it back"
                 .into(),
             "/whoami" => {
                 let w = crate::visits::last_seen();

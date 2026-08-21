@@ -317,6 +317,34 @@ impl App {
         was
     }
 
+    /// Park a whole viewport, bearing and all.
+    ///
+    /// `park_camera` builds one from a point and an angle, which is what an
+    /// arrival wants. This takes one that already exists, which is what handing
+    /// the camera to `on_key` and reading back what it did requires -- the map's
+    /// own handler is then the only thing that knows what `u` or `+` means, and
+    /// an embedder does not have to keep a second copy of those numbers.
+    pub fn park_viewport(&mut self, vp: Viewport) -> Parked {
+        let was = Parked {
+            vp: self.vp,
+            map_area: self.map_area,
+            cursor: self.cursor,
+            fit_pending: self.fit_pending,
+            tour_pending: self.tour_pending,
+            auto_view: self.auto_view,
+            tour_at: self.tour.at,
+        };
+        // Canvas size belongs to whoever is drawing, not to the caller: it is
+        // set from the rect on the next frame anyway, and taking it from a
+        // stored viewport would scale the world to a stale screen.
+        self.vp = Viewport { sw: self.vp.sw, sh: self.vp.sh, ..vp };
+        self.auto_view = false;
+        self.fit_pending = false;
+        self.tour_pending = None;
+        self.cursor = None;
+        was
+    }
+
     /// Put back what `park_camera` took.
     pub fn unpark_camera(&mut self, was: Parked) {
         self.tour.at = was.tour_at;

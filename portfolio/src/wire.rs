@@ -200,7 +200,24 @@ impl Decoder {
                 _ => MouseEventKind::Moved,
             }
         };
-        Some(Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }))
+        // The modifier bits, which were being thrown away. `Cb` carries them
+        // alongside the button -- shift 4, alt 8, ctrl 16 -- and without reading
+        // them a ctrl-wheel arrives as a plain wheel, so "zoom the map" and
+        // "scroll the transcript" are the same event.
+        const SHIFT: i64 = 4;
+        const ALT: i64 = 8;
+        const CTRL: i64 = 16;
+        let mut modifiers = KeyModifiers::NONE;
+        if cb & SHIFT != 0 {
+            modifiers |= KeyModifiers::SHIFT;
+        }
+        if cb & ALT != 0 {
+            modifiers |= KeyModifiers::ALT;
+        }
+        if cb & CTRL != 0 {
+            modifiers |= KeyModifiers::CONTROL;
+        }
+        Some(Event::Mouse(MouseEvent { kind, column, row, modifiers }))
     }
 }
 
@@ -225,6 +242,42 @@ pub const DISABLE_MOUSE: &[u8] = b"\x1b[?1003l\x1b[?1006l";
 
 #[cfg(test)]
 mod tests {
+
+    /// A ctrl-wheel is not a plain wheel.
+    ///
+    /// `Cb` packs the modifiers in with the button and this decoder was
+    /// dropping them, so holding ctrl and scrolling was indistinguishable from
+    /// scrolling -- which made "zoom the map" and "scroll the words" the same
+    /// event and forced the two apart by pointer position instead.
+    #[test]
+    fn a_wheel_carries_the_modifiers_it_was_sent_with() {
+        let evs = |s: &str| Decoder::default().feed(s.as_bytes());
+        let of = |s: &str| match evs(s).first() {
+            Some(Event::Mouse(m)) => (m.kind, m.modifiers),
+            other => panic!("not a mouse event: {other:?}"),
+        };
+
+        // 64 is wheel-up, and the low bit picks the direction.
+        let (kind, mods) = of("\x1b[<64;10;5M");
+        assert_eq!(kind, MouseEventKind::ScrollUp);
+        assert_eq!(mods, KeyModifiers::NONE);
+
+        // 64 + 16 = ctrl held.
+        let (kind, mods) = of("\x1b[<80;10;5M");
+        assert_eq!(kind, MouseEventKind::ScrollUp, "ctrl stopped it being a wheel");
+        assert_eq!(mods, KeyModifiers::CONTROL);
+
+        // 65 + 16 = ctrl and scrolling down.
+        let (kind, mods) = of("\x1b[<81;10;5M");
+        assert_eq!(kind, MouseEventKind::ScrollDown);
+        assert_eq!(mods, KeyModifiers::CONTROL);
+
+        // Shift and alt come through too, and together.
+        let (_, mods) = of("\x1b[<68;1;1M");
+        assert_eq!(mods, KeyModifiers::SHIFT);
+        let (_, mods) = of("\x1b[<88;1;1M");
+        assert_eq!(mods, KeyModifiers::CONTROL | KeyModifiers::ALT);
+    }
     use super::*;
 
     fn keys(d: &mut Decoder, bytes: &[u8]) -> Vec<Event> {

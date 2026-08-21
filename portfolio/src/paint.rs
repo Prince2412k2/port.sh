@@ -280,6 +280,37 @@ pub fn feather(f: &mut Frame, area: Rect, strength: f32) {
     }
 }
 
+/// Dim a region by an amount that slides across it.
+///
+/// The reading column had a flat `veil` over it, and a flat dim has edges: a
+/// rectangle of slightly darker map over a soft radial fade is a hard line
+/// straight down the screen, which is exactly the seam this was supposed to
+/// remove. Ramped, the knock-back arrives gradually and there is nowhere for the
+/// eye to catch.
+///
+/// `from` applies at the left of `area` and `to` at the right, both as keep
+/// factors like `veil` -- 1 leaves a cell alone.
+pub fn veil_ramp(f: &mut Frame, area: Rect, from: f32, to: f32) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let buf = f.buffer_mut();
+    for x in 0..area.width {
+        // Smoothstepped rather than linear so the two ends meet whatever is
+        // beside them without a crease.
+        let t = x as f32 / (area.width.max(2) - 1) as f32;
+        let k = from + (to - from) * (t * t * (3.0 - 2.0 * t));
+        if k >= 0.999 {
+            continue;
+        }
+        for y in 0..area.height {
+            let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) else { continue };
+            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            cell.set_fg(fg).set_bg(bg);
+        }
+    }
+}
+
 /// Smootherstep, the easing used everywhere else in this project.
 pub fn ease(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
