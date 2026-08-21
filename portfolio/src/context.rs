@@ -56,35 +56,10 @@ pub fn build(about: &About, taste: &Sheet, projects: &[skysheet::data::Project])
          failure here. This is the opposite of the rule above about acting: guess \
          freely about what somebody *wants*, never about what is true of him.\n\n\
          THE MAP\n\
-         - There is a map beside your answer and it is yours to draw on. If your \
-         answer names a real place, put it there. Not when asked to -- when you name \
-         one. The visitor can see the screen; the map is how you point at something.\n\
-         - `locate_place` turns a name into coordinates, then `show_map` draws them. \
-         Always look a place up rather than recalling coordinates: a wrong one puts \
-         the camera in the sea and nothing on screen says so. Pass back the `zoom` it \
-         gives you.\n\
-         - `locate_place` knows places people live -- states, cities, towns, villages \
-         -- and not monuments, lakes, waterfalls or viewpoints. When it comes back \
-         `found:false`, search the web for the coordinates and show those, mentioning \
-         in a few words that the point came from a search. Only when both come up \
-         empty say you cannot place it.\n\
-         - Several places go in one call: `show_map` takes a `places` list, each with \
-         a name and a one-sentence `note`, and the visitor can step between them with \
-         ctrl-n and ctrl-b while the camera flies. One call with the route in it, not \
-         five that arrive as unrelated pins.\n\
-         - **The note is the point.** A pin says where a place is; the note says why \
-         you brought it up. \"Where he learned Linux and the shell\", \"the ghats, and \
-         the reason people come\" -- one sentence, in your own words, the thing you \
-         would have said aloud.\n\
-         - Think of it as the map you would point at while telling somebody about a \
-         place, not as a control panel. A place worth naming is usually worth pinning, \
-         and still not everything: a greeting, code, a project, an opinion, or a place \
-         mentioned in passing gets none. The map leaves by itself when an answer does \
-         not ask for one, so there is nothing to clean up -- `hide_map` is only for \
-         taking one down mid-answer.\n\
-         - If they ask where *they* are, `locate_visitor` knows and nothing else does. \
-         It is an address lookup, so a city at best and worth saying so -- then show \
-         it.\n\n",
+         - There is a map on screen beside your answer, and it is yours to draw \
+         on. Your tools describe themselves and what they say about when to \
+         reach for them is the whole of it -- there is deliberately no second \
+         copy of those instructions here to disagree with them.\n\n",
     );
 
     s.push_str("== WHO ==\n");
@@ -195,6 +170,30 @@ mod tests {
             low.contains("never name the model"),
             "the backend could be named on screen"
         );
+    }
+
+    /// The prompt does not explain the tools. They explain themselves.
+    ///
+    /// Two copies of one instruction is one copy that can go stale, and the map
+    /// guidance was in both places: 2247 characters of this prompt saying what
+    /// `mcp.rs` already says in the descriptions the agent is handed with the
+    /// tools. The descriptions are the single source now, and this is what stops
+    /// the prompt quietly growing a second copy again.
+    #[test]
+    fn the_prompt_does_not_restate_what_the_tools_already_say() {
+        let p = build(&crate::about::load(), &crate::taste::load(), &[]);
+        let low = p.to_lowercase();
+
+        // Named once, as a signpost, and never explained.
+        for tool in ["locate_place", "show_map", "hide_map", "locate_visitor"] {
+            assert!(!low.contains(tool), "the prompt is explaining `{tool}` again");
+        }
+        for detail in ["found:false", "places list", "ctrl-n"] {
+            assert!(!low.contains(detail), "`{detail}` belongs to the tool description");
+        }
+        // The one thing the prompt still owes it is that a map exists at all --
+        // that is a fact about the page, not about any tool.
+        assert!(low.contains("map on screen beside your answer"), "the page is not described");
     }
     use super::*;
 

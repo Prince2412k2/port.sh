@@ -191,19 +191,31 @@ fn index() -> Option<&'static termap::gazetteer::Gazetteer> {
 /// for every answer is worse than one that never does: the picture stops
 /// meaning anything and the page starts flashing.
 fn tool_list() -> String {
-    let map_when = "Put a place on the map beside your answer. Call it whenever \
-        a real geographic place is part of what you are saying -- where \
-        somewhere is, where he studied or worked, the towns in a region, where \
-        the visitor is. Give every place a `note`: one sentence on why it is in \
-        the answer, in your own words, because a pin says where and the note \
-        says why it matters. Several places go in one call as a `places` list \
-        and become a route the visitor can step through. Do NOT call it for \
-        code, projects, skills, opinions or greetings -- a picture that appears \
-        for everything stops meaning anything.";
+    let map_when = "Put a place on the map that sits beside your answer on the \
+        visitor's screen.\n\n\
+        Call it whenever your answer names a real geographic place -- not when \
+        you are asked to, when you name one. The visitor can see the screen; \
+        this is how you point at something. Where somewhere is, where he \
+        studied or worked, the towns in a region, where the visitor is.\n\n\
+        Give every place a `note`: one sentence on why it is in the answer, in \
+        your own words, the thing you would have said aloud. \"Where he learned \
+        Linux and the shell\". \"The ghats, and the reason people come\". A pin \
+        says where a place is; the note says why you brought it up, and a stop \
+        without one is a dot on a map and worth much less.\n\n\
+        Several places go in one call as a `places` list and become a route the \
+        visitor steps through with ctrl-n and ctrl-b while the camera flies. One \
+        call with the route in it, never several that arrive as unrelated pins.\n\n\
+        Think of it as the map you would point at while telling somebody about a \
+        place, not as a control panel. A place worth naming is usually worth \
+        pinning -- and still not everything: code, a project, a skill, an \
+        opinion, a greeting, or a place mentioned in passing gets none. A \
+        picture that appears for everything stops meaning anything. It clears \
+        itself when an answer does not ask for one, so there is nothing to tidy \
+        up.";
     format!(
         r#"{{"tools":[
         {{"name":"locate_place",
-          "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it. Use this rather than recalling coordinates yourself -- a wrong coordinate puts the map in the sea and nothing on screen says so. It knows settlements, not buildings or monuments: asked for the Taj Mahal, Ward's Lake or a waterfall it will return found:false. On found:false, do not give up -- search the web for that place's coordinates and pass them to show_map, saying the point came from a search rather than from the map data. Falling back to the town it is in is also fine if you say so.",
+          "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it, and the zoom should be passed back to show_map unchanged.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt knows places people live, not buildings or monuments: asked for the Taj Mahal, Ward's Lake or a waterfall it returns found:false. That is not a dead end -- search the web for the coordinates and pass those to show_map, mentioning in a few words that the point came from a search rather than from the map data. Falling back to the town it is in is also fine if you say that is what you are showing. Only when both come up empty say you cannot place it.",
           "inputSchema":{{"type":"object","properties":{{
             "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}}
           }},"required":["name"]}}}},
