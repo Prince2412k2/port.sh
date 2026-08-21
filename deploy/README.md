@@ -259,6 +259,14 @@ serves both this tier and the one below it. Nothing needs to go in `.env`, and
 the tier declares `secrets none`: a key it does not use is a key it should not
 see.
 
+**It keeps no transcripts.** Its catalogue leaves `sessionDir` unset, so
+`loadSession`, `resume` and `fork` are advertised as absent -- honestly, which is
+the point: with a store configured, every anonymous visitor's conversation would
+be written into one directory in the container, and its `session/list` would
+enumerate all of them to whoever asked next. A directory per visitor would be the
+fix, and until there is one the answer is not to keep them. Visits are still
+logged, as they always were -- see *Who came*.
+
 To check it end to end rather than by reading:
 
 ```bash

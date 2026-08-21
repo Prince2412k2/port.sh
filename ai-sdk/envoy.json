@@ -9,7 +9,6 @@
     "reserve": 16384,
     "keepRecent": 20000
   },
-  "sessionDir": "~/.local/share/envoy/sessions",
   "tiers": [
     {
       "provider": "openai",
