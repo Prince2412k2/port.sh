@@ -521,7 +521,7 @@ fn tool_list() -> String {
           "description":"Look up where anything is by name: a country, a state, a city, a town, a village, a monument, a lake, a mall, a cafe. Returns latitude, longitude, a zoom that frames it, `source` -- the map data on this box, or OpenStreetMap -- and `on_this_map`. That last one matters: the lookup covers the world and the map on screen only covers India, so `on_this_map:false` means you know where the place is and cannot show it. Say where it is in words and do not call show_map, because an empty frame presented as a map of Paris is worse than no picture. Pass the zoom back to show_map unless the answer is about something smaller than what you looked up.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt tries three things in order and you need not care which answers: an index of India built into this box, then that city's own streets, then OpenStreetMap. `found:false` means all three came up empty, and then say you cannot place it rather than guessing a point.",
           "inputSchema":{{"type":"object","properties":{{
             "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}},
-            "near":{{"type":"string","description":"The town or city to look inside, when `name` is something within one -- a cafe, a mall, a park, a hospital, a temple. Give it whenever you have it: it is what tells a Zen Cafe in Ahmedabad from the several elsewhere, and it lets this box search that city's own streets before going out to the internet."}}
+            "near":{{"type":"string","description":"The town or city to look inside, when `name` is something within one -- a cafe, a mall, a park, a hospital, a temple. Give it whenever you have it: it is what tells a Zen Cafe in Ahmedabad from the several elsewhere, and it lets this box search that city's own streets before going out to the internet. A town or a city only: a country or a state here is a search for a street inside a country, which finds nothing and costs a round trip. Leave it out when `name` is itself a city, a state or a country."}}
           }},"required":["name"]}}}},
         {{"name":"show_map",
           "description":{},
@@ -688,7 +688,16 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
             // to build an array to say so, and one that is walking somebody
             // through five should not have to call five times and lose the
             // fact that they belong together.
-            let listed = args.and_then(|a| a.get("places")).and_then(|p| p.as_array());
+            // An *empty* `places` counts as absent. A real model filled every
+            // field the schema offered -- `places: []` alongside a perfectly
+            // good lat and lon -- and the list won, so the call was refused
+            // with the point sitting right there in it. It then recovered by
+            // duplicating the point into the list, which is two wasted turns
+            // and a visitor watching a tool fail twice.
+            let listed = args
+                .and_then(|a| a.get("places"))
+                .and_then(|p| p.as_array())
+                .filter(|list| !list.is_empty());
             let raw: Vec<&Value> = match listed {
                 Some(list) => list.iter().collect(),
                 None => args.into_iter().collect(),
@@ -708,10 +717,26 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 // saying nothing.
                 let start = one.get("from").and_then(|f| {
                     let n = |k: &str| f.get(k).and_then(|v| v.as_f64());
-                    let (lat, lon) = (n("lat")?, n("lon")?);
-                    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then(|| {
-                        (lat, lon, n("zoom").unwrap_or(num("zoom").unwrap_or(11.5)).clamp(3.0, 16.5))
-                    })
+                    let (from_lat, from_lon) = (n("lat")?, n("lon")?);
+                    if !(-90.0..=90.0).contains(&from_lat) || !(-180.0..=180.0).contains(&from_lon)
+                    {
+                        return None;
+                    }
+                    // A journey to where the camera already is, is not a
+                    // journey. Models fill the field because it is there: one
+                    // sent a `from` identical to the destination, which is a
+                    // second and a half of flight that lands where it took off
+                    // and reads on screen as a stall. The description asks them
+                    // not to; this makes it not matter.
+                    const SAME: f64 = 0.002;
+                    if (from_lat - lat).abs() < SAME && (from_lon - lon).abs() < SAME {
+                        return None;
+                    }
+                    Some((
+                        from_lat,
+                        from_lon,
+                        n("zoom").unwrap_or(num("zoom").unwrap_or(11.5)).clamp(3.0, 16.5),
+                    ))
                 });
                 stops.push(Stop {
                     lat,
@@ -1228,6 +1253,95 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("isError"), "a forgotten session still accepts calls");
+    }
+
+    /// The payload a real model actually sent, which this used to refuse.
+    ///
+    /// `places: []` beside a good lat and lon: the model filled every field the
+    /// schema offered. The empty list won, the call failed, and it recovered by
+    /// copying the point into the list -- two turns and two failed tool rows on
+    /// somebody's screen. Also in here: a `from` identical to the destination,
+    /// which is a flight that lands where it took off.
+    #[test]
+    fn the_payload_a_model_really_sent_is_drawn_rather_than_refused() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let out = handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":26.91546,"lon":75.81898,"zoom":11,"label":"Jaipur, Rajasthan",
+                 "note":"Known as the Pink City.",
+                 "from":{"lat":26.91546,"lon":75.81898,"zoom":11},
+                 "places":[]}}}"#,
+        )
+        .unwrap();
+        assert!(!out.contains("isError"), "the point beside an empty list was refused: {out}");
+        let map = rx.try_iter().find_map(|d| match d {
+            Directive::Map { stops } => Some(stops),
+            _ => None,
+        });
+        let stops = map.expect("nothing reached the screen");
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].label, "Jaipur, Rajasthan");
+        assert!((stops[0].lat - 26.91546).abs() < 1e-5);
+        assert!(
+            stops[0].from.is_none(),
+            "a journey to where the camera already is: {:?}",
+            stops[0].from
+        );
+        forget(&token);
+    }
+
+    /// A `from` that is somewhere else is still a journey. The point of the
+    /// check above is to drop the useless ones, not the feature.
+    #[test]
+    fn a_from_somewhere_else_is_still_a_journey() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":23.02,"lon":73.07,"zoom":12,"label":"Kapadwanj",
+                 "from":{"lat":23.03,"lon":72.58,"zoom":10}}}}"#,
+        )
+        .unwrap();
+        let stops = rx
+            .try_iter()
+            .find_map(|d| match d {
+                Directive::Map { stops } => Some(stops),
+                _ => None,
+            })
+            .expect("nothing reached the screen");
+        let (lat, lon, zoom) = stops[0].from.expect("the journey was dropped");
+        assert!((lat - 23.03).abs() < 1e-6 && (lon - 72.58).abs() < 1e-6);
+        assert_eq!(zoom, 10.0);
+        forget(&token);
+    }
+
+    /// A `places` list with things in it still wins over a stray top-level
+    /// point, which is what it is for.
+    #[test]
+    fn a_list_with_places_in_it_is_the_route() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":0.0,"lon":0.0,
+                 "places":[{"lat":23.02,"lon":73.07,"label":"one"},
+                           {"lat":26.91,"lon":75.82,"label":"two"}]}}}"#,
+        )
+        .unwrap();
+        let stops = rx
+            .try_iter()
+            .find_map(|d| match d {
+                Directive::Map { stops } => Some(stops),
+                _ => None,
+            })
+            .expect("nothing reached the screen");
+        assert_eq!(stops.len(), 2, "the route was not the route");
+        assert_eq!(stops[0].label, "one");
+        forget(&token);
     }
 
     /// Coordinates off the globe are refused rather than drawn.
