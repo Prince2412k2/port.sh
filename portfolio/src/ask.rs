@@ -933,11 +933,14 @@ impl Ask {
                 self.input.clear();
                 return Local::Done;
             }
-            "/keys" => "enter  ask         /  commands     up  what you asked before\n\
-                        esc    stop        tab  take one    wheel / pgup  scroll\n\
-                        ctrl-n next place  ctrl-b  back      ctrl-u  clear the line\n\
-                        ctrl-k lean over   ctrl-t  flatten   wheel over the map  zoom\n\
-                        tab    leave the section"
+            "/keys" => "enter  ask          /  commands     up  what you asked before\n\
+                        esc    stop         tab  take one    wheel / pgup  scroll\n\
+                        ctrl-u clear the line              tab  leave the section\n\
+                        \n\
+                        the map, when there is one:\n\
+                        ctrl-n next place   ctrl-b  back\n\
+                        ctrl-a/d/w/x pan    ctrl-e/y  zoom   wheel over it  zoom\n\
+                        ctrl-k lean over    ctrl-t  flatten  ctrl-g  put it back"
                 .into(),
             "/whoami" => {
                 let w = crate::visits::last_seen();
@@ -1393,10 +1396,22 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     let p = a.panel.as_ref()?;
     let Show::Place(tour) = &p.what else { return None };
     let spot = tour.here().clone();
-    // Everything above the question line. Drawing behind the line somebody is
-    // typing on is the one place where overlap stops being atmosphere.
-    let at = Rect { height: area.height.saturating_sub(2), ..area };
-    (at.height >= 8).then_some((at, spot, p.fade()))
+    // The right of the page, and all of its height above the question line.
+    //
+    // Neither a widget in the corner nor the whole page. It was both in turn and
+    // both were wrong: a panel in a column is a picture the page made room for,
+    // and full bleed is wallpaper with words on it. This is a shape that lives
+    // on the right and ends when it ends -- `paint::feather` gives it an
+    // irregular edge, so its left side breaks up over the prose instead of
+    // ruling a line down the middle of the screen.
+    let w = (area.width * 3 / 5).max(40).min(area.width);
+    let at = Rect {
+        x: area.x + area.width - w,
+        width: w,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    (at.height >= 8 && at.width >= 30).then_some((at, spot, p.fade()))
 }
 
 /// Where the reading column sits, so the shell can dim the map under it.
@@ -1408,6 +1423,12 @@ pub fn prose_rect(area: Rect, a: &Ask) -> Rect {
     let gutter = 3u16;
     let w = area.width.saturating_sub(gutter * 2 + panel_cols(area, a)).min(104);
     Rect { x: area.x + gutter.saturating_sub(1), width: w + 2, ..area }
+}
+
+/// Where the map's own rect sits, for the shell's pointer test. Separate from
+/// `map_panel` only so a caller that wants the geometry need not want the spot.
+pub fn map_rect(area: Rect, a: &Ask) -> Option<Rect> {
+    map_panel(area, a).map(|(at, _, _)| at)
 }
 
 pub fn render(f: &mut Frame, area: Rect, a: &Ask) {

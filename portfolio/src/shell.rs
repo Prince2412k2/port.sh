@@ -127,20 +127,29 @@ pub struct Shell {
 /// miniature -- pull back, cross, come in -- which is one term.
 #[derive(Debug, Clone, Copy)]
 struct Locator {
-    from: (f64, f64),
-    from_zoom: f64,
     to: (f64, f64),
     to_zoom: f64,
+    /// The path itself, from `termap::tour` -- the same Van Wijk & Nuij
+    /// derivation the experience section flies, rather than a second
+    /// hand-rolled easing sitting beside it. Interpolating centre and zoom
+    /// independently is unwatchable at street scale: the middle of every
+    /// journey is a blur. This holds *perceived* speed constant instead, and the
+    /// altitude it climbs to is not chosen -- it falls out of the derivation as
+    /// the height where both ends frame.
+    path: termap::tour::Flight,
     /// Seconds into the move.
     t: f64,
-    /// How long this one takes. An arrival is slower than a crossing: it is the
-    /// entrance, and it is the only one anybody watches from the beginning.
     span: f64,
+    /// Subpixels across the panel, which is what turns a zoom into the width the
+    /// flight is derived in. Kept current: a resize mid-flight should not bend
+    /// the path.
+    sw: f64,
 }
 
-/// A crossing: the agent moved the map to somewhere else.
-const FLIGHT: f64 = 0.75;
-/// An arrival: the map was not there a moment ago.
+/// An arrival: the map was not there a moment ago. A *crossing* takes however
+/// long the path says it should -- that is most of the point of using the real
+/// derivation -- but an entrance is a fixed beat, because it is the one anybody
+/// watches from the beginning.
 const ARRIVAL: f64 = 1.5;
 /// How far the camera leans once it has landed, in degrees.
 ///
@@ -159,13 +168,38 @@ const CONVERGE: f64 = 0.28;
 const DESCENT: f64 = 3.6;
 
 impl Locator {
+    /// Build the flight between two (point, zoom) pairs.
+    fn path(
+        from: (f64, f64),
+        from_zoom: f64,
+        to: (f64, f64),
+        to_zoom: f64,
+        sw: f64,
+    ) -> termap::tour::Flight {
+        let c0 = termap::geo::lonlat_to_world(from.0, from.1);
+        let c1 = termap::geo::lonlat_to_world(to.0, to.1);
+        let w = |z: f64| {
+            let mut vp = termap::geo::Viewport::new([0.5, 0.5], z);
+            vp.sw = sw;
+            termap::tour::width_of(&vp)
+        };
+        termap::tour::Flight::new(c0, w(from_zoom), c1, w(to_zoom))
+    }
+
     /// The entrance: a descent onto the point, tilting up as it lands.
     ///
     /// Not a cut and not a fade from nothing. The tour's opening does the same
     /// thing at full size for the same reason -- a map that is simply *there*
     /// reads as a picture of a map, and one that arrives reads as a camera.
-    fn arriving(to: (f64, f64), zoom: f64) -> Locator {
-        Locator { from: to, from_zoom: zoom - DESCENT, to, to_zoom: zoom, t: 0.0, span: ARRIVAL }
+    fn arriving(to: (f64, f64), zoom: f64, sw: f64) -> Locator {
+        Locator {
+            to,
+            to_zoom: zoom,
+            path: Self::path(to, zoom - DESCENT, to, zoom, sw),
+            t: 0.0,
+            span: ARRIVAL,
+            sw,
+        }
     }
 
     fn flying(&self) -> bool {
@@ -173,9 +207,15 @@ impl Locator {
     }
 
     /// Send it somewhere else, from wherever it currently is.
+    ///
+    /// The duration comes from the path rather than a constant: crossing a state
+    /// and crossing a street are not the same journey, and the derivation
+    /// already knows how long each should take.
     fn go(&mut self, to: (f64, f64), zoom: f64) {
         let (at, at_zoom, _, _) = self.now();
-        *self = Locator { from: at, from_zoom: at_zoom, to, to_zoom: zoom, t: 0.0, span: FLIGHT };
+        let path = Self::path(at, at_zoom, to, zoom, self.sw);
+        let span = path.duration();
+        *self = Locator { to, to_zoom: zoom, path, t: 0.0, span, sw: self.sw };
     }
 
     /// Where the camera is, how far it has tilted, and where the pin is.
@@ -184,31 +224,25 @@ impl Locator {
     /// snapshot at 0.4 s is the same picture every run.
     fn now(&self) -> ((f64, f64), f64, f64, f32) {
         let k = (self.t / self.span).clamp(0.0, 1.0);
-        let e = crate::paint::ease(k);
-        let lon = self.from.0 + (self.to.0 - self.from.0) * e;
-        let lat = self.from.1 + (self.to.1 - self.from.1) * e;
-        // Pull back over the middle of a crossing, by how far there is to go.
-        // Without it a long move is a smear of tiles at street zoom; with it the
-        // two places are visibly in the same country. An arrival is already a
-        // descent and needs no arc on top of it.
-        let far = (self.to.0 - self.from.0).hypot(self.to.1 - self.from.1);
-        let out = (far * 0.55).min(4.0) * (std::f64::consts::PI * k).sin();
-        let zoom = self.from_zoom + (self.to_zoom - self.from_zoom) * e - out;
+        let (c, w) = self.path.at(k);
+        let (lon, lat) = termap::geo::world_to_lonlat(c[0], c[1]);
+        let zoom = termap::tour::zoom_of(w, self.sw);
 
         // Travel flat, arrive tilted. Leaning while the ground is still moving
-        // is where a 46-column map turns to mush, so the lean is the last thing
-        // that happens -- the same order the tour lands in.
+        // is where a small map turns to mush, so the lean is the last thing that
+        // happens -- the same order the tour lands in.
+        //
         // Clamped on the way out, not just on the way in: smootherstep of a
-        // value a hair under 1 comes back a hair over it, and a `lean` of
-        // 1.0000000000000013 is a camera that has tilted slightly too far and a
-        // test that cannot say what it means.
+        // value a hair under 1 comes back a hair over it, and a lean of
+        // 1.0000000000000013 is a camera tilted slightly too far and a test that
+        // cannot say what it means.
         let ramp = |from: f64, over: f64| {
             crate::paint::ease(((k - from) / over).clamp(0.0, 1.0)).clamp(0.0, 1.0)
         };
         let lean = ramp(0.55, 0.45);
         // And the pin drops last of all, onto a camera that has stopped.
         let pin = ramp(0.68, 0.32) as f32;
-        ((lon, lat), zoom.clamp(3.0, 16.0), lean, pin)
+        ((lon, lat), zoom.clamp(3.0, 16.5), lean, pin)
     }
 }
 
@@ -405,16 +439,28 @@ impl Shell {
         }
     }
 
+    /// Subpixels across the map panel, for the flight's width conversion.
+    ///
+    /// Read from the rect the map is actually drawn into rather than assumed, so
+    /// a resize changes the path's idea of a screen width along with the screen.
+    fn locator_sw(&self) -> f64 {
+        let w = crate::ask::map_panel(self.body, &self.ask)
+            .map_or(self.body.width, |(at, _, _)| at.width);
+        (w.max(8) as f64) * termap::canvas::SUB_X as f64
+    }
+
     /// Point the thumbnail at whatever the page is showing, and fly it there.
     ///
     /// Read off the panel each frame rather than pushed when it changes, so
     /// there is one place that decides where the camera is and it cannot get out
     /// of step with what the page thinks it is drawing.
     fn aim(&mut self, dt: f64) {
+        let sw = self.locator_sw();
         let want = crate::ask::showing_place(&self.ask).cloned();
         match (want, &mut self.locator) {
             (Some(spot), Some(loc)) => {
                 loc.t += dt;
+                loc.sw = sw;
                 // A hair of tolerance: these come off a JSON number and back
                 // through an f64, and restarting a flight every frame because
                 // the last decimal place moved would be a camera that never
@@ -427,7 +473,7 @@ impl Shell {
                 }
             }
             (Some(spot), None) => {
-                self.locator = Some(Locator::arriving(spot.lonlat, spot.zoom))
+                self.locator = Some(Locator::arriving(spot.lonlat, spot.zoom, sw))
             }
             // The panel has gone. Dropped rather than kept, so the next map
             // arrives where it was asked for instead of flying in from whatever
@@ -488,9 +534,29 @@ impl Shell {
             // every bare key here is a letter somebody is typing, and these have
             // to work mid-question like the route keys do.
             if k.modifiers.contains(KeyModifiers::CONTROL) {
+                // The map's own controls, as close to the experience section's
+                // as this transport allows. The map pans on `hjkl` there and
+                // those are unreachable here: ctrl-h is backspace, ctrl-j is a
+                // newline, ctrl-l is a redraw, and a modified arrow key does not
+                // survive `wire.rs` at all -- only BackTab carries a modifier.
+                // So the pan is ctrl and the letters around it that no terminal
+                // has already claimed.
                 match k.code {
+                    KeyCode::Char('a') => return self.pan_locator(-1.0, 0.0),
+                    KeyCode::Char('d') => return self.pan_locator(1.0, 0.0),
+                    KeyCode::Char('w') => return self.pan_locator(0.0, 1.0),
+                    KeyCode::Char('x') => return self.pan_locator(0.0, -1.0),
+                    KeyCode::Char('e') => return self.zoom_locator(0.7),
+                    KeyCode::Char('y') => return self.zoom_locator(-0.7),
                     KeyCode::Char('k') => return self.tilt_locator(0.18),
                     KeyCode::Char('t') => return self.tilt_locator(-0.18),
+                    // Back to the framing the stop arrived with, which is the
+                    // way out of having driven the camera somewhere unhelpful.
+                    KeyCode::Char('g') => {
+                        self.lean = 1.0;
+                        self.locator = None;
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -558,8 +624,27 @@ impl Shell {
     /// back.
     fn zoom_locator(&mut self, by: f64) {
         if let Some(l) = &mut self.locator {
-            l.to_zoom = (l.to_zoom + by).clamp(3.0, 16.5);
-            l.from_zoom = l.to_zoom;
+            let to = l.to;
+            let zoom = (l.to_zoom + by).clamp(3.0, 16.5);
+            // Snapped rather than flown: a wheel notch is a nudge, and flying a
+            // Van Wijk path for a tenth of a zoom level would feel like syrup.
+            l.path = Locator::path(to, zoom, to, zoom, l.sw);
+            l.to_zoom = zoom;
+            l.t = l.span;
+        }
+    }
+
+    /// Slide the camera off the stop it landed on, in screen-relative steps.
+    fn pan_locator(&mut self, dx: f64, dy: f64) {
+        if let Some(l) = &mut self.locator {
+            // A step is a fraction of what is on screen, so it feels the same at
+            // every zoom rather than crossing a state at one and a street at
+            // another.
+            let span = 360.0 / 2f64.powf(l.to_zoom) * 0.55;
+            let to = (l.to.0 + dx * span, (l.to.1 + dy * span).clamp(-84.0, 84.0));
+            let zoom = l.to_zoom;
+            l.path = Locator::path(to, zoom, to, zoom, l.sw);
+            l.to = to;
             l.t = l.span;
         }
     }
@@ -590,8 +675,8 @@ impl Shell {
                 // is not covered in prose.
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     let up = m.kind == MouseEventKind::ScrollUp;
-                    let over_map = crate::ask::showing_place(&self.ask).is_some()
-                        && m.column >= crate::ask::prose_rect(self.body, &self.ask).right();
+                    let over_map = crate::ask::map_rect(self.body, &self.ask)
+                        .is_some_and(|at| m.column >= at.x + at.width / 4);
                     match over_map {
                         true => self.zoom_locator(if up { 0.6 } else { -0.6 }),
                         false => self.ask.on_scroll(up),
@@ -661,11 +746,16 @@ impl Shell {
                     // renderer knows nothing about this page's fade, or about
                     // having no edges, and should not have to.
                     paint::feather(f, at, fade);
-                    // And knocked right back where the reading happens. Braille
-                    // under prose is unreadable at full strength; the fix is not
-                    // to move the map aside but to leave a suggestion of it
-                    // under the words and the whole thing everywhere else.
-                    paint::veil(f, ask::prose_rect(at, &self.ask), 0.3);
+                    // Knocked back only where the map's edge reaches over the
+                    // words. Braille under prose is unreadable at full strength,
+                    // and the fix is not to move the map aside -- it is to leave
+                    // a suggestion of it under the text and the whole thing
+                    // everywhere else. Lighter than it was, because the map no
+                    // longer covers the reading column, only breaks into it.
+                    let prose = ask::prose_rect(body, &self.ask);
+                    if let Some(over) = prose.intersection(at).into() {
+                        paint::veil(f, over, 0.42);
+                    }
                 }
                 ask::render(f, body, &self.ask);
             }
@@ -1088,14 +1178,17 @@ mod tests {
         s.tick(0.016);
         assert!(s.locator.unwrap().flying(), "the second map cut instead of flying");
 
-        // Part way across it is between the two, and pulled back from both.
-        s.tick(FLIGHT / 2.0);
+        // Part way across it is between the two, and pulled back from both. The
+        // crossing takes as long as the path says, so the test asks the path
+        // rather than a constant that no longer exists.
+        let span = s.locator.unwrap().span;
+        s.tick(span / 2.0);
         let (mid, mid_zoom, _, _) = s.locator.unwrap().now();
         assert!(mid.0 > 72.51 && mid.0 < 75.79, "not between the two: {mid:?}");
         assert!(mid_zoom < 11.0, "it crossed at street zoom: {mid_zoom}");
 
         // And it lands, exactly, rather than easing forever.
-        s.tick(FLIGHT);
+        s.tick(span);
         assert!(!s.locator.unwrap().flying());
         let (end, end_zoom, _, _) = s.locator.unwrap().now();
         assert!((end.0 - 75.79).abs() < 1e-9 && (end.1 - 26.91).abs() < 1e-9, "{end:?}");
