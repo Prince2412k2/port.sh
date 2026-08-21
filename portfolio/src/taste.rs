@@ -22,6 +22,10 @@ pub struct Entry {
     pub name: String,
     pub from: String,
     pub emblem: String,
+    /// Which scene from `walls.rs` hangs behind this one in the room. A name
+    /// nothing answers to gets the plain wall, so a typo costs the scenery
+    /// rather than the section.
+    pub wall: String,
     pub quote: String,
     pub body: String,
 }
@@ -135,6 +139,7 @@ fn field_mut<'a>(e: &'a mut Entry, key: &str) -> Option<&'a mut String> {
         "name" => &mut e.name,
         "from" => &mut e.from,
         "emblem" => &mut e.emblem,
+        "wall" => &mut e.wall,
         "quote" => &mut e.quote,
         "body" => &mut e.body,
         _ => return None,
@@ -143,6 +148,33 @@ fn field_mut<'a>(e: &'a mut Entry, key: &str) -> Option<&'a mut String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every entry names a room that exists.
+    ///
+    /// The wall is content -- edited in a text file, without a rebuild -- and a
+    /// typo in it costs the scenery silently: the entry falls back to the plain
+    /// contours and nothing anywhere says why. This is the check that would
+    /// notice, and it is cheap because both halves are in this repository.
+    #[test]
+    fn every_entry_hangs_in_a_room_that_exists() {
+        let s = super::parse(include_str!("../data/taste.txt"));
+        let all: Vec<&Entry> = s.figures.iter().chain(&s.works).collect();
+        assert!(all.len() >= 7, "the wall lost entries: {}", all.len());
+        for e in &all {
+            assert!(!e.wall.trim().is_empty(), "`{}` names no wall", e.id);
+            assert!(
+                crate::walls::Wall::named(&e.wall).is_some(),
+                "`{}` hangs in `{}`, which is not a room -- try one of {:?}",
+                e.id,
+                e.wall,
+                crate::walls::Wall::ALL.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+            );
+        }
+        // And they are not all the same room, which is the state this replaced.
+        let rooms: std::collections::BTreeSet<&str> =
+            all.iter().map(|e| e.wall.trim()).collect();
+        assert!(rooms.len() >= 6, "seven works and {} rooms: {rooms:?}", rooms.len());
+    }
     use super::*;
     use crate::emblems;
 

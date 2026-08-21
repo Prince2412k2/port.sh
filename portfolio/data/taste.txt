@@ -12,6 +12,11 @@
 #           beside the drawing; the shelf turns back into an essay past two
 #           lines.
 #   emblem  which drawing from scripts/emblems.py stands for this entry.
+#   wall    which scene from src/walls.rs hangs behind it in the room. Every
+#           work gets its own: the room is about the thing, not a texture. The
+#           names are rain, flights, ripples, pitch, web, stars, sea and
+#           contours -- and `contours` is the plain wall, which is also what an
+#           entry gets if it names a scene that does not exist.
 
 open  Almost everything here is about someone getting free of other people or
       of themselves, and being kind about it.
@@ -20,6 +25,8 @@ figure snufkin
   name    Snufkin
   from    Moominvalley
   emblem  hat
+  # Rain on the bridge he fishes from, and the water going on without him.
+  wall    rain
   quote   Little one, if you worship someone too much, you'll end up losing
           your freedom.
 
@@ -27,6 +34,8 @@ figure bourdain
   name    Anthony Bourdain
   from    Parts Unknown
   emblem  bowl
+  # A departures graticule, four routes, and steam off something out of frame.
+  wall    flights
   quote   Travel isn't always pretty. It isn't always comfortable. But that's
           okay. The journey changes you; it should change you.
 
@@ -34,6 +43,8 @@ figure iroh
   name    Uncle Iroh
   from    Avatar: The Last Airbender
   emblem  teacup
+  # A cup seen from above, rings spreading in it, steam turning as it rises.
+  wall    ripples
   quote   Pride is not the opposite of shame, but its source. True humility is
           the only antidote to shame.
 
@@ -41,12 +52,16 @@ figure ted
   name    Ted Lasso
   from    Ted Lasso
   emblem  sign
+  # A pitch in perspective, under two floodlights.
+  wall    pitch
   quote   Be curious, not judgmental.
 
 figure miles
   name    Miles Morales
   from    Spider-Verse
   emblem  web
+  # Halftone dots, a web slung from the corner, and the plates out of register.
+  wall    web
   quote   Everyone keeps telling me how my story is supposed to go. Nah. I'ma
           do my own thing.
 
@@ -54,6 +69,8 @@ figure little-prince
   name    The Little Prince
   from    Saint-Exupéry
   emblem  planet
+  # His asteroid with its volcanoes, a dune, and one flower on the crest.
+  wall    stars
   quote   It is the time you have wasted for your rose that makes your rose so
           important.
 
@@ -61,6 +78,8 @@ work one-piece
   name    One Piece
   from    Oda
   emblem  strawhat
+  # Long swells with foam on them, an island, two gulls.
+  wall    sea
   quote   I don't want to conquer anything. I just think the guy with the most
           freedom in this whole ocean is the Pirate King.
 

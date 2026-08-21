@@ -26,6 +26,7 @@ mod web;
 mod wire;
 mod taste;
 mod visits;
+mod walls;
 mod snapshot;
 
 use std::io::{self, IsTerminal, Write};

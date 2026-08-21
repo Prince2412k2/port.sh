@@ -171,6 +171,62 @@ impl Museum {
     }
 }
 
+/// Where one work's picture and caption sit, at rest.
+///
+/// Computed once and used twice, because the two uses must agree: `work` clears
+/// this rectangle so the wall does not run through the photograph, and `walls`
+/// fades its scene out of the same area so there is nothing at its edge to
+/// clear. Two copies of this arithmetic would show up as a scene that stops a
+/// column short of the mount, which is precisely the hard line this is all
+/// arranged to avoid.
+struct Bed {
+    /// The plate that is going to be drawn, resolved once.
+    plate: Option<&'static Portrait>,
+    /// The quote, wrapped to the picture's width.
+    lines: Vec<String>,
+    /// Columns the caption was wrapped to.
+    measure: u16,
+    /// First row of the picture.
+    top: u16,
+    /// Rows from the top of the picture to the bottom of the caption.
+    total: u16,
+}
+
+impl Museum {
+    fn bed(&self, area: Rect, i: usize) -> Bed {
+        let e = &self.works[i];
+        let quote = format!("\u{201c}{}\u{201d}", e.quote);
+        let plate = self.plate_at(i, area);
+        // Measured against the plate rather than the terminal: a line the width
+        // of a wide screen is one the eye cannot track back from, and the
+        // caption reads as belonging to the picture when it shares its edges.
+        let pw = plate.map_or(40, |p| p.cols);
+        let measure = pw.max(40).min(area.width.saturating_sub(PAD * 2));
+        let lines = wrap(&quote, measure as usize);
+        let art_h = plate.map_or(0, |p| p.rows);
+        // title, blank, quote, blank, index
+        let total = art_h + 2 + lines.len() as u16 + 2;
+        let top = area.y + (area.height.saturating_sub(total)) / 2;
+        Bed { plate, lines, measure, top, total }
+    }
+
+    /// The same, as the rectangle to keep clear -- the mount, and the hole in
+    /// the wall behind it.
+    fn mount(&self, area: Rect, i: usize) -> Rect {
+        let b = self.bed(area, i);
+        let mw = b.measure.max(b.plate.map_or(0, |p| p.cols)) + 4;
+        let centre = area.x as f64 + area.width as f64 / 2.0;
+        let x = (centre - mw as f64 / 2.0).max(area.x as f64) as u16;
+        let y = b.top.saturating_sub(1);
+        Rect {
+            x,
+            y,
+            width: mw.min((area.x + area.width).saturating_sub(x)),
+            height: (b.total + 3).min((area.y + area.height).saturating_sub(y)),
+        }
+    }
+}
+
 pub fn render(f: &mut Frame, area: Rect, m: &Museum) {
     if m.works.is_empty() || area.width < 24 || area.height < 12 {
         return;
@@ -201,25 +257,12 @@ pub fn render(f: &mut Frame, area: Rect, m: &Museum) {
 /// One work, offset `dx` columns from centre.
 fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
     let e = &m.works[i];
-    let quote = format!("\u{201c}{}\u{201d}", e.quote);
 
-    // Resolved once. Every measurement below is against the bake that is going
-    // to be drawn, and asking twice would let the caption be laid out for one
-    // size and the picture drawn at another.
-    let plate = m.plate_at(i, area);
-
-    // Measured against the plate rather than the terminal: a line the width of
-    // a wide screen is one the eye cannot track back from, and the caption
-    // reads as belonging to the picture when it shares its edges.
-    let pw = plate.map_or(40, |p| p.cols);
-    let measure = pw.max(40).min(area.width.saturating_sub(PAD * 2));
-    let lines = wrap(&quote, measure as usize);
-
-    let art_h = plate.map_or(0, |p| p.rows);
-    // title, blank, quote, blank, index
-    let text_h = 2 + lines.len() as u16 + 2;
-    let total = art_h + text_h;
-    let top = area.y + (area.height.saturating_sub(total)) / 2;
+    // Resolved once, in one place, shared with the wall behind it. Every
+    // measurement below is against the bake that is going to be drawn, and
+    // asking twice would let the caption be laid out for one size and the
+    // picture drawn at another.
+    let Bed { plate, lines, measure, top, .. } = m.bed(area, i);
 
     let centre = area.x as f64 + area.width as f64 / 2.0;
     let put = |f: &mut Frame, y: u16, w: u16, spans: Vec<Span<'static>>| {
@@ -236,23 +279,20 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
         f.render_widget(Paragraph::new(Line::from(spans)), Rect { x: x0, y, width: w, height: 1 });
     };
 
-    // The mount. Without it the contour field runs straight through the
-    // picture and the caption, and a photograph competing with a line drawing
-    // for the same cells reads as a rendering fault rather than as depth.
+    // The bed the picture lies on. The wall behind is already faded out of this
+    // area -- see `walls` -- so this is not hiding a hard edge, it is giving the
+    // caption a surface: text and braille dots in the same cells read as a
+    // rendering fault however faint the dots are.
     {
-        let mw = measure.max(plate.map_or(0, |p| p.cols)) + 4;
-        let x = centre + dx - mw as f64 / 2.0;
-        let y0 = top.saturating_sub(1);
-        let h = (total + 3).min((area.y + area.height).saturating_sub(y0));
-        if x >= area.x as f64 && x + mw as f64 <= (area.x + area.width) as f64 && h > 0 {
-            f.render_widget(
-                ratatui::widgets::Clear,
-                Rect { x: x as u16, y: y0, width: mw, height: h },
-            );
-            f.render_widget(
-                Paragraph::new("").style(Style::default().bg(crate::paint::BG)),
-                Rect { x: x as u16, y: y0, width: mw, height: h },
-            );
+        let bed = m.mount(area, i);
+        let x = bed.x as f64 + dx;
+        if x >= area.x as f64
+            && x + bed.width as f64 <= (area.x + area.width) as f64
+            && bed.height > 0
+        {
+            let r = Rect { x: x as u16, ..bed };
+            f.render_widget(ratatui::widgets::Clear, r);
+            f.render_widget(Paragraph::new("").style(Style::default().bg(crate::paint::BG)), r);
         }
     }
 
@@ -286,7 +326,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
         }
     }
 
-    let mut y = top + art_h + 1;
+    let mut y = top + plate.map_or(0, |p| p.rows) + 1;
     put(f, y, measure, vec![
         Span::styled(e.name.to_uppercase(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
         Span::styled(format!("   {}", e.from), Style::default().fg(FAINT)),
@@ -322,59 +362,44 @@ fn index(f: &mut Frame, area: Rect, m: &Museum) {
     f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, y, width: w, height: 1 });
 }
 
-/// The wall behind the work: slow contours in the work's own colour.
+/// The wall behind the work: a scene of its own, in the work's colour.
 ///
-/// Drawn on termap's subpixel canvas, the same braille the map and the tide
-/// are made of, so the room belongs to the same object as the rest of the app.
-/// It holds still once the plate does — a field that keeps drifting behind a
+/// The scene is `walls`; this decides which one, where the hole in it goes, and
+/// how far it has slid. Drawn on termap's subpixel canvas, the same braille the
+/// map and the tide are made of, so the room belongs to the same object as the
+/// rest of the app.
+///
+/// It holds still once the plate does -- a wall that keeps raining behind a
 /// settled photograph is bandwidth spent on something nobody is looking at.
 fn field(f: &mut Frame, area: Rect, m: &Museum) {
-    use termap::canvas::{Canvas, Fog, MAT_DOT, TINT_MONO};
-    use termap::raster::{self, Pen};
-
-    let (cw, ch) = (area.width as usize, area.height as usize);
-    if cw < 8 || ch < 6 {
-        return;
-    }
-    let mut canvas = Canvas::new(cw, ch);
-    let (sw, sh) = (canvas.sw as f64, canvas.sh as f64);
+    let Some(e) = m.works.get(m.sel) else { return };
+    // A name nothing answers to is the plain wall, not an error: this file is
+    // content, edited without a rebuild, and a typo in it should cost the
+    // scenery rather than the room.
+    let wall = crate::walls::Wall::named(&e.wall).unwrap_or(crate::walls::Wall::Contours);
 
     // Frozen with the plate, so the whole screen goes quiet together.
     let t = if m.moving(area) { m.t } else { 0.0 };
+    // How far the wall has slid from its resting place, in cells. The planes
+    // divide it between them, so the horizon barely moves while the foreground
+    // travels -- which is the only reason a flat terminal can feel deep.
+    let drift = (m.sel as f64 - m.pos) * area.width as f64 * 0.5;
+    // The same scatter every time for the same work, and a different one for
+    // the next: stars that jump when a reader walks back along the wall are
+    // worse than no stars.
+    let seed = e.id.bytes().fold(0x2545_F491_4F6C_DD1Du64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x1000_0000_01B3)
+    });
 
-    const LINES: usize = 7;
-    for i in 0..LINES {
-        let fy = (i as f64 + 0.5) / LINES as f64;
-        let pen = Pen {
-            width: 1.0,
-            alpha: 0.32,
-            depth: 0.35 + ((fy - 0.5).abs() * 2.0) as f32 * 0.6,
-            tint: TINT_MONO,
-            mat: MAT_DOT,
-            pick: u32::MAX,
-            occlude: false,
-        };
-        let phase = i as f64 * 2.3;
-        let k1 = 3.0 + i as f64 * 0.4;
-        let k2 = 1.7 + i as f64 * 0.23;
-        let mut prev: Option<[f64; 2]> = None;
-        let steps = (sw as usize / 3).max(8);
-        for s in 0..=steps {
-            let u = s as f64 / steps as f64;
-            let env = (u * std::f64::consts::PI).sin().powf(1.2);
-            let a = (u * k1 + t * 0.35 + phase).sin() * 0.6
-                + (u * k2 - t * 0.22 + phase * 1.4).sin() * 0.4;
-            let p = [u * sw, fy * sh + a * env * sh * 0.055];
-            if let Some(q) = prev {
-                raster::line(&mut canvas, q, p, &pen);
-            }
-            prev = Some(p);
-        }
+    if crate::walls::draw(f, area, wall, m.mount(area, m.sel), t, drift, seed) {
+        // The canvas draws in greys; the wall's colour is applied over the top
+        // so one scene serves every work rather than needing a palette slot
+        // each.
+        // Stronger than the old field's 0.26. That was a texture nobody was
+        // meant to look at; this is a picture, and at a quarter strength every
+        // scene read as smudges on an empty screen.
+        paint::recolour(f, area, m.wall(), 0.55);
     }
-    canvas.resolve(f.buffer_mut(), area, &Fog::default(), true);
-    // The canvas draws in greys; the wall's colour is applied over the top so
-    // one field serves every work rather than needing a palette slot each.
-    paint::recolour(f, area, m.wall(), 0.26);
 }
 
 #[cfg(test)]
