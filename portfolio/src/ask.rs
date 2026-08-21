@@ -1422,6 +1422,26 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     (at.height >= 8 && at.width >= 30).then_some((at, spot, p.fade()))
 }
 
+/// A line saying what the last map chord did, in the corner of the map.
+///
+/// It fades, and it exists because a four-degree tilt step is not visible on a
+/// map this size: without it, a chord that worked and a chord the terminal
+/// swallowed look exactly the same on screen.
+pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32) {
+    if area.height < 3 || alpha <= 0.02 {
+        return;
+    }
+    let text = format!(" {said} ");
+    let w = (text.chars().count() as u16).min(area.width);
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            text,
+            Style::default().fg(crate::paint::dim_to(crate::paint::lead(), alpha)),
+        )),
+        Rect { x: area.x + area.width - w, y: area.y, width: w, height: 1 },
+    );
+}
+
 /// Where the reading column sits, so the shell can dim the map under it.
 ///
 /// Text over braille is unreadable at full strength, and the answer to that is

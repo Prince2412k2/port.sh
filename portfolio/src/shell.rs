@@ -114,7 +114,18 @@ pub struct Shell {
     /// consulted: somebody who has panned somewhere has said where they want to
     /// be. Cleared when the agent asks for a new place, and by ctrl-g.
     manual: Option<termap::geo::Viewport>,
+    /// What the last map chord did, and how long ago.
+    ///
+    /// The map already writes these -- `set_tilt` says "tilt 39 degrees" -- and
+    /// this side was throwing them away. Worth keeping for a plain reason: a
+    /// tilt step is four and a half degrees, which on a small map is almost
+    /// invisible, so "ctrl-o does nothing" and "ctrl-o never arrived" looked
+    /// exactly alike. Now one of them says what it did.
+    chord: Option<(String, f64)>,
 }
+
+/// How long a chord's report stays up.
+const CHORD_SECS: f64 = 1.8;
 
 /// The chat's map thumbnail, and the flight it is on.
 ///
@@ -168,6 +179,18 @@ const CONVERGE: f64 = 0.28;
 /// before the town is, which is what makes it read as a descent rather than a
 /// zoom.
 const DESCENT: f64 = 3.6;
+
+/// `ctrl-o` reads better than `Char('o')` in a read-out.
+fn key_name(code: KeyCode) -> String {
+    match code {
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        other => format!("{other:?}").to_lowercase(),
+    }
+}
 
 impl Locator {
     /// Build the flight between two (point, zoom) pairs.
@@ -288,6 +311,7 @@ impl Shell {
             since: 0.0,
             locator: None,
             manual: None,
+            chord: None,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         // The chat turns a question into a point on its own -- but only the map
@@ -388,6 +412,7 @@ impl Shell {
                     self.ask.busy()
                         || self.ask.panel.as_ref().is_some_and(|p| p.moving())
                         || self.locator.is_some_and(|l| l.flying())
+                        || self.chord.is_some()
                 }
                 // Both halves of this come from the bake actually on screen: a
                 // window too narrow for the portrait has nothing animating at
@@ -427,6 +452,12 @@ impl Shell {
             Section::Ask => {
                 self.ask.tick(dt);
                 self.aim(dt);
+                if let Some((_, age)) = &mut self.chord {
+                    *age += dt;
+                }
+                if self.chord.as_ref().is_some_and(|(_, age)| *age > CHORD_SECS) {
+                    self.chord = None;
+                }
                 // The map goes on ticking while the chat has the screen, but
                 // only while a thumbnail is on it: the tiles it wants are
                 // fetched on the frame that draws them and nothing here
@@ -686,8 +717,14 @@ impl Shell {
         let was = self.map.park_viewport(vp);
         self.map.on_key(KeyEvent::new(k.code, KeyModifiers::NONE));
         let after = self.map.vp;
+        let said = self.map.toast.take();
         self.map.unpark_camera(was);
         self.manual = Some(after);
+        // Whatever the map said about it, or the key itself if it said nothing.
+        // A chord that reports nothing is indistinguishable from one that never
+        // arrived, and that ambiguity has already cost a round of "it is not
+        // working" against code that was working.
+        self.chord = Some((said.unwrap_or_else(|| format!("^{}", key_name(k.code))), 0.0));
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -789,6 +826,7 @@ impl Shell {
                     // who has panned away is looking at somewhere else.
                     let mark = (pin && self.manual.is_none()).then_some(drop);
                     termap::ui::render_locator(f, at, &mut self.map, cam, mark);
+                    let chord = self.chord.clone();
                     // Composited afterwards, like the section dissolve: the map
                     // renderer knows nothing about this page's fade, or about
                     // having no edges, and should not have to.
@@ -807,6 +845,11 @@ impl Shell {
                     // are, nothing by the time the map is on its own.
                     let over = ask::prose_rect(body, &self.ask).intersection(at);
                     paint::veil_ramp(f, over, 0.34, 1.0);
+                    // On top of the dissolve, not under it: it is a read-out
+                    // rather than part of the picture, and it fades on its own.
+                    if let Some((said, age)) = chord {
+                        ask::chord_note(f, at, &said, (1.0 - age / CHORD_SECS) as f32);
+                    }
                 }
                 ask::render(f, body, &self.ask);
             }
@@ -1134,6 +1177,64 @@ mod tests {
         s.tick(1.0);
         assert!(s.ask.panel.is_none(), "it never finished leaving");
         assert!(s.locator.is_none(), "the camera outlived the panel");
+    }
+
+    /// The same thing again, but from the bytes a terminal really sends.
+    ///
+    /// The synthesized-key test above proves the routing; this proves the
+    /// decoding, which is the half that can be wrong without anything failing:
+    /// ctrl-o is byte 0x0F and every one of these chords is a single control
+    /// byte that has to survive `wire.rs` and arrive as a letter with a
+    /// modifier on it.
+    #[test]
+    fn the_map_chords_survive_being_typed() {
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "where is jaipur".into();
+        s.ask.submit();
+        let board = s.ask.board_token().expect("no board").to_string();
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+        s.tick(3.0);
+
+        let mut decoder = crate::wire::Decoder::default();
+        let mut typed = |s: &mut Shell, bytes: &[u8]| {
+            for ev in decoder.feed(bytes) {
+                if let crossterm::event::Event::Key(k) = ev {
+                    s.on_key(k);
+                }
+            }
+        };
+
+        // ctrl-u, 0x15: lean over.
+        let flat = s.chat_camera().unwrap().tilt;
+        typed(&mut s, &[0x15]);
+        let leaned = s.chat_camera().unwrap().tilt;
+        assert!(leaned > flat, "ctrl-u as a byte did nothing: {flat} -> {leaned}");
+
+        // ctrl-o, 0x0F: back the other way. This is the one that was reported
+        // as not working, so it is asserted from the byte and not from a
+        // KeyEvent somebody built by hand.
+        typed(&mut s, &[0x0f]);
+        let back = s.chat_camera().unwrap().tilt;
+        assert!(back < leaned, "ctrl-o as byte 0x0f did nothing: {leaned} -> {back}");
+
+        // And the line is untouched by all of it -- these are chords, not text.
+        assert_eq!(s.ask.input, "", "a map chord typed into the question");
+
+        // Each one leaves a read-out, which is the difference between a chord
+        // that did something too small to see and one that never arrived.
+        let (said, _) = s.chord.clone().expect("the chord said nothing");
+        assert!(said.to_lowercase().contains("tilt"), "unhelpful read-out: {said}");
+        s.tick(CHORD_SECS + 0.1);
+        assert!(s.chord.is_none(), "the read-out never went away");
     }
 
     /// Ctrl and a key is the experience section's own map handler.
