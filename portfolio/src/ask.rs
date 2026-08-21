@@ -95,12 +95,43 @@ pub enum Life {
 #[derive(Debug, Clone)]
 pub enum Show {
     Code(&'static crate::coffee::Code),
-    /// A real map of a real point, drawn by the map renderer the experience
-    /// section uses. This file does not draw it: it has no `App` and should not
-    /// have one, so it says where the picture goes and the shell puts it there.
-    Place(Spot),
+    /// A map of one or more real points, drawn by the map renderer the
+    /// experience section uses. This file does not draw it: it has no `App` and
+    /// should not have one, so it says where the picture goes and the shell puts
+    /// it there.
+    Place(Tour),
     /// The certification badge, and the code that verifies it.
     Cert,
+}
+
+/// A route the visitor can walk, one stop at a time.
+///
+/// One place is a tour of length one, so there is a single shape to draw rather
+/// than a special case for the common thing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tour {
+    pub stops: Vec<Spot>,
+    pub at: usize,
+}
+
+impl Tour {
+    pub fn one(spot: Spot) -> Tour {
+        Tour { stops: vec![spot], at: 0 }
+    }
+
+    pub fn here(&self) -> &Spot {
+        &self.stops[self.at.min(self.stops.len() - 1)]
+    }
+
+    /// Step, wrapping. A route is a loop rather than a dead end: walking off the
+    /// last stop of five and being told no is a worse answer than going back to
+    /// the first.
+    fn step(&mut self, by: i32) {
+        let n = self.stops.len() as i32;
+        if n > 1 {
+            self.at = (self.at as i32 + by).rem_euclid(n) as usize;
+        }
+    }
 }
 
 /// Somewhere on the map, and what to say underneath it.
@@ -637,29 +668,41 @@ impl Ask {
                     t.calls.push(Call { id, title: tool, status: Status::Done, detail });
                 }
             }
-            Directive::Map { lat, lon, zoom, label } => {
-                let spot = Spot {
-                    // Not a tour stop, so `/map` has nowhere specific to fly and
-                    // the thumbnail draws its own crosshair.
-                    id: None,
-                    name: if label.trim().is_empty() { "here".into() } else { label },
-                    note: String::new(),
-                    lonlat: (lon, lat),
-                    zoom,
-                };
+            Directive::Map { stops } => {
+                let stops: Vec<Spot> = stops
+                    .into_iter()
+                    .map(|s| Spot {
+                        // Not a stop on the experience sheet, so `/map` has
+                        // nowhere specific to fly and the thumbnail draws its
+                        // own pin.
+                        id: None,
+                        name: if s.label.trim().is_empty() {
+                            "here".to_string()
+                        } else {
+                            s.label
+                        },
+                        note: s.note,
+                        lonlat: (s.lon, s.lat),
+                        zoom: s.zoom,
+                    })
+                    .collect();
+                if stops.is_empty() {
+                    return;
+                }
+                let tour = Tour { stops, at: 0 };
                 match &mut self.panel {
                     // Already showing a map: change where it is looking rather
                     // than fading one out and another in. The flight is the
                     // shell's -- see `Locator` -- and a cross-fade would hide
                     // exactly the motion that makes the move legible.
                     Some(p @ Panel { what: Show::Place(_), .. }) => {
-                        p.what = Show::Place(spot);
+                        p.what = Show::Place(tour);
                         if p.life == Life::Leaving {
                             p.life = Life::Arriving;
                             p.since = 0.0;
                         }
                     }
-                    _ => self.panel = Some(Panel::new(Show::Place(spot))),
+                    _ => self.panel = Some(Panel::new(Show::Place(tour))),
                 }
             }
             Directive::Clear => {
@@ -892,7 +935,8 @@ impl Ask {
             }
             "/keys" => "enter  ask        /  commands      up  what you asked before\n\
                         esc    stop       tab  take one     wheel / pgup  scroll\n\
-                        ctrl-u clear the line               tab  leave the section"
+                        ctrl-n next place  ctrl-b  back     ctrl-u  clear the line\n\
+                        tab    leave the section"
                 .into(),
             "/whoami" => {
                 let w = crate::visits::last_seen();
@@ -966,7 +1010,7 @@ impl Ask {
             }
         }
         match &self.panel {
-            Some(Panel { what: Show::Place(spot), .. }) => spot.id.clone(),
+            Some(Panel { what: Show::Place(tour), .. }) => tour.here().id.clone(),
             _ => None,
         }
     }
@@ -995,9 +1039,10 @@ impl Ask {
             // Not re-raised when it is already the thing on screen: a second
             // question about the same place should leave the picture alone
             // rather than fade it in again underneath the answer.
-            let same = matches!(&self.panel, Some(Panel { what: Show::Place(s), .. }) if *s == spot);
+            let same =
+                matches!(&self.panel, Some(Panel { what: Show::Place(t), .. }) if *t.here() == spot);
             if !same {
-                self.panel = Some(Panel::new(Show::Place(spot)));
+                self.panel = Some(Panel::new(Show::Place(Tour::one(spot))));
             }
         }
     }
@@ -1232,6 +1277,12 @@ impl Ask {
                 }
             }
             KeyCode::Char('u') if ctrl => self.input.clear(),
+            // Walking the route at the side. Ctrl rather than a bare key
+            // because every bare key in this section is a letter somebody is
+            // trying to type, and these have to work while a question is being
+            // written.
+            KeyCode::Char('n') if ctrl => self.walk(1),
+            KeyCode::Char('b') if ctrl => self.walk(-1),
             // Guarded: without this, Ctrl-C types a `c` into the question
             // instead of quitting.
             KeyCode::Char(c) if !ctrl && !k.modifiers.contains(KeyModifiers::ALT) => {
@@ -1242,6 +1293,16 @@ impl Ask {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Step through the places on the map, if there are several.
+    ///
+    /// The camera flies rather than cuts -- the shell reads the current stop
+    /// each frame and moves to it, so this only has to say which one.
+    pub fn walk(&mut self, by: i32) {
+        if let Some(Panel { what: Show::Place(tour), .. }) = &mut self.panel {
+            tour.step(by);
         }
     }
 
@@ -1267,7 +1328,7 @@ impl Ask {
 /// into a column the prose has already been given.
 fn panel_cols(area: Rect, a: &Ask) -> u16 {
     match &a.panel {
-        Some(p) if area.width >= 96 => panel_width(p).min(area.width / 2),
+        Some(p) if area.width >= 96 => panel_width(p, area).min(area.width / 2),
         _ => 0,
     }
 }
@@ -1294,7 +1355,10 @@ fn panel_rect(area: Rect, a: &Ask) -> Option<Rect> {
 /// wide, so a map drawn as many rows as columns is a map of a very thin strip
 /// of the world.
 fn locator_rect(panel: Rect) -> Option<Rect> {
-    let h = (panel.width / 2).clamp(7, 20).min(panel.height.saturating_sub(4));
+    // Half the width, because a cell is about twice as tall as it is wide and
+    // that makes the picture roughly square on screen. Room kept below it for a
+    // name, a sentence about the place, and the route footer.
+    let h = (panel.width / 2).clamp(7, 34).min(panel.height.saturating_sub(6));
     (h >= 7).then_some(Rect { height: h, ..panel })
 }
 
@@ -1313,7 +1377,7 @@ fn locator_rect(panel: Rect) -> Option<Rect> {
 /// panel silently reset the camera, and a resize mid-flight restarted it.
 pub fn showing_place(a: &Ask) -> Option<&Spot> {
     match &a.panel {
-        Some(Panel { what: Show::Place(spot), .. }) => Some(spot),
+        Some(Panel { what: Show::Place(tour), .. }) => Some(tour.here()),
         _ => None,
     }
 }
@@ -1323,7 +1387,8 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
         return None;
     }
     let p = a.panel.as_ref()?;
-    let Show::Place(spot) = &p.what else { return None };
+    let Show::Place(tour) = &p.what else { return None };
+    let spot = tour.here().clone();
     let at = locator_rect(panel_rect(area, a)?)?;
     Some((at, spot.clone(), p.fade()))
 }
@@ -1649,12 +1714,15 @@ fn settling(tip: &str, w: u16, t: f64) -> Vec<Span<'static>> {
 }
 
 /// How wide the panel wants to be.
-fn panel_width(p: &Panel) -> u16 {
+fn panel_width(p: &Panel, area: Rect) -> u16 {
     match &p.what {
         Show::Code(c) => (c.size + QUIET * 2) as u16,
-        // Wide enough that a city reads as a city. Narrower than this and the
-        // road network is a smudge, which is worse than no picture.
-        Show::Place(_) => 46,
+        // A share of the page rather than a fixed 46, which was wide enough for
+        // a city to read as a city and no wider -- on a full-screen terminal
+        // that left the map a stamp in the corner of a lot of empty room. Two
+        // fifths, floored at what was there before and capped so the prose keeps
+        // a readable measure.
+        Show::Place(_) => (area.width * 2 / 5).clamp(46, 92),
         // The badge and its code are the same width on purpose -- see the
         // generator. Whichever is wider decides, so neither is ever clipped by
         // a column the other one chose.
@@ -1681,7 +1749,8 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
         Show::Cert => badge(f, area, fade),
         // Only the caption. The picture above it belongs to the map renderer
         // and the shell draws it there -- see `map_panel`.
-        Show::Place(spot) => {
+        Show::Place(tour) => {
+            let spot = tour.here();
             let Some(pic) = locator_rect(area) else { return };
             let mut y = pic.y + pic.height + 1;
             let bottom = area.y + area.height;
@@ -1714,9 +1783,39 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     vec![Span::styled(l, Style::default().fg(crate::paint::dim_to(DIM, fade)))],
                 );
             }
-            // Only for somewhere the tour can actually fly to. Offering the
-            // flight to a visitor's own city would be offering nothing.
-            if spot.id.is_some() {
+            // Where you are in the route, and how to walk it. Only when there
+            // is a route: one place needs no directions, and a footer offering
+            // to step through a list of one is furniture.
+            if tour.stops.len() > 1 {
+                row(f, &mut y, vec![]);
+                row(
+                    f,
+                    &mut y,
+                    vec![
+                        Span::styled(
+                            format!("{}/{}", tour.at + 1, tour.stops.len()),
+                            Style::default().fg(crate::paint::dim_to(lead, fade)),
+                        ),
+                        Span::styled(
+                            "   ^n".to_string(),
+                            Style::default().fg(crate::paint::dim_to(CYAN, fade)),
+                        ),
+                        Span::styled(
+                            " next".to_string(),
+                            Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                        ),
+                        Span::styled(
+                            "   ^b".to_string(),
+                            Style::default().fg(crate::paint::dim_to(CYAN, fade)),
+                        ),
+                        Span::styled(
+                            " back".to_string(),
+                            Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                        ),
+                    ],
+                );
+            } else if spot.id.is_some() {
+                // A stop on the experience sheet: the full map can fly there.
                 row(f, &mut y, vec![]);
                 row(
                     f,
@@ -2609,9 +2708,10 @@ mod tests {
         let mut a = Ask::new();
         a.input = "where did he go to university?".into();
         a.submit();
-        let Some(Panel { what: Show::Place(spot), .. }) = &a.panel else {
+        let Some(Panel { what: Show::Place(tour), .. }) = &a.panel else {
             panic!("no map went up for a place question");
         };
+        let spot = tour.here();
         assert_eq!(spot.id.as_deref(), Some("silver-oak"));
         assert!(spot.name.contains("Silver Oak"));
 

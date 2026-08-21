@@ -892,10 +892,11 @@ mod tests {
         assert!(!out.contains("isError"), "{out}");
 
         s.tick(0.016);
-        let Some(crate::ask::Panel { what: crate::ask::Show::Place(spot), .. }) = &s.ask.panel
+        let Some(crate::ask::Panel { what: crate::ask::Show::Place(tour), .. }) = &s.ask.panel
         else {
             panic!("the tool call did not raise a map");
         };
+        let spot = tour.here();
         assert_eq!(spot.name, "Jaipur");
         assert!((spot.lonlat.0 - 75.79).abs() < 1e-9);
         assert!(s.ask.agent_drives, "the page did not notice the agent driving");
@@ -923,10 +924,11 @@ mod tests {
         s.ask.input = "where does he work?".into();
         s.ask.submit();
         s.tick(0.016);
-        let Some(crate::ask::Panel { what: crate::ask::Show::Place(spot), .. }) = &s.ask.panel
+        let Some(crate::ask::Panel { what: crate::ask::Show::Place(tour), .. }) = &s.ask.panel
         else {
             panic!("the map vanished");
         };
+        let spot = tour.here();
         assert_eq!(spot.name, "Jaipur", "the keyword guess fought the agent");
 
         // And *this* answer comes in having asked for nothing, so it leaves.
@@ -940,6 +942,66 @@ mod tests {
         s.tick(1.0);
         assert!(s.ask.panel.is_none(), "it never finished leaving");
         assert!(s.locator.is_none(), "the camera outlived the panel");
+    }
+
+    /// A route: several places in one call, walked with ctrl-n and ctrl-b.
+    #[test]
+    fn a_route_can_be_walked_and_the_camera_follows() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "cool places in uttar pradesh".into();
+        s.ask.submit();
+        let board = s.ask.board_token().expect("no board").to_string();
+
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"places":[
+                 {"lat":27.175,"lon":78.010,"label":"Agra","note":"the Taj Mahal is here"},
+                 {"lat":25.336,"lon":83.008,"label":"Varanasi","note":"the ghats"},
+                 {"lat":26.799,"lon":82.205,"label":"Ayodhya","note":"a pilgrimage town"}
+               ]}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+
+        let names = |s: &Shell| -> (String, usize, usize) {
+            match &s.ask.panel {
+                Some(crate::ask::Panel { what: crate::ask::Show::Place(t), .. }) => {
+                    (t.here().name.clone(), t.at, t.stops.len())
+                }
+                _ => panic!("no route on the page"),
+            }
+        };
+        assert_eq!(names(&s), ("Agra".into(), 0, 3), "the route did not arrive whole");
+        // The note came with it -- a pin without one is worth much less.
+        assert!(crate::ask::showing_place(&s.ask).unwrap().note.contains("Taj Mahal"));
+
+        let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        s.on_key(ctrl('n'));
+        s.tick(0.016);
+        assert_eq!(names(&s).0, "Varanasi", "ctrl-n did not move");
+        assert!(s.locator.unwrap().flying(), "it cut to the next stop instead of flying");
+
+        s.on_key(ctrl('b'));
+        s.tick(0.016);
+        assert_eq!(names(&s).0, "Agra", "ctrl-b did not go back");
+
+        // A route is a loop rather than a dead end.
+        s.on_key(ctrl('b'));
+        assert_eq!(names(&s).0, "Ayodhya", "walking back off the start stopped dead");
+        s.on_key(ctrl('n'));
+        assert_eq!(names(&s).0, "Agra", "walking on off the end stopped dead");
+
+        // And the keys stay usable while a question is being typed.
+        s.ask.input = "and what about".into();
+        s.on_key(ctrl('n'));
+        assert_eq!(names(&s).0, "Varanasi", "the route froze while typing");
+        assert_eq!(s.ask.input, "and what about", "walking the route typed into the line");
     }
 
     /// A second `show_map` flies rather than cuts.

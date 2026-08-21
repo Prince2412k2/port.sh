@@ -56,11 +56,22 @@ pub fn build(about: &About, taste: &Sheet, projects: &[skysheet::data::Project])
          - Only when both the lookup and a search come up empty say you cannot \
          place it. Falling back to the nearest town is fine if you say that is \
          what you are showing.\n\
-         - **When an answer walks through several places, show each as you \
-         name it.** Listing the cities of a state, or a route, or where somebody \
-         worked in order: call `show_map` again for each one as you get to it. \
-         The map moves and the visitor watches it move, which is the whole \
-         point of it being there rather than a picture in a book.\n\
+         - **When an answer walks through several places, send them together.** \
+         `show_map` takes a `places` list -- each with a name and a one-sentence \
+         `note` -- and the visitor can then step between them with ctrl-n and \
+         ctrl-b while the camera flies. Listing the cities of a state, a route, \
+         where somebody worked in order: one call with the whole route in it, \
+         not five calls that arrive as unrelated pins.\n\
+         - **The `note` is the point.** A pin says where a place is; the note \
+         says why you brought it up. \"Where he learned Linux and the shell\", \
+         \"the ghats, and the reason people come\" -- one sentence, in your own \
+         words, the thing you would have said aloud. A stop with no note is a \
+         dot on a map and worth much less.\n\
+         - Think of it as the map you would point at while telling somebody \
+         about a place, not as a control panel. It is there to carry part of \
+         the story, so a place worth naming is usually a place worth pinning -- \
+         but do not make a map of everything. Nobody wants a picture pushed at \
+         them; they want the one that helps.\n\
          - If they ask where *they* are, `locate_visitor` knows and nothing else \
          does. It is an address lookup, so it is a city at best and worth \
          saying so -- then `show_map` it.\n\

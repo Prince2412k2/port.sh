@@ -51,8 +51,9 @@ pub const SERVER_NAME: &str = "portfolio";
 /// this file only carries what was asked for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
-    /// Fly the map panel to a point and hold it there.
-    Map { lat: f64, lon: f64, zoom: f64, label: String },
+    /// Put one or more points on the map. More than one is a route the visitor
+    /// can walk with ctrl-n and ctrl-b; the camera flies between them.
+    Map { stops: Vec<Stop> },
     /// Take whatever is showing away.
     Clear,
     /// A tool was called, and this is what it was asked for.
@@ -73,6 +74,19 @@ struct Board {
     /// finishes after the visitor arrives, and a tool called ten seconds in
     /// should see the answer.
     place: Option<std::sync::Arc<Mutex<Option<termap::home::Where>>>>,
+}
+
+/// Somewhere on the map, as the agent described it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stop {
+    pub lat: f64,
+    pub lon: f64,
+    pub zoom: f64,
+    pub label: String,
+    /// A sentence about the place, shown under its name. This is what makes the
+    /// map worth having: a pin says where, and the line under it says why the
+    /// answer mentioned it at all.
+    pub note: String,
 }
 
 /// Sessions that can be drawn on, by token.
@@ -177,11 +191,15 @@ fn index() -> Option<&'static termap::gazetteer::Gazetteer> {
 /// for every answer is worse than one that never does: the picture stops
 /// meaning anything and the page starts flashing.
 fn tool_list() -> String {
-    let map_when = "Call this ONLY when a specific geographic place is the \
-        subject of the answer -- where somewhere is, where he studied or worked, \
-        where the visitor is. Do NOT call it for questions about code, \
-        projects, skills, opinions, or for greetings. Most answers should not \
-        show a map.";
+    let map_when = "Put a place on the map beside your answer. Call it whenever \
+        a real geographic place is part of what you are saying -- where \
+        somewhere is, where he studied or worked, the towns in a region, where \
+        the visitor is. Give every place a `note`: one sentence on why it is in \
+        the answer, in your own words, because a pin says where and the note \
+        says why it matters. Several places go in one call as a `places` list \
+        and become a route the visitor can step through. Do NOT call it for \
+        code, projects, skills, opinions or greetings -- a picture that appears \
+        for everything stops meaning anything.";
     format!(
         r#"{{"tools":[
         {{"name":"locate_place",
@@ -192,11 +210,17 @@ fn tool_list() -> String {
         {{"name":"show_map",
           "description":{},
           "inputSchema":{{"type":"object","properties":{{
-            "lat":{{"type":"number","description":"Latitude, from locate_place."}},
+            "lat":{{"type":"number","description":"Latitude, from locate_place. Use this and lon for a single place."}},
             "lon":{{"type":"number","description":"Longitude, from locate_place."}},
             "zoom":{{"type":"number","description":"Optional. From locate_place; omitted means a neighbourhood."}},
-            "label":{{"type":"string","description":"What to write under the map, e.g. the place name."}}
-          }},"required":["lat","lon"]}}}},
+            "label":{{"type":"string","description":"The place's name, written under the map."}},
+            "note":{{"type":"string","description":"One sentence on why this place matters to the answer. Shown under the name. This is what makes the map worth looking at -- a pin says where, this says why you mentioned it."}},
+            "places":{{"type":"array","description":"Several places at once, each {{lat, lon, label, note, zoom}}. Use this instead of lat/lon when the answer walks through more than one -- the visitor can step between them, and they stay together as one route rather than arriving as unrelated calls.","items":{{"type":"object","properties":{{
+              "lat":{{"type":"number"}},"lon":{{"type":"number"}},
+              "zoom":{{"type":"number"}},
+              "label":{{"type":"string"}},"note":{{"type":"string"}}
+            }},"required":["lat","lon"]}}}}
+          }}}}}},
         {{"name":"locate_visitor",
           "description":"Where the person you are talking to appears to be connecting from, as an address lookup sees it. Use it when they ask where they are, or where you think they are. It is a guess with a city's worth of precision -- say so. Returns found:false when the lookup has not come back or the address is private, and then you should say you cannot tell rather than guessing.",
           "inputSchema":{{"type":"object","properties":{{}}}}}},
@@ -220,7 +244,6 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
     eprintln!("portfolio: agent called `{name}`");
     send(token, Directive::Called { tool: name.to_string(), detail: detail_of(name, args) });
     let arg_str = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_str()).unwrap_or("");
-    let arg_num = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_f64());
 
     match name {
         "locate_place" => {
@@ -245,19 +268,41 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
             }
         }
         "show_map" => {
-            let (Some(lat), Some(lon)) = (arg_num("lat"), arg_num("lon")) else {
-                return err("show_map needs lat and lon");
+            // Either one point at the top level, or a list of them. Both,
+            // because an agent that has a single place to show should not have
+            // to build an array to say so, and one that is walking somebody
+            // through five should not have to call five times and lose the
+            // fact that they belong together.
+            let listed = args.and_then(|a| a.get("places")).and_then(|p| p.as_array());
+            let raw: Vec<&Value> = match listed {
+                Some(list) => list.iter().collect(),
+                None => args.into_iter().collect(),
             };
-            if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
-                return err("lat/lon out of range");
+            let mut stops = Vec::new();
+            for one in raw {
+                let num = |k: &str| one.get(k).and_then(|v| v.as_f64());
+                let text_of =
+                    |k: &str| one.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let (Some(lat), Some(lon)) = (num("lat"), num("lon")) else { continue };
+                if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+                    continue;
+                }
+                stops.push(Stop {
+                    lat,
+                    lon,
+                    // Clamped to a band a locator is legible in, whatever was
+                    // asked for: at street zoom the panel is four roads and a
+                    // bus stop labelled twice, which says nothing about where
+                    // the place is.
+                    zoom: num("zoom").unwrap_or(11.5).clamp(6.0, 12.5),
+                    label: text_of("label"),
+                    note: text_of("note"),
+                });
             }
-            let label = arg_str("label").to_string();
-            // Clamped to a band a *locator* is legible in, whatever the agent
-            // asked for. It is 46 columns wide: at street zoom that is four
-            // roads and a bus stop labelled twice, which says nothing about
-            // where the place is. The upper bound is the fix for exactly that.
-            let zoom = arg_num("zoom").unwrap_or(11.5).clamp(6.0, 12.5);
-            match send(token, Directive::Map { lat, lon, zoom, label }) {
+            if stops.is_empty() {
+                return err("show_map needs lat and lon, or a places list of them");
+            }
+            match send(token, Directive::Map { stops }) {
                 true => text(r#"{"shown":true}"#),
                 false => err("that screen is gone"),
             }
@@ -300,6 +345,16 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
     match name {
         "locate_place" => str_of("name").to_string(),
         "show_map" => {
+            if let Some(list) = args.and_then(|a| a.get("places")).and_then(|p| p.as_array()) {
+                let names: Vec<&str> = list
+                    .iter()
+                    .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
+                    .collect();
+                return match names.is_empty() {
+                    true => format!("{} places", list.len()),
+                    false => names.join(", "),
+                };
+            }
             let label = str_of("label");
             match (num_of("lat"), num_of("lon")) {
                 (Some(lat), Some(lon)) if label.is_empty() => format!("{lat:.3}, {lon:.3}"),
@@ -515,9 +570,11 @@ mod tests {
             other => panic!("expected a row: {other:?}"),
         }
         match rx.try_recv() {
-            Ok(Directive::Map { lat, lon, zoom, label }) => {
-                assert_eq!((lat, lon, zoom), (23.03, 72.51, 12.5));
-                assert_eq!(label, "Ahmedabad");
+            Ok(Directive::Map { stops }) => {
+                assert_eq!(stops.len(), 1);
+                let s = &stops[0];
+                assert_eq!((s.lat, s.lon, s.zoom), (23.03, 72.51, 12.5));
+                assert_eq!(s.label, "Ahmedabad");
             }
             other => panic!("wrong directive: {other:?}"),
         }
