@@ -1582,7 +1582,7 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
             Event::Ready(r) => Some(r),
             _ => None,
         });
-        let ready = ready.expect(&format!("no session opened at all: {events:?}"));
+        let ready = ready.unwrap_or_else(|| panic!("no session opened at all: {events:?}"));
         assert!(
             ready.tools,
             "the agent was handed our tools and reported as having none, so the \

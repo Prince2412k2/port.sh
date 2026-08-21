@@ -502,7 +502,6 @@ mod tests {
     /// loosely enough to catch it would also catch prose that merely mentions a
     /// tool. The cost is a refused fetch when an agent sends no name, which is
     /// the failure worth having. Do not "fix" this into a fuzzy match.
-    #[test]
     /// Ours are open under every spelling an agent will use for them, and --
     /// the part that is easy to get wrong -- they are not caught by the shut
     /// side's containment. `read_page` would have been: `read` is `view`'s alias
