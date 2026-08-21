@@ -1,0 +1,47 @@
+# Its own workspace, deliberately.
+#
+# `terminal/Cargo.toml` builds the portfolio and its renderers; this builds an
+# agent. Keeping them apart means a broken experiment in here cannot stop
+# `portfolio` compiling, and that `--offline` resolution for one is not hostage
+# to the other's lockfile. `portfolio` can path-depend on these crates when the
+# time comes -- a path dependency across workspaces is ordinary.
+
+[workspace]
+resolver = "2"
+members = ["parley", "envoy"]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+futures-core = "0.3"
+futures-util = "0.3"
+bytes = "1"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "io-util", "io-std", "process"] }
+tokio-util = "0.7"
+async-trait = "0.1"
+async-stream = "0.3"
+parley = { path = "parley" }
+
+# The protocol, from its own authors. Was not in the offline cache, which is why
+# the plan once said to copy types out of a clone; a real dependency is strictly
+# better -- every optional field, the tolerant deserialisation, and forward
+# compatibility all come with it. `schemars` off: we write tool schemas by hand.
+agent-client-protocol-schema = { version = "1.7", default-features = false }
+
+# `rustls` rather than `rustls-no-provider`: the former pulls `quinn` for
+# HTTP/3, which was absent from the offline cache until crates.io was reachable.
+# The hand-built TLS config in `http::client` still stands -- it is explicit
+# about roots and versions, which is worth keeping now that it exists.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
