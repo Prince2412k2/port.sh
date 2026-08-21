@@ -30,6 +30,14 @@ pub struct Tier {
     pub model: Model,
     pub endpoint: Endpoint,
     pub tuning: Tuning,
+    /// How this tier's credential is obtained, when it is one that expires.
+    ///
+    /// `endpoint.api_key` is what was on disk when the process started, which is
+    /// the wrong thing to send an hour later. A tier that names its credential
+    /// here has it renewed immediately before the request instead -- see
+    /// `auth::fresh`. `None` means the endpoint is already right: a static key,
+    /// or nothing required.
+    pub auth: Option<crate::auth::Auth>,
 }
 
 /// The longest we will sit on a rate limit before trying the next tier.
@@ -71,6 +79,7 @@ impl Wire for Fallback {
                 model: t.model.clone(),
                 endpoint: t.endpoint.clone(),
                 tuning: t.tuning.clone(),
+                auth: t.auth.clone(),
             })
             .collect();
 
@@ -97,6 +106,34 @@ impl Wire for Fallback {
                         let mut request = state.request.clone();
                         request.model = attempt.model.clone();
                         request.endpoint = attempt.endpoint;
+
+                        // The credential, as late as possible. A token read at
+                        // startup is the wrong one to send an hour into a
+                        // process, and this is the last point before the wire
+                        // where it can still be replaced. Every retry and every
+                        // fall-through comes back through here, so none of them
+                        // can reuse a dead one.
+                        if let Some(auth) = &attempt.auth {
+                            match crate::auth::fresh(auth).await {
+                                Ok(live) => {
+                                    request.endpoint.api_key = live.api_key;
+                                    request.endpoint.headers = live.headers;
+                                }
+                                // A tier whose credential cannot be renewed is a
+                                // tier that cannot answer, so it falls through
+                                // like any other failure -- and is reported like
+                                // one when it is the last.
+                                Err(e) => {
+                                    if state.at + 1 >= state.attempts.len() {
+                                        state.queue.push_back(Err(e));
+                                    } else {
+                                        state.at += 1;
+                                        state.waited = false;
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         attempt.tuning.apply(&mut request.options);
                         state.current = Some((attempt.wire.stream(request), attempt.model));
                         state.spoke = false;
@@ -163,6 +200,7 @@ struct Attempt {
     model: Model,
     endpoint: Endpoint,
     tuning: Tuning,
+    auth: Option<crate::auth::Auth>,
 }
 
 struct State {
@@ -203,6 +241,7 @@ mod tests {
             model: model(id),
             endpoint: Endpoint::default(),
             tuning: Tuning::default(),
+            auth: None,
         }
     }
 
@@ -231,6 +270,7 @@ mod tests {
             model: model(id),
             endpoint: Endpoint::default(),
             tuning: Tuning::default(),
+            auth: None,
         }
     }
 
@@ -302,6 +342,7 @@ mod tests {
             model: model("a"),
             endpoint: Endpoint::default(),
             tuning: Tuning::default(),
+            auth: None,
         };
         // Canned yields the events then, on the *next* turn, an error -- so
         // drive two tiers and assert the second never speaks.
@@ -358,6 +399,7 @@ mod tests {
                 model: model("a"),
                 endpoint: Endpoint::default(),
                 tuning: Tuning::default(),
+                auth: None,
             },
             tier("b", vec![answer("from b")]),
         ]);
@@ -390,6 +432,7 @@ mod tests {
                 model: model("a"),
                 endpoint: Endpoint::default(),
                 tuning: Tuning::default(),
+                auth: None,
             },
             tier("b", vec![answer("from b")]),
         ]);
@@ -412,6 +455,7 @@ mod tests {
                 effort: Some(crate::types::Effort::Low),
                 max_output: Some(4096),
             },
+            auth: None,
         }]);
         let mut request = request();
         request.options.cache_key = Some("session-7".into());

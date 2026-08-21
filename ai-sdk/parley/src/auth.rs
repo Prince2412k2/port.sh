@@ -8,10 +8,28 @@
 //!
 //! Refreshing has to happen in process, because an access token expires in the
 //! middle of a conversation rather than between them. That is the one write this
-//! module does, and it writes to its own file: the Codex CLI's credentials are
-//! read as a seed and never overwritten, because a refresh rotates the token and
-//! clobbering somebody's working CLI login to save a copy would be a poor
-//! trade.
+//! module does, and it writes to its own file: another program's credentials are
+//! read as a seed and never overwritten, because that file is not ours and its
+//! owner may be writing it at the same moment.
+//!
+//! **A refresh token can only have one owner, and that is not a rule we chose.**
+//! The issuer rotates it: the moment we exchange one, the copy in the seed file
+//! is dead. So refreshing somebody else's credential *always* costs them their
+//! login eventually, whether or not we write anything back. Two things make that
+//! trade an honest one:
+//!
+//! - We only refresh when the token is nearly expired, which is exactly when the
+//!   seed's copy was about to stop working anyway. A fresh seed is used as-is and
+//!   nothing rotates -- the common case leaves the other program alone.
+//! - Whichever side refreshed *last* wins. `fresh` reads both the seed and our
+//!   own copy and uses whichever was issued more recently, so if opencode
+//!   renews its own login we pick that up, and if we renew ours it keeps
+//!   working. It heals in both directions instead of one side going quietly
+//!   stale.
+//!
+//! What it cannot do is make one refresh token serve two programs indefinitely.
+//! If both this and opencode are expected to reach the same provider, both need
+//! their own login.
 
 use std::path::{Path, PathBuf};
 
@@ -167,11 +185,33 @@ impl Codex {
             .map_err(|e| Error::NoCredential(format!("{} is not a Codex credential: {e}", path.display())))
     }
 
+    /// Write our own copy, atomically and privately.
+    ///
+    /// Temp file and a rename, because several of these processes can run at
+    /// once -- one per visitor, in the deployment this is for -- and a reader
+    /// must never see half a credential. Mode 0600 for the obvious reason: this
+    /// is a bearer token for somebody's account.
     pub fn write(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| Error::NoCredential(format!("cannot encode credentials: {e}")))?;
-        std::fs::write(path.as_ref(), text)
-            .map_err(|e| Error::NoCredential(format!("{}: {e}", path.as_ref().display())))
+        let fail = |e: std::io::Error| Error::NoCredential(format!("{}: {e}", path.display()));
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(fail)?;
+        }
+        // Named after this process, so two of them cannot collide on the temp
+        // file itself.
+        let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+        {
+            use std::io::Write;
+            let mut f = open_private(&temp).map_err(fail)?;
+            f.write_all(text.as_bytes()).map_err(fail)?;
+            f.sync_all().map_err(fail)?;
+        }
+        std::fs::rename(&temp, path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp);
+            fail(e)
+        })
     }
 
     /// The account the token belongs to.
@@ -191,6 +231,18 @@ impl Codex {
             .and_then(|a| a.get("chatgpt_account_id"))
             .and_then(Value::as_str)
             .map(str::to_string)
+    }
+
+    /// When this pair was issued, from the access token's own `iat`.
+    ///
+    /// Used to tell our copy from the seed's when both exist: the one issued
+    /// more recently is the live one, and the other's refresh token is either
+    /// already dead or about to be. Without this the two would fight, and the
+    /// loser would be whichever program happened to run second.
+    pub fn issued_at(&self) -> Option<u64> {
+        claims(&self.tokens.access_token)?
+            .get("iat")
+            .and_then(Value::as_u64)
     }
 
     /// Seconds until the access token expires; negative once it has.
@@ -295,6 +347,172 @@ fn claims(token: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// A file only this user can read. The token in it is a bearer credential.
+fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+}
+
+/// Where our own copy of a renewed pair lives, given the seed it came from.
+///
+/// Named after the seed rather than fixed, so two tiers seeded from two
+/// different logins do not overwrite each other's tokens -- which would present
+/// as one account's requests being signed as the other's.
+///
+/// `ENVOY_AUTH_STORE` overrides the directory. That exists because the
+/// deployment this is for has exactly one writable path, and it is not the one
+/// the specification would pick.
+pub fn keep_for(seed: &Path) -> Option<PathBuf> {
+    let dir = match std::env::var_os("ENVOY_AUTH_STORE") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => match std::env::var_os("XDG_DATA_HOME") {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("envoy"),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/share/envoy"),
+        },
+    };
+    // `<parent>-<stem>.json`: `/app/agent/opencode/auth.json` becomes
+    // `opencode-auth.json`, `~/.codex/auth.json` becomes `codex-auth.json`.
+    let stem = seed.file_stem()?.to_string_lossy().to_string();
+    let parent = seed
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().trim_start_matches('.').to_string())
+        .unwrap_or_default();
+    let name = match parent.is_empty() {
+        true => format!("{stem}.json"),
+        false => format!("{parent}-{stem}.json"),
+    };
+    Some(dir.join(name))
+}
+
+/// The credential to use right now, renewing it first if it is about to expire.
+///
+/// The async half of `resolve`. Everything that cannot expire goes straight
+/// through; an OAuth pair is checked, and renewed at the last moment before a
+/// request rather than at startup -- a process that has been up for an hour
+/// holding a token issued before that would otherwise send a dead one.
+pub async fn fresh(auth: &Auth) -> Result<Resolved> {
+    let seed_path = match auth {
+        Auth::Codex(path) | Auth::Opencode(path) => path.clone(),
+        // Nothing else here has an expiry.
+        other => return resolve(other),
+    };
+
+    let seed = read_oauth(auth).ok();
+    let keep_path = keep_for(&seed_path);
+    let kept = keep_path.as_ref().and_then(|p| Codex::read(p).ok());
+
+    let now = now();
+    let (live, spare) = match pick(seed, kept, now) {
+        // Good for a while yet. Nothing is written and nothing rotates, which
+        // is what leaves the other program's copy working.
+        Pick::Use(live) => return Ok(live.resolved()),
+        Pick::Renew { live, spare } => (live, spare),
+        Pick::Nothing => {
+            // Say which file, and what to run. This is the whole diagnosis.
+            return Err(Error::NoCredential(format!(
+                "no usable login in {} -- run `opencode auth login` and pick the provider",
+                seed_path.display()
+            )));
+        }
+    };
+
+    match live.refresh().await {
+        Ok(renewed) => {
+            if let Some(path) = &keep_path {
+                // A write that fails is worth saying and not worth failing on:
+                // the token in hand is good for an hour either way, and the next
+                // process will renew again.
+                if let Err(e) = renewed.write(path) {
+                    eprintln!("parley: could not keep the renewed credential: {e}");
+                }
+            }
+            Ok(renewed.resolved())
+        }
+        Err(e) => {
+            // Two ways this is somebody else's success rather than our failure:
+            // another process of ours renewed a moment ago and holds the pair we
+            // just spent, or the other side re-logged in and the file we called
+            // the spare is now the live one. Both look like `invalid_grant`.
+            if let Some(path) = &keep_path {
+                if let Ok(again) = Codex::read(path) {
+                    if !again.stale(now) {
+                        return Ok(again.resolved());
+                    }
+                }
+            }
+            if let Some(spare) = spare {
+                if !spare.stale(now) {
+                    return Ok(spare.resolved());
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// What to do with what is on disk.
+///
+/// Split out and pure so the rules can be checked without a network, a clock or
+/// a real token: which of two pairs is live, when to renew, and what to keep in
+/// reserve if renewing fails.
+#[derive(Debug)]
+pub(crate) enum Pick {
+    /// Good for now. Send it and touch nothing.
+    Use(Codex),
+    /// About to expire. Renew this one; fall back to the other if that fails.
+    Renew { live: Codex, spare: Option<Codex> },
+    /// Nothing usable on disk at all.
+    Nothing,
+}
+
+pub(crate) fn pick(seed: Option<Codex>, kept: Option<Codex>, now: u64) -> Pick {
+    // Whichever was issued last is the live one. See the module note: the
+    // issuer rotates refresh tokens, so the older of the two holds one that is
+    // already spent or about to be. A pair whose issue time cannot be read
+    // loses to one whose can -- an unreadable token is not evidence of
+    // freshness.
+    let (live, spare) = match (seed, kept) {
+        (Some(a), Some(b)) => match (a.issued_at(), b.issued_at()) {
+            (Some(x), Some(y)) if y > x => (b, Some(a)),
+            (None, Some(_)) => (b, Some(a)),
+            _ => (a, Some(b)),
+        },
+        (Some(only), None) | (None, Some(only)) => (only, None),
+        (None, None) => return Pick::Nothing,
+    };
+    // A spare that has also expired is not a spare.
+    let spare = spare.filter(|s| !s.stale(now));
+    match live.stale(now) {
+        false => Pick::Use(live),
+        // The live one is spent, but a fresh spare means somebody else renewed
+        // while we were not looking -- use theirs rather than spending ours.
+        true => match spare {
+            Some(spare) if !spare.stale(now) && spare.issued_at() >= live.issued_at() => {
+                Pick::Use(spare)
+            }
+            spare => Pick::Renew { live, spare },
+        },
+    }
+}
+
+/// The seed, whichever shape it is in.
+fn read_oauth(auth: &Auth) -> Result<Codex> {
+    match auth {
+        Auth::Codex(path) => Codex::read(path),
+        Auth::Opencode(path) => Opencode::read(path)?
+            .oauth("openai")
+            .map_err(|e| Error::NoCredential(format!("{}: {e}", path.display()))),
+        _ => Err(Error::NoCredential("not an oauth credential".into())),
+    }
+}
+
 pub fn resolve(auth: &Auth) -> Result<Resolved> {
     match auth {
         Auth::None => Ok(Resolved {
@@ -323,14 +541,14 @@ pub fn resolve(auth: &Auth) -> Result<Resolved> {
                 names.join(", ")
             )))
         }
-        Auth::Codex(path) => Ok(Codex::read(path)?.resolved()),
         // The provider is `openai` because that is what opencode calls the
         // ChatGPT login in that file. Its other entries are other providers'
         // and none of them is this one.
-        Auth::Opencode(path) => Ok(Opencode::read(path)?
-            .oauth("openai")
-            .map_err(|e| Error::NoCredential(format!("{}: {e}", path.display())))?
-            .resolved()),
+        //
+        // Note what this does *not* do: renew. `resolve` is the synchronous
+        // answer to "what is on disk", used at startup to decide which tiers
+        // have a credential at all. `fresh` is the one a request goes through.
+        Auth::Codex(_) | Auth::Opencode(_) => Ok(read_oauth(auth)?.resolved()),
     }
 }
 
@@ -370,6 +588,227 @@ mod tests {
             last_refresh: None,
         }
     }
+
+    /// A pair with a known issue time, an expiry and a refresh token, for the
+    /// rules below. `iat` is what decides which of two files is live.
+    fn pair(iat: u64, exp: u64, refresh: &str) -> Codex {
+        Codex {
+            auth_mode: Some("chatgpt".into()),
+            tokens: Tokens {
+                access_token: jwt(json!({ "iat": iat, "exp": exp })),
+                refresh_token: refresh.into(),
+                id_token: None,
+                account_id: Some("acct".into()),
+            },
+            last_refresh: None,
+        }
+    }
+
+    /// The common case, and the one that matters most: a token with time left is
+    /// used as it is. Nothing is renewed, so nothing rotates, so the other
+    /// program reading the same file keeps working.
+    #[test]
+    fn a_credential_with_time_left_is_used_untouched() {
+        let now = 1_000_000;
+        match pick(Some(pair(now - 60, now + 3600, "r")), None, now) {
+            Pick::Use(live) => assert_eq!(live.tokens.refresh_token, "r"),
+            other => panic!("renewed a perfectly good token: {other:?}"),
+        }
+    }
+
+    /// Two files, and the one issued later wins. This is the rule that makes it
+    /// heal in both directions: if the other program re-logged in, its file is
+    /// newer and we use that; if we renewed, ours is.
+    #[test]
+    fn the_more_recently_issued_of_two_files_is_the_live_one() {
+        let now = 2_000_000;
+        let older = pair(now - 7200, now + 600, "old");
+        let newer = pair(now - 60, now + 3600, "new");
+
+        // Ours is newer.
+        match pick(Some(older.clone()), Some(newer.clone()), now) {
+            Pick::Use(live) => assert_eq!(live.tokens.refresh_token, "new"),
+            other => panic!("{other:?}"),
+        }
+        // Theirs is newer -- they logged in again.
+        match pick(Some(newer.clone()), Some(older.clone()), now) {
+            Pick::Use(live) => assert_eq!(live.tokens.refresh_token, "new"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An expired token is renewed, and the other file is kept as the fallback
+    /// for a renewal that fails.
+    #[test]
+    fn an_expired_credential_is_renewed_with_the_other_held_in_reserve() {
+        let now = 3_000_000;
+        // Both expired, ours issued later.
+        let theirs = pair(now - 7200, now - 3600, "theirs");
+        let ours = pair(now - 3600, now - 10, "ours");
+        match pick(Some(theirs), Some(ours), now) {
+            Pick::Renew { live, spare } => {
+                assert_eq!(live.tokens.refresh_token, "ours");
+                // An expired spare is not a spare.
+                assert!(spare.is_none(), "held an expired pair in reserve");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The race this is really guarding: another process of ours renewed a
+    /// moment ago and wrote a good pair. Spending our dead refresh token would
+    /// invalidate theirs; using it costs nothing.
+    #[test]
+    fn a_fresh_pair_from_somebody_else_is_used_rather_than_spending_ours() {
+        let now = 4_000_000;
+        let ours_dead = pair(now - 3600, now - 5, "spent");
+        let theirs_fresh = pair(now - 30, now + 3600, "fresh");
+        match pick(Some(ours_dead), Some(theirs_fresh), now) {
+            Pick::Use(live) => assert_eq!(live.tokens.refresh_token, "fresh"),
+            other => panic!("spent a dead token with a good one on disk: {other:?}"),
+        }
+    }
+
+    /// A token whose issue time cannot be read loses to one that can. An
+    /// unreadable token is not evidence of freshness.
+    #[test]
+    fn an_unreadable_pair_does_not_win_on_a_tie() {
+        let now = 5_000_000;
+        let unreadable = Codex {
+            tokens: Tokens { access_token: "not-a-jwt".into(), ..pair(0, 0, "opaque").tokens },
+            ..pair(0, 0, "opaque")
+        };
+        let good = pair(now - 60, now + 3600, "good");
+        match pick(Some(unreadable), Some(good), now) {
+            Pick::Use(live) => assert_eq!(live.tokens.refresh_token, "good"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn nothing_on_disk_is_nothing_to_use() {
+        assert!(matches!(pick(None, None, 1), Pick::Nothing));
+    }
+
+    /// Where our own copy goes: named after the seed, so two logins cannot
+    /// overwrite each other and sign one account's requests as the other's.
+    #[test]
+    fn our_own_copy_is_named_after_the_login_it_came_from() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("ENVOY_AUTH_STORE");
+        std::env::set_var("XDG_DATA_HOME", "/app/agent");
+        assert_eq!(
+            keep_for(Path::new("/app/agent/opencode/auth.json")).unwrap(),
+            PathBuf::from("/app/agent/envoy/opencode-auth.json")
+        );
+        // The leading dot of `~/.codex` is not part of a filename we want.
+        assert_eq!(
+            keep_for(Path::new("/home/p/.codex/auth.json")).unwrap(),
+            PathBuf::from("/app/agent/envoy/codex-auth.json")
+        );
+        // Two logins, two files. The failure this prevents is one account's
+        // token being sent for the other's requests.
+        assert_ne!(
+            keep_for(Path::new("/app/agent/opencode/auth.json")),
+            keep_for(Path::new("/home/p/.codex/auth.json"))
+        );
+
+        std::env::set_var("ENVOY_AUTH_STORE", "/tmp/elsewhere");
+        assert_eq!(
+            keep_for(Path::new("/app/agent/opencode/auth.json")).unwrap(),
+            PathBuf::from("/tmp/elsewhere/opencode-auth.json")
+        );
+        std::env::remove_var("ENVOY_AUTH_STORE");
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+
+    /// Our copy is written atomically, privately, and to a directory that may
+    /// not exist yet. Several of these processes run at once in the deployment
+    /// this is for, so a reader must never see half a credential.
+    #[test]
+    fn our_own_copy_is_written_whole_and_private() {
+        let dir = std::env::temp_dir().join(format!("parley-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("nested/opencode-auth.json");
+        let want = pair(10, 20, "kept");
+        want.write(&path).expect("did not write");
+
+        let back = Codex::read(&path).expect("did not read back");
+        assert_eq!(back.tokens.refresh_token, "kept");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a bearer token was left readable");
+        }
+        // No temp file left behind.
+        let strays: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left a temp file: {strays:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A live one, end to end, without a network: a seed with time left resolves
+    /// through `fresh` and writes nothing at all.
+    #[tokio::test]
+    async fn a_fresh_seed_resolves_without_renewing_or_writing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("parley-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ENVOY_AUTH_STORE", dir.join("keep"));
+
+        let now = now();
+        let seed = dir.join("auth.json");
+        std::fs::write(
+            &seed,
+            json!({
+                "openai": {
+                    "type": "oauth",
+                    "access": jwt(json!({ "iat": now - 60, "exp": now + 3600 })),
+                    "refresh": "rt",
+                    "accountId": "acct-9"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let before = std::fs::read(&seed).unwrap();
+
+        let resolved = fresh(&Auth::Opencode(seed.clone())).await.expect("no credential");
+        assert!(resolved.api_key.is_some());
+        assert!(resolved
+            .headers
+            .iter()
+            .any(|(k, v)| k == "chatgpt-account-id" && v == "acct-9"));
+        assert_eq!(std::fs::read(&seed).unwrap(), before, "the seed was written to");
+        assert!(!dir.join("keep").exists(), "kept a copy it did not need to");
+
+        std::env::remove_var("ENVOY_AUTH_STORE");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// And the diagnosis when there is nothing: the file, and the command.
+    #[tokio::test]
+    async fn no_login_at_all_names_the_file_and_the_fix() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("ENVOY_AUTH_STORE", std::env::temp_dir().join("parley-none"));
+        let why = fresh(&Auth::Opencode(PathBuf::from("/nowhere/auth.json")))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("/nowhere/auth.json"), "{why}");
+        assert!(why.contains("opencode auth login"), "{why}");
+        std::env::remove_var("ENVOY_AUTH_STORE");
+    }
+
+    /// One lock, because these set environment variables and cargo runs tests
+    /// on threads that share them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// The shape of opencode's file, as it is actually on disk. The tokens are
     /// stand-ins; every key name is real, including the camel case one that a

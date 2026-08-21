@@ -348,11 +348,19 @@ impl Config {
     }
 
     /// Turn tiers into wires, dropping the ones with no usable credential.
+    ///
+    /// The credential resolved here is only good enough to answer "does this
+    /// tier have one at all", which is what deciding the order needs. Each tier
+    /// also carries *how* to obtain it, and a request renews it immediately
+    /// before going out -- see `parley::auth::fresh`. Without that, a process
+    /// that has been up longer than an access token lives would send a dead one
+    /// and report the provider as refusing us.
     pub fn ready(&self) -> Ready {
         let mut tiers = Vec::new();
         let mut skipped = Vec::new();
         for tier in &self.tiers {
-            match parley::auth::resolve(&tier.auth()) {
+            let auth = tier.auth();
+            match parley::auth::resolve(&auth) {
                 Err(e) => skipped.push(format!("{}/{}: {e}", tier.provider, tier.model)),
                 Ok(resolved) => tiers.push(Tier {
                     wire: Arc::from(parley::api::wire(tier.api.into())),
@@ -363,6 +371,7 @@ impl Config {
                         headers: resolved.headers,
                     },
                     tuning: tier.tuning(),
+                    auth: Some(auth),
                 }),
             }
         }
