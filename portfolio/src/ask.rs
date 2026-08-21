@@ -401,6 +401,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/clear", "empty the conversation"),
     ("/coffee", "buy him one -- add `card` for the other code"),
     ("/cert", "the certification, and how to check it"),
+    ("/drive", "give the keyboard to the map"),
     ("/reach", "leave him a message, agent or no agent"),
     ("/map", "go to the places -- add a name to land on one"),
     ("/projects", "go to the work"),
@@ -541,6 +542,17 @@ pub struct Ask {
     /// Set the first time a tool call arrives. From then on the question is not
     /// second-guessed -- see `look`.
     pub agent_drives: bool,
+    /// Asked for the map to take the keyboard. Drained by the shell, which owns
+    /// the map and the mode; this file only knows it was asked for.
+    pub drive: bool,
+    /// Whether the map currently *has* the keyboard, mirrored here by the shell
+    /// each frame.
+    ///
+    /// A copy of somebody else's state, which is worth being uneasy about -- it
+    /// is here because the line at the bottom must not go on inviting a question
+    /// while every letter is going to the map. A mode you cannot see you are in
+    /// is a trap, and this page has the only place a visitor is looking.
+    pub driving: bool,
     /// Exchanges finished since the last drain, waiting to be written to the
     /// visit log. Kept here rather than logged from here: this file draws a
     /// page, and what the log does with a finished turn is `session.rs`'s
@@ -589,6 +601,8 @@ impl Ask {
             board: None,
             directed: false,
             agent_drives: false,
+            drive: false,
+            driving: false,
             logged: Vec::new(),
         }
     }
@@ -838,14 +852,15 @@ impl Ask {
         if q.is_empty() {
             return;
         }
-        // Everything waits for the answer in flight -- except leaving. A
-        // command that only moves the screen needs nothing from the agent, and
-        // swallowing `/map` because a reply is still arriving is the section
-        // ignoring somebody who has decided to go and look at the map instead.
-        // The rest wait because the rest write into the transcript the answer
-        // is landing in.
-        let leaving = NAV.iter().any(|(cmd, _)| q.split(' ').next() == Some(*cmd));
-        if self.busy() && !leaving {
+        // Everything waits for the answer in flight -- except the controls. A
+        // command that only moves the screen, or hands the keyboard to the map,
+        // needs nothing from the agent, and swallowing it because a reply is
+        // still arriving is the section ignoring somebody who has decided to go
+        // and look at something instead. The rest wait because the rest write
+        // into the transcript the answer is landing in.
+        let word = q.split(' ').next();
+        let control = NAV.iter().any(|(cmd, _)| word == Some(*cmd)) || word == Some("/drive");
+        if self.busy() && !control {
             return;
         }
         if q.starts_with('/') {
@@ -933,6 +948,15 @@ impl Ask {
                 self.cert();
                 return Local::Done;
             }
+            // A command as well as a chord, on purpose. The chord is quicker and
+            // the command is the one that cannot be eaten: `/drive` is five
+            // ordinary characters and an enter, and no terminal or browser has
+            // an opinion about any of them.
+            "/drive" => {
+                self.drive = true;
+                self.input.clear();
+                return Local::Done;
+            }
             "/clear" => {
                 self.turns.clear();
                 self.panel = None;
@@ -944,11 +968,13 @@ impl Ask {
                         esc    stop         tab  take one    wheel / pgup  scroll\n\
                         ctrl-u clear the line              tab  leave the section\n\
                         \n\
-                        hold ctrl and the map answers to the keys it does in the\n\
-                        experience section -- hjkl or the arrows pan, + and - zoom,\n\
-                        u and o tilt, , and . swing it round, and the layer keys\n\
-                        work too. ctrl and the wheel zooms from anywhere.\n\
-                        ctrl-n next place   ctrl-b  back    ctrl-g  give it back"
+                        the map, when one is up:\n\
+                        /drive  or ctrl-e   give it the keyboard, then every key\n\
+                        the experience section knows works here: hjkl and the\n\
+                        arrows pan, + and - zoom, u and o tilt, , and . turn it,\n\
+                        the layer keys toggle. esc gives the keys back.\n\
+                        n / b   next place and back, driving or not\n\
+                        ctrl and the wheel zooms without driving at all"
                 .into(),
             "/whoami" => {
                 let w = crate::visits::last_seen();
@@ -1953,6 +1979,23 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
         Some(_) => "waking the agent\u{2026}".to_string(),
         None => "waking the agent\u{2026}".to_string(),
     };
+    if a.driving {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("\u{25c8} ", Style::default().fg(ACCENT)),
+                Span::styled(
+                    "the map has the keyboard".to_string(),
+                    Style::default().fg(ACCENT),
+                ),
+                Span::styled(
+                    "   esc to type again".to_string(),
+                    Style::default().fg(FAINT),
+                ),
+            ])),
+            Rect { y: area.y + 1, height: 1, ..area },
+        );
+        return;
+    }
     let (mark, hint, style) = match &a.state {
         State::Cold | State::Starting => ("\u{b7}", waking.as_str(), Style::default().fg(FAINT)),
         State::Ready => ("\u{203a}", "", Style::default().fg(lead)),

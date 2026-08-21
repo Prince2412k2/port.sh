@@ -114,6 +114,20 @@ pub struct Shell {
     /// consulted: somebody who has panned somewhere has said where they want to
     /// be. Cleared when the agent asks for a new place, and by ctrl-g.
     manual: Option<termap::geo::Viewport>,
+    /// Whether the keyboard belongs to the map rather than to the question.
+    ///
+    /// Ctrl chords were the wrong shape for this. `u` is `VKILL` and `o` is
+    /// `VDISCARD` in the tty line discipline, and a browser claims ctrl-U and
+    /// ctrl-O for itself as well -- so the two keys the map uses for tilt are
+    /// among the least likely bytes in the set to survive the trip, and which
+    /// ones do depends on the client. Chasing them one at a time is a losing
+    /// game.
+    ///
+    /// So there is a mode instead: while it is on, the map gets the keys it gets
+    /// in the experience section, bare and unmodified, and escape gives them
+    /// back. A mode you cannot see you are in is a trap, so the footer says so
+    /// and the input line stops pretending to be one.
+    driving: bool,
     /// What the last map chord did, and how long ago.
     ///
     /// The map already writes these -- `set_tilt` says "tilt 39 degrees" -- and
@@ -312,6 +326,7 @@ impl Shell {
             locator: None,
             manual: None,
             chord: None,
+            driving: false,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         // The chat turns a question into a point on its own -- but only the map
@@ -433,6 +448,15 @@ impl Shell {
         self.boot = boot::SECS;
     }
 
+    /// Whether the keyboard is currently the map's.
+    ///
+    /// For the tests. The page learns it from the mirrored flag on `Ask`, set in
+    /// `tick`, because the page is drawn from `&Ask` and not from the shell.
+    #[cfg(test)]
+    fn driving(&self) -> bool {
+        self.driving
+    }
+
     pub fn tick(&mut self, dt: f64) {
         self.clock += dt;
         self.since += dt;
@@ -452,6 +476,21 @@ impl Shell {
             Section::Ask => {
                 self.ask.tick(dt);
                 self.aim(dt);
+                if std::mem::take(&mut self.ask.drive) {
+                    self.driving = crate::ask::showing_place(&self.ask).is_some();
+                    let said = match self.driving {
+                        true => "driving the map",
+                        false => "no map to drive",
+                    };
+                    self.chord = Some((said.into(), 0.0));
+                }
+                // A map that has gone takes the keyboard back with it.
+                if self.driving && crate::ask::showing_place(&self.ask).is_none() {
+                    self.driving = false;
+                }
+                // Mirrored so the page can say so: the input line must not go
+                // on inviting a question while every letter is the map's.
+                self.ask.driving = self.driving;
                 if let Some((_, age)) = &mut self.chord {
                     *age += dt;
                 }
@@ -591,6 +630,28 @@ impl Shell {
         // exist yet. Its toggles are Shift and a digit now -- `!` through `*`,
         // see `termap::app::LAYER_KEYS` -- which is punctuation and falls
         // straight through this to the section below.
+        if self.section == Section::Ask && self.driving {
+            match k.code {
+                // Out. Also on `tab`, which everywhere else in this app means
+                // "leave", so it would be strange for it to type into a map.
+                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                    self.driving = false;
+                    self.chord = Some(("the keyboard is yours".into(), 0.0));
+                    return;
+                }
+                // Ours rather than the map's: these step the route the agent
+                // sent, which is a different thing from the tour's own stops.
+                KeyCode::Char('n') => return self.ask.walk(1),
+                KeyCode::Char('b') => return self.ask.walk(-1),
+                // Search is the one thing that stays behind. It opens a mode
+                // inside a mode, and the place to drive a map with a search box
+                // is the section built around one.
+                KeyCode::Char('?') | KeyCode::Char('/') => return,
+                // `q` quits the map's own binary and means nothing here.
+                KeyCode::Char('q') => return,
+                _ => return self.map_key(k),
+            }
+        }
         if self.section == Section::Ask {
             // The map's own camera, before the chat gets the key. Ctrl because
             // every bare key here is a letter somebody is typing, and these have
@@ -610,6 +671,12 @@ impl Shell {
                     // Hand the camera back to the flight.
                     KeyCode::Char('g') => {
                         self.manual = None;
+                        return;
+                    }
+                    // Into the mode, for the keys a chord cannot reach.
+                    KeyCode::Char('e') if crate::ask::showing_place(&self.ask).is_some() => {
+                        self.driving = true;
+                        self.chord = Some(("driving the map".into(), 0.0));
                         return;
                     }
                     KeyCode::Char(_) => return self.map_key(k),
@@ -908,7 +975,13 @@ impl Shell {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::styled(self.section.hints(), Style::default().fg(FAINT)),
+                Span::styled(
+                    match self.driving && self.section == Section::Ask {
+                        true => "driving the map    n b  places    esc  give the keys back                                     everything else goes to the map",
+                        false => self.section.hints(),
+                    },
+                    Style::default().fg(if self.driving { ACCENT } else { FAINT }),
+                ),
             ])),
             area,
         );
@@ -1177,6 +1250,74 @@ mod tests {
         s.tick(1.0);
         assert!(s.ask.panel.is_none(), "it never finished leaving");
         assert!(s.locator.is_none(), "the camera outlived the panel");
+    }
+
+    /// Drive mode: the map's own bare keys, and escape gives them back.
+    ///
+    /// This exists because chasing control bytes one at a time was a losing
+    /// game. `u` is VKILL and `o` is VDISCARD in the tty line discipline, and a
+    /// browser claims ctrl-U and ctrl-O for itself -- so the two keys the map
+    /// uses for tilt are among the least likely in the set to survive, and which
+    /// ones do depends on the client. Bare keys have no such problem.
+    #[test]
+    fn drive_mode_hands_the_map_the_keys_it_uses_in_its_own_section() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let plain = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "where is jaipur".into();
+        s.ask.submit();
+        let board = s.ask.board_token().expect("no board").to_string();
+        crate::mcp::handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
+               "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
+        )
+        .unwrap();
+        s.tick(0.016);
+        s.tick(3.0);
+
+        // In by command, which is the way that cannot be swallowed.
+        s.ask.input = "/drive".into();
+        s.ask.submit();
+        s.tick(0.016);
+        assert!(s.driving(), "`/drive` did not hand over the keyboard");
+
+        // The section's own keys, bare. These are the two that were reported
+        // broken as chords.
+        let flat = s.chat_camera().unwrap().tilt;
+        s.on_key(plain('u'));
+        let leaned = s.chat_camera().unwrap().tilt;
+        assert!(leaned > flat, "bare `u` did not lean it: {flat} to {leaned}");
+        s.on_key(plain('o'));
+        assert!(s.chat_camera().unwrap().tilt < leaned, "bare `o` did not flatten it");
+
+        // And the rest of the vocabulary, none of which is restated in this
+        // crate: zoom, pan, bearing.
+        let z = s.chat_camera().unwrap().zoom;
+        s.on_key(plain('+'));
+        assert!(s.chat_camera().unwrap().zoom > z, "bare `+` did not zoom");
+        let lon = s.chat_camera().unwrap().lonlat.0;
+        s.on_key(plain('l'));
+        assert!(s.chat_camera().unwrap().lonlat.0 > lon, "bare `l` did not pan");
+        s.on_key(plain('.'));
+        assert_ne!(s.chat_camera().unwrap().bearing, 0.0, "bare `.` did not turn it");
+
+        // Nothing typed into the question the whole time.
+        assert_eq!(s.ask.input, "", "driving the map typed into the line");
+
+        // Search stays behind: it is a mode inside a mode.
+        s.on_key(plain('?'));
+        assert!(s.map.query.is_none(), "the search box opened inside the chat");
+
+        // Escape gives the keyboard back, and then letters are letters again.
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!s.driving(), "escape did not end it");
+        s.on_key(plain('u'));
+        assert_eq!(s.ask.input, "u", "a letter did not go back to being a letter");
     }
 
     /// The same thing again, but from the bytes a terminal really sends.
