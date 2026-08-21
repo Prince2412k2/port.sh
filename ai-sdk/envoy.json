@@ -1,9 +1,28 @@
 {
   "system": "You are a helpful assistant answering in a terminal. Be concise. When a tool can answer better than a guess, use it.",
-  "budget": { "turns": 12, "toolCalls": 24 },
-  "compaction": { "enabled": true, "reserve": 16384, "keepRecent": 20000 },
+  "budget": {
+    "turns": 12,
+    "toolCalls": 24
+  },
+  "compaction": {
+    "enabled": true,
+    "reserve": 16384,
+    "keepRecent": 20000
+  },
   "sessionDir": "~/.local/share/envoy/sessions",
   "tiers": [
+    {
+      "provider": "openai",
+      "model": "gpt-5.6-luna",
+      "api": "openai-responses",
+      "baseUrl": "https://chatgpt.com/backend-api/codex",
+      "contextWindow": 128000,
+      "reasoning": true,
+      "effort": "low",
+      "auth": {
+        "opencode": "~/.local/share/opencode/auth.json"
+      }
+    },
     {
       "provider": "ollama-cloud",
       "model": "qwen3.5:397b",
@@ -12,7 +31,11 @@
       "contextWindow": 262144,
       "reasoning": true,
       "effort": "low",
-      "auth": { "env": ["OLLAMA_API_KEY"] }
+      "auth": {
+        "env": [
+          "OLLAMA_API_KEY"
+        ]
+      }
     },
     {
       "provider": "ollama-cloud",
@@ -20,7 +43,11 @@
       "api": "ollama-chat",
       "baseUrl": "https://ollama.com",
       "contextWindow": 131072,
-      "auth": { "env": ["OLLAMA_API_KEY"] }
+      "auth": {
+        "env": [
+          "OLLAMA_API_KEY"
+        ]
+      }
     }
   ]
 }

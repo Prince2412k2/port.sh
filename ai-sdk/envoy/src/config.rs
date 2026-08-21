@@ -18,6 +18,10 @@ use parley::types::{Api, Cost, Endpoint, Model};
 use parley::{Fallback, Tier};
 use serde::{Deserialize, Serialize};
 
+/// Where a whole config document can arrive instead of a path. See
+/// `Config::from_env_or`.
+pub const CONTENT_VAR: &str = "ENVOY_CONFIG_CONTENT";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -169,6 +173,9 @@ pub enum AuthConfig {
     None,
     Env(Vec<String>),
     Codex(PathBuf),
+    /// opencode's `auth.json`, which is usually the login that exists: an
+    /// operator who has run anything has run `opencode auth login`.
+    Opencode(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
@@ -217,6 +224,7 @@ impl TierConfig {
             AuthConfig::None => Auth::None,
             AuthConfig::Env(names) => Auth::Env(names.clone()),
             AuthConfig::Codex(path) => Auth::Codex(expand(path)),
+            AuthConfig::Opencode(path) => Auth::Opencode(expand(path)),
         }
     }
 }
@@ -246,6 +254,28 @@ impl Config {
     pub fn read(path: impl AsRef<std::path::Path>) -> std::io::Result<Config> {
         let text = std::fs::read_to_string(path)?;
         serde_json::from_str(&text).map_err(std::io::Error::other)
+    }
+
+    /// The whole document, or a file to read it from.
+    ///
+    /// `--config` names a file, which is right for a person and wrong for a
+    /// program: a client that generates a document per session -- because it
+    /// carries that session's tool server address -- has nowhere to put it, and
+    /// the container this runs in has no writable filesystem at all. opencode
+    /// has the same problem and answers it the same way, with
+    /// `OPENCODE_CONFIG_CONTENT`, so the spelling here is deliberately familiar.
+    ///
+    /// The variable wins over the path. A client that has gone to the trouble of
+    /// composing a document did not mean to be overruled by whatever file
+    /// happened to be in the working directory.
+    pub fn from_env_or(path: &str) -> std::io::Result<(Config, String)> {
+        match std::env::var(CONTENT_VAR) {
+            Ok(text) if !text.trim().is_empty() => {
+                let config = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+                Ok((config, format!("${CONTENT_VAR}")))
+            }
+            _ => Ok((Config::read(path)?, path.to_string())),
+        }
     }
 
     /// Turn tiers into wires, dropping the ones with no usable credential.
@@ -431,6 +461,75 @@ mod tests {
         let config: Config = serde_json::from_str(SAMPLE).unwrap();
         let tuning = config.tiers[0].tuning();
         assert!(tuning.effort.is_none() && tuning.temperature.is_none());
+    }
+
+    /// A whole document in the environment beats a path, and beats it even when
+    /// the path would have worked -- a client that composed one meant it.
+    ///
+    /// Serialised in one place so the two tests cannot disagree about the
+    /// variable's name, which is the mistake this is guarding against.
+    #[test]
+    fn a_document_in_the_environment_wins_over_a_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("envoy-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("envoy.json");
+        std::fs::write(&path, SAMPLE).unwrap();
+        let file = path.to_string_lossy().to_string();
+
+        std::env::remove_var(CONTENT_VAR);
+        let (from_file, source) = Config::from_env_or(&file).expect("the file did not read");
+        assert_eq!(source, file);
+        let in_file = from_file.tiers.len();
+
+        std::env::set_var(
+            CONTENT_VAR,
+            r#"{"tiers":[
+                {"provider":"a","model":"one","api":"openai-responses","baseUrl":"http://x","contextWindow":9},
+                {"provider":"b","model":"two","api":"ollama-chat","baseUrl":"http://y","contextWindow":9},
+                {"provider":"c","model":"three","api":"ollama-chat","baseUrl":"http://z","contextWindow":9}
+            ]}"#,
+        );
+        let (from_env, source) = Config::from_env_or(&file).expect("the document did not read");
+        assert_eq!(source, format!("${CONTENT_VAR}"));
+        assert_eq!(from_env.tiers.len(), 3, "the file overruled the document");
+        assert_ne!(in_file, 3, "the two cases are indistinguishable");
+
+        // Empty is the same as absent: a variable that exists and is blank is
+        // what a compose file passes on a host that has not set one.
+        std::env::set_var(CONTENT_VAR, "  ");
+        let (fallen_back, source) = Config::from_env_or(&file).expect("did not fall back");
+        assert_eq!(source, file);
+        assert_eq!(fallen_back.tiers.len(), in_file);
+
+        // A document that is not JSON is an error, not a silent fall back to
+        // whatever file is lying around -- the client would never learn.
+        std::env::set_var(CONTENT_VAR, "{ this is not json");
+        assert!(Config::from_env_or(&file).is_err());
+
+        std::env::remove_var(CONTENT_VAR);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// One test in this file sets an environment variable, and cargo runs tests
+    /// on threads that share it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn an_opencode_login_is_a_credential_a_tier_can_name() {
+        let config: Config = serde_json::from_str(
+            r#"{"tiers":[{"provider":"openai","model":"gpt","api":"openai-responses",
+                "baseUrl":"http://x","contextWindow":9,
+                "auth":{"opencode":"~/.local/share/opencode/auth.json"}}]}"#,
+        )
+        .expect("did not parse");
+        match config.tiers[0].auth() {
+            parley::auth::Auth::Opencode(path) => {
+                assert!(path.is_absolute(), "`~` was not expanded: {path:?}");
+                assert!(path.ends_with(".local/share/opencode/auth.json"), "{path:?}");
+            }
+            other => panic!("wrong credential kind: {other:?}"),
+        }
     }
 
     #[test]

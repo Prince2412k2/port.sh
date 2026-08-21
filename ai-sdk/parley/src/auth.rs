@@ -40,6 +40,15 @@ pub enum Auth {
     Key(String),
     /// A ChatGPT OAuth token pair, in the Codex CLI's file format.
     Codex(PathBuf),
+    /// The same token pair as opencode's `auth.json` keeps it.
+    ///
+    /// A second shape rather than a second flow: the two files carry the same
+    /// facts under different key names, and the `client_id` inside both access
+    /// tokens is the same application, so a refresh works for either. This is
+    /// worth having because it is usually the login that exists -- `opencode
+    /// auth login` is the one an operator has already run, and the Codex CLI's
+    /// file is the one this module happened to be written against first.
+    Opencode(PathBuf),
 }
 
 /// What to actually put on the request.
@@ -69,6 +78,83 @@ pub struct Tokens {
     pub id_token: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+}
+
+/// opencode's `auth.json`: one entry per provider, keyed by provider id.
+///
+/// Read as a map rather than as a struct because the file holds every provider
+/// the operator has ever logged into, and a new one appearing should not stop
+/// this reading the one it came for.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Opencode {
+    #[serde(flatten)]
+    providers: std::collections::BTreeMap<String, OpencodeEntry>,
+}
+
+/// `accountId` is camel case in the file and the header it becomes is
+/// `chatgpt-account-id`; getting that rename wrong costs a 401 that mentions
+/// neither. The file's own `expires` is deliberately not read -- expiry comes
+/// from the access token, which is what the server checks.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpencodeEntry {
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    access: Option<String>,
+    #[serde(default)]
+    refresh: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
+impl Opencode {
+    pub fn read(path: impl AsRef<Path>) -> Result<Opencode> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::NoCredential(format!("{}: {e}", path.display())))?;
+        Self::parse(&text)
+            .map_err(|e| Error::NoCredential(format!("{}: {}", path.display(), e)))
+    }
+
+    pub fn parse(text: &str) -> std::result::Result<Opencode, String> {
+        serde_json::from_str(text).map_err(|e| format!("not an opencode auth file: {e}"))
+    }
+
+    /// One provider's OAuth pair, as the Codex shape the rest of this module
+    /// already knows how to refresh and resolve.
+    ///
+    /// Only an `oauth` entry converts. An `api` entry in the same file is a key
+    /// rather than a token pair: it belongs to `Auth::Env` or `Auth::Key`, and
+    /// silently treating one as the other would send a key where a bearer token
+    /// is expected and report the failure as an expiry.
+    pub fn oauth(&self, provider: &str) -> std::result::Result<Codex, String> {
+        let entry = self
+            .providers
+            .get(provider)
+            .ok_or_else(|| format!("no `{provider}` entry -- run `opencode auth login`"))?;
+        if entry.r#type.as_deref() != Some("oauth") {
+            return Err(format!(
+                "the `{provider}` entry is {}, not an oauth login",
+                entry.r#type.as_deref().unwrap_or("untyped")
+            ));
+        }
+        let access = entry
+            .access
+            .clone()
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| format!("the `{provider}` entry has no access token"))?;
+        Ok(Codex {
+            auth_mode: Some("chatgpt".into()),
+            tokens: Tokens {
+                access_token: access,
+                refresh_token: entry.refresh.clone().unwrap_or_default(),
+                id_token: None,
+                account_id: entry.account_id.clone(),
+            },
+            last_refresh: None,
+        })
+    }
 }
 
 impl Codex {
@@ -238,6 +324,13 @@ pub fn resolve(auth: &Auth) -> Result<Resolved> {
             )))
         }
         Auth::Codex(path) => Ok(Codex::read(path)?.resolved()),
+        // The provider is `openai` because that is what opencode calls the
+        // ChatGPT login in that file. Its other entries are other providers'
+        // and none of them is this one.
+        Auth::Opencode(path) => Ok(Opencode::read(path)?
+            .oauth("openai")
+            .map_err(|e| Error::NoCredential(format!("{}: {e}", path.display())))?
+            .resolved()),
     }
 }
 
@@ -276,6 +369,69 @@ mod tests {
             },
             last_refresh: None,
         }
+    }
+
+    /// The shape of opencode's file, as it is actually on disk. The tokens are
+    /// stand-ins; every key name is real, including the camel case one that a
+    /// wrong rename would have dropped in silence.
+    const OPENCODE: &str = r#"{
+      "opencode": { "type": "api", "key": "sk-not-a-token" },
+      "openai": {
+        "type": "oauth",
+        "access": "header.payload.sig",
+        "refresh": "rt-abc",
+        "expires": 1787553669231,
+        "accountId": "4507603a-1897-4a0b-b213-1669ff48f980"
+      },
+      "github-copilot": { "type": "oauth", "access": "gho_x", "refresh": "gho_y", "expires": 0 }
+    }"#;
+
+    #[test]
+    fn an_opencode_login_becomes_the_same_credential_as_a_codex_one() {
+        let file = Opencode::parse(OPENCODE).expect("did not parse");
+        let codex = file.oauth("openai").expect("no openai entry");
+        assert_eq!(codex.tokens.access_token, "header.payload.sig");
+        assert_eq!(codex.tokens.refresh_token, "rt-abc");
+        // The rename that would fail quietly: without it the account header is
+        // absent and the backend answers 401 without saying why.
+        assert_eq!(
+            codex.account().as_deref(),
+            Some("4507603a-1897-4a0b-b213-1669ff48f980")
+        );
+        let resolved = codex.resolved();
+        assert!(resolved
+            .headers
+            .iter()
+            .any(|(k, v)| k == "chatgpt-account-id" && v.starts_with("4507603a")));
+        assert_eq!(resolved.api_key.as_deref(), Some("header.payload.sig"));
+    }
+
+    /// A key is not a token pair. Reading one as the other would send an API key
+    /// as a bearer token and report the 401 as an expiry.
+    #[test]
+    fn a_key_entry_is_refused_rather_than_read_as_a_login() {
+        let file = Opencode::parse(OPENCODE).unwrap();
+        let why = file.oauth("opencode").unwrap_err();
+        assert!(why.contains("not an oauth login"), "{why}");
+    }
+
+    /// A provider nobody has logged into names itself and says what to do,
+    /// because that is the whole diagnosis.
+    #[test]
+    fn a_provider_with_no_entry_says_which_and_what_to_run() {
+        let file = Opencode::parse(OPENCODE).unwrap();
+        let why = file.oauth("anthropic").unwrap_err();
+        assert!(why.contains("anthropic"), "{why}");
+        assert!(why.contains("opencode auth login"), "{why}");
+    }
+
+    /// Other providers in the same file are not this one's business, and one
+    /// that has never been seen before does not stop the file being read.
+    #[test]
+    fn an_unknown_provider_in_the_file_is_ignored() {
+        let odd = r#"{"openai":{"type":"oauth","access":"a.b.c"},"brand-new":{"whatever":true}}"#;
+        let file = Opencode::parse(odd).expect("a strange entry stopped the file parsing");
+        assert!(file.oauth("openai").is_ok());
     }
 
     #[test]
