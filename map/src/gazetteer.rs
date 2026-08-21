@@ -162,6 +162,42 @@ impl Gazetteer {
     }
 }
 
+/// The zooms a close-up sweep reads.
+///
+/// The country-wide index stops at z10 because z11 upward is tens of thousands
+/// of tiles. But the archive's landmark layer only *starts* around z13: over
+/// central Ahmedabad, z13 has 1094 named shapes and z14 has 1967 -- cafes,
+/// hospitals, schools, parks, the things somebody means by "a place in a
+/// place". z15 has none; z14 is the archive's floor.
+///
+/// So the deep sweep is local and on demand: a small box around a city that has
+/// already been found, which is a few dozen tiles rather than a few hundred
+/// thousand.
+pub const DEEP_ZOOMS: [u8; 2] = [13, 14];
+
+impl Gazetteer {
+    /// Index a small box around a point, deeply.
+    ///
+    /// `span` is in degrees, and small: this is "inside this city", not "near
+    /// this city". A wide box at z14 is thousands of tiles and the point of
+    /// doing it on demand is that it is cheap.
+    pub fn around(src: &mut crate::tiles::Source, lonlat: (f64, f64), span: f64) -> Gazetteer {
+        let mut g = Gazetteer { entries: Vec::new(), swept: [0; 5] };
+        let lo = crate::geo::lonlat_to_world(lonlat.0 - span, lonlat.1 + span);
+        let hi = crate::geo::lonlat_to_world(lonlat.0 + span, lonlat.1 - span);
+        for z in DEEP_ZOOMS {
+            for id in sweep_ids([lo[0], lo[1], hi[0], hi[1]], z) {
+                if let Some(tile) = src.read_uncached(id) {
+                    g.take(&tile);
+                }
+            }
+        }
+        g.entries.sort_by(|a, b| a.name.cmp(&b.name));
+        g.entries.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+        g
+    }
+}
+
 /// Every tile id at `z` covering `bounds`, in world coordinates.
 ///
 /// Its own function rather than `tiles::tile_range` because that one is capped

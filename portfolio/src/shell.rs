@@ -108,6 +108,10 @@ pub struct Shell {
     since: f64,
     /// Where the chat's map thumbnail is looking, when there is one.
     locator: Option<Locator>,
+    /// How far over the visitor has leaned the chat map, as a multiplier on the
+    /// arrival's own lean. Theirs to set and kept across stops -- a camera angle
+    /// somebody chose should survive them walking the route.
+    lean: f64,
 }
 
 /// The chat's map thumbnail, and the flight it is on.
@@ -235,6 +239,7 @@ impl Shell {
             clock: 0.0,
             since: 0.0,
             locator: None,
+            lean: 1.0,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         // The chat turns a question into a point on its own -- but only the map
@@ -479,6 +484,16 @@ impl Shell {
         // see `termap::app::LAYER_KEYS` -- which is punctuation and falls
         // straight through this to the section below.
         if self.section == Section::Ask {
+            // The map's own camera, before the chat gets the key. Ctrl because
+            // every bare key here is a letter somebody is typing, and these have
+            // to work mid-question like the route keys do.
+            if k.modifiers.contains(KeyModifiers::CONTROL) {
+                match k.code {
+                    KeyCode::Char('k') => return self.tilt_locator(0.18),
+                    KeyCode::Char('t') => return self.tilt_locator(-0.18),
+                    _ => {}
+                }
+            }
             self.ask.on_key(k);
             return;
         }
@@ -535,6 +550,25 @@ impl Shell {
         }
     }
 
+    /// Drive the chat map's camera by hand.
+    ///
+    /// Applied to the flight's destination rather than to the frame on screen,
+    /// so a nudge mid-arrival lands where it was asked to instead of fighting
+    /// the descent -- and so the zoom survives stepping to the next stop and
+    /// back.
+    fn zoom_locator(&mut self, by: f64) {
+        if let Some(l) = &mut self.locator {
+            l.to_zoom = (l.to_zoom + by).clamp(3.0, 16.5);
+            l.from_zoom = l.to_zoom;
+            l.t = l.span;
+        }
+    }
+
+    /// Lean the camera further over, or back towards straight down.
+    fn tilt_locator(&mut self, by: f64) {
+        self.lean = (self.lean + by).clamp(0.0, 1.35);
+    }
+
     pub fn on_mouse(&mut self, m: MouseEvent) {
         use crossterm::event::MouseEventKind;
         match self.section {
@@ -549,8 +583,20 @@ impl Shell {
                 _ => {}
             },
             Section::Ask => match m.kind {
-                MouseEventKind::ScrollUp => self.ask.on_scroll(true),
-                MouseEventKind::ScrollDown => self.ask.on_scroll(false),
+                // Over the caption column the wheel drives the map; over the
+                // words it scrolls them. The map is the whole page's ground now,
+                // so "where the pointer is" is the only thing that can tell the
+                // two apart -- and the right-hand column is the part of it that
+                // is not covered in prose.
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let up = m.kind == MouseEventKind::ScrollUp;
+                    let over_map = crate::ask::showing_place(&self.ask).is_some()
+                        && m.column >= crate::ask::prose_rect(self.body, &self.ask).right();
+                    match over_map {
+                        true => self.zoom_locator(if up { 0.6 } else { -0.6 }),
+                        false => self.ask.on_scroll(up),
+                    }
+                }
                 _ => {}
             },
             Section::Home => {}
@@ -591,8 +637,7 @@ impl Shell {
                 crate::museum::render(f, body, &self.museum)
             }
             Section::Ask => {
-                ask::render(f, body, &self.ask);
-                // The chat says where the picture goes; the map draws it. It
+                // The map goes down first and the words go on top of it. It
                 // cannot draw itself from in there -- the renderer wants an
                 // `App`, and one of those is a terrain grid and a tile cache
                 // that this shell already owns exactly one of.
@@ -606,8 +651,8 @@ impl Shell {
                     let cam = termap::ui::Camera {
                         lonlat,
                         zoom,
-                        tilt: LEAN_DEG.to_radians() * lean,
-                        persp: CONVERGE * lean,
+                        tilt: LEAN_DEG.to_radians() * lean * self.lean,
+                        persp: CONVERGE * lean * self.lean,
                     };
                     // The tour draws its own marker for a stop on the sheet;
                     // anywhere else has nothing but ours.
@@ -616,7 +661,13 @@ impl Shell {
                     // renderer knows nothing about this page's fade, or about
                     // having no edges, and should not have to.
                     paint::feather(f, at, fade);
+                    // And knocked right back where the reading happens. Braille
+                    // under prose is unreadable at full strength; the fix is not
+                    // to move the map aside but to leave a suggestion of it
+                    // under the words and the whole thing everywhere else.
+                    paint::veil(f, ask::prose_rect(at, &self.ask), 0.3);
                 }
+                ask::render(f, body, &self.ask);
             }
             Section::Experience => termap::ui::render_map_only(f, body, &mut self.map),
             Section::Projects | Section::Skills => {

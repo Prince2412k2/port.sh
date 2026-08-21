@@ -933,9 +933,10 @@ impl Ask {
                 self.input.clear();
                 return Local::Done;
             }
-            "/keys" => "enter  ask        /  commands      up  what you asked before\n\
-                        esc    stop       tab  take one     wheel / pgup  scroll\n\
-                        ctrl-n next place  ctrl-b  back     ctrl-u  clear the line\n\
+            "/keys" => "enter  ask         /  commands     up  what you asked before\n\
+                        esc    stop        tab  take one    wheel / pgup  scroll\n\
+                        ctrl-n next place  ctrl-b  back      ctrl-u  clear the line\n\
+                        ctrl-k lean over   ctrl-t  flatten   wheel over the map  zoom\n\
                         tab    leave the section"
                 .into(),
             "/whoami" => {
@@ -1328,6 +1329,13 @@ impl Ask {
 /// into a column the prose has already been given.
 fn panel_cols(area: Rect, a: &Ask) -> u16 {
     match &a.panel {
+        // A code has to be drawn at its own size or not at all, so it waits for
+        // a wide page. A place needs only somewhere to write its name: the map
+        // itself is the page's ground now and takes whatever room there is, so
+        // the column is for the caption and can be much narrower.
+        Some(p @ Panel { what: Show::Place(_), .. }) if area.width >= 60 => {
+            panel_width(p, area).min(area.width / 2)
+        }
         Some(p) if area.width >= 96 => panel_width(p, area).min(area.width / 2),
         _ => 0,
     }
@@ -1349,18 +1357,6 @@ fn panel_rect(area: Rect, a: &Ask) -> Option<Rect> {
     })
 }
 
-/// The picture in a place panel, and how tall it is.
-///
-/// Squat rather than square: a terminal cell is about twice as tall as it is
-/// wide, so a map drawn as many rows as columns is a map of a very thin strip
-/// of the world.
-fn locator_rect(panel: Rect) -> Option<Rect> {
-    // Half the width, because a cell is about twice as tall as it is wide and
-    // that makes the picture roughly square on screen. Room kept below it for a
-    // name, a sentence about the place, and the route footer.
-    let h = (panel.width / 2).clamp(7, 34).min(panel.height.saturating_sub(6));
-    (h >= 7).then_some(Rect { height: h, ..panel })
-}
 
 /// The map a place panel wants drawn, and where.
 ///
@@ -1382,6 +1378,14 @@ pub fn showing_place(a: &Ask) -> Option<&Spot> {
     }
 }
 
+/// The map, and the whole page to draw it on.
+///
+/// It used to be a panel in a column: a picture the page made room for, with a
+/// third of the screen left empty under it. It is the page's ground now -- the
+/// full body, behind everything, with the words written over the top. A
+/// `Paragraph` writes only the cells its text covers, so the map shows through
+/// around every line, and the shell knocks it back under the reading column so
+/// the prose still reads. Overlap is the point rather than a thing to avoid.
 pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     if area.width < 30 || area.height < 8 {
         return None;
@@ -1389,8 +1393,21 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     let p = a.panel.as_ref()?;
     let Show::Place(tour) = &p.what else { return None };
     let spot = tour.here().clone();
-    let at = locator_rect(panel_rect(area, a)?)?;
-    Some((at, spot.clone(), p.fade()))
+    // Everything above the question line. Drawing behind the line somebody is
+    // typing on is the one place where overlap stops being atmosphere.
+    let at = Rect { height: area.height.saturating_sub(2), ..area };
+    (at.height >= 8).then_some((at, spot, p.fade()))
+}
+
+/// Where the reading column sits, so the shell can dim the map under it.
+///
+/// Text over braille is unreadable at full strength, and the answer to that is
+/// not to move the map out of the way -- it is to take the map down to a
+/// suggestion exactly where the words are, and leave it alone everywhere else.
+pub fn prose_rect(area: Rect, a: &Ask) -> Rect {
+    let gutter = 3u16;
+    let w = area.width.saturating_sub(gutter * 2 + panel_cols(area, a)).min(104);
+    Rect { x: area.x + gutter.saturating_sub(1), width: w + 2, ..area }
 }
 
 pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
@@ -1751,9 +1768,15 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
         // and the shell draws it there -- see `map_panel`.
         Show::Place(tour) => {
             let spot = tour.here();
-            let Some(pic) = locator_rect(area) else { return };
-            let mut y = pic.y + pic.height + 1;
+            // Anchored to the foot of its column rather than hung under a
+            // picture, because the picture is the whole page now. Counted from
+            // the bottom so the block sits still whether the note wraps to one
+            // line or three.
+            let name = wrap(&spot.name, area.width as usize).len() as u16;
+            let note = wrap(&spot.note, area.width as usize).len() as u16;
+            let footer = if tour.stops.len() > 1 || spot.id.is_some() { 2 } else { 0 };
             let bottom = area.y + area.height;
+            let mut y = bottom.saturating_sub(name + note + footer);
             let row = |f: &mut Frame, y: &mut u16, spans: Vec<Span<'static>>| {
                 if *y < bottom {
                     f.render_widget(

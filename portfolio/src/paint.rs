@@ -308,6 +308,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 
+
     /// The panel has no edge to catch the eye on.
     ///
     /// The failure this pins is a rectangle of map sitting on the page like a

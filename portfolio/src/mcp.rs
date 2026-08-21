@@ -184,6 +184,76 @@ fn index() -> Option<&'static termap::gazetteer::Gazetteer> {
     INDEX.get().filter(|g| !g.is_empty())
 }
 
+thread_local! {
+    /// A map source belonging to the tool server's own thread, and the deep
+    /// indexes built from it.
+    ///
+    /// The country-wide index cannot hold cafes: the landmark layer only starts
+    /// around z13, and z13 over India is hundreds of thousands of tiles. A box
+    /// around one city at z13 and z14 is a few dozen, so it is built when
+    /// somebody asks about that city and kept for the next question about it.
+    ///
+    /// Thread-local because `Source` holds `Rc`s and is not `Send`, and the tool
+    /// server runs every request on one thread -- a current-thread runtime, on
+    /// purpose. The cost is one extra copy of the terrain grid, 28 MB, once for
+    /// the process rather than once per session.
+    static NEARBY: std::cell::RefCell<Nearby> = const { std::cell::RefCell::new(Nearby::new()) };
+}
+
+#[derive(Default)]
+struct Nearby {
+    src: Option<termap::tiles::Source>,
+    /// Keyed by the city's coordinates to a hundredth of a degree, which is
+    /// about a kilometre -- close enough that two questions about the same city
+    /// share one sweep.
+    seen: Vec<((i32, i32), termap::gazetteer::Gazetteer)>,
+}
+
+impl Nearby {
+    const fn new() -> Nearby {
+        Nearby { src: None, seen: Vec::new() }
+    }
+}
+
+/// Look `what` up inside the city at `centre`.
+fn look_nearby(centre: (f64, f64), what: &str) -> Option<termap::gazetteer::Entry> {
+    NEARBY.with(|n| {
+        let mut n = n.borrow_mut();
+        let key = ((centre.0 * 100.0) as i32, (centre.1 * 100.0) as i32);
+        if !n.seen.iter().any(|(k, _)| *k == key) {
+            if n.src.is_none() {
+                let src = termap::tiles::Source::open(None);
+                if !src.has_basemap() {
+                    return None;
+                }
+                n.src = Some(src);
+            }
+            let src = n.src.as_mut()?;
+            let started = std::time::Instant::now();
+            // A tenth of a degree is about eleven kilometres, which covers a
+            // city and not its neighbours.
+            let g = termap::gazetteer::Gazetteer::around(src, centre, 0.10);
+            eprintln!(
+                "portfolio: indexed {} landmarks around {:.3},{:.3} in {:?}",
+                g.len(),
+                centre.0,
+                centre.1,
+                started.elapsed()
+            );
+            // Two cities is plenty to keep; a conversation does not wander far.
+            if n.seen.len() >= 3 {
+                n.seen.remove(0);
+            }
+            n.seen.push((key, g));
+        }
+        n.seen
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, g)| g.find(what))
+            .cloned()
+    })
+}
+
 /// The tools, as MCP describes them.
 ///
 /// The descriptions are the only instructions the agent gets about *when* to
@@ -217,14 +287,15 @@ fn tool_list() -> String {
         {{"name":"locate_place",
           "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it, and the zoom should be passed back to show_map unchanged.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt knows places people live, not buildings or monuments: asked for the Taj Mahal, Ward's Lake or a waterfall it returns found:false. That is not a dead end -- search the web for the coordinates and pass those to show_map, mentioning in a few words that the point came from a search rather than from the map data. Falling back to the town it is in is also fine if you say that is what you are showing. Only when both come up empty say you cannot place it.",
           "inputSchema":{{"type":"object","properties":{{
-            "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}}
+            "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}},
+            "near":{{"type":"string","description":"The town or city to look inside, when `name` is something within one -- a cafe, a mall, a park, a hospital, a temple. Without this only settlements are searched. With it the map data for that city is read street by street, which finds a great many named places but not all of them: on a miss, fall back to a web search as usual."}}
           }},"required":["name"]}}}},
         {{"name":"show_map",
           "description":{},
           "inputSchema":{{"type":"object","properties":{{
             "lat":{{"type":"number","description":"Latitude, from locate_place. Use this and lon for a single place."}},
             "lon":{{"type":"number","description":"Longitude, from locate_place."}},
-            "zoom":{{"type":"number","description":"Optional. From locate_place; omitted means a neighbourhood."}},
+            "zoom":{{"type":"number","description":"How close to look, 3 to 16.5. Yours to choose, and worth choosing: 5 a region, 7 a state, 10 a city and its surroundings, 12 a neighbourhood, 14 a few streets, 16 a single corner. `locate_place` suggests one that frames what it found -- pass it back for a place somebody named, and pick your own when the answer is about something smaller than the thing you looked up. A cafe shown at city zoom is a dot in a smudge."}},
             "label":{{"type":"string","description":"The place's name, written under the map."}},
             "note":{{"type":"string","description":"One sentence on why this place matters to the answer. Shown under the name. This is what makes the map worth looking at -- a pin says where, this says why you mentioned it."}},
             "places":{{"type":"array","description":"Several places at once, each {{lat, lon, label, note, zoom}}. Use this instead of lat/lon when the answer walks through more than one -- the visitor can step between them, and they stay together as one route rather than arriving as unrelated calls.","items":{{"type":"object","properties":{{
@@ -260,7 +331,23 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
     match name {
         "locate_place" => {
             let want = arg_str("name");
-            match index().and_then(|g| g.find(want)) {
+            // Somewhere inside a city: the country-wide index does not carry
+            // cafes, so find the city first and then sweep it deeply.
+            //
+            // Nearby *before* the country-wide index, not after. Asked for
+            // "Kankaria" near Ahmedabad, the global index has a Kankaria and it
+            // is four hundred kilometres away in Madhya Pradesh -- a correct
+            // answer to a question nobody asked. A caller that names a city has
+            // told us which of the identically named places it means.
+            let near = arg_str("near");
+            let found = match near.trim().is_empty() {
+                false => index()
+                    .and_then(|g| g.find(near))
+                    .and_then(|city| look_nearby(city.lonlat, want))
+                    .or_else(|| index().and_then(|g| g.find(want)).cloned()),
+                true => index().and_then(|g| g.find(want)).cloned(),
+            };
+            match found.as_ref() {
                 Some(e) => text(&format!(
                     r#"{{"found":true,"name":{},"kind":{},"lat":{:.5},"lon":{:.5},"zoom":{:.2}}}"#,
                     json::quote(&e.name),
@@ -302,11 +389,13 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 stops.push(Stop {
                     lat,
                     lon,
-                    // Clamped to a band a locator is legible in, whatever was
-                    // asked for: at street zoom the panel is four roads and a
-                    // bus stop labelled twice, which says nothing about where
-                    // the place is.
-                    zoom: num("zoom").unwrap_or(11.5).clamp(6.0, 12.5),
+                    // The agent's to choose, within what the archive can draw.
+                    // It was clamped to a narrow band because the panel was 46
+                    // columns and street zoom in that space was four roads and
+                    // a bus stop labelled twice -- the map is the whole page
+                    // now, and "a cafe in Ahmedabad" is a question about a
+                    // street corner that a city view cannot answer.
+                    zoom: num("zoom").unwrap_or(11.5).clamp(3.0, 16.5),
                     label: text_of("label"),
                     note: text_of("note"),
                 });
