@@ -503,6 +503,29 @@ mod tests {
     /// tool. The cost is a refused fetch when an agent sends no name, which is
     /// the failure worth having. Do not "fix" this into a fuzzy match.
     #[test]
+    /// Ours are open under every spelling an agent will use for them, and --
+    /// the part that is easy to get wrong -- they are not caught by the shut
+    /// side's containment. `read_page` would have been: `read` is `view`'s alias
+    /// and a shut name is checked first, so the tool would have been refused
+    /// under the name of a tool nobody offers. `fetch_page` is the name for
+    /// that reason and this is the test that says so.
+    #[test]
+    fn our_web_tools_are_open_and_are_not_caught_by_a_shut_name() {
+        for n in ["search_web", "fetch_page"] {
+            assert!(tool_open(n), "`{n}` was refused");
+            assert!(!tool_shut(n), "`{n}` matched something shut");
+            let owned = format!("{}-{n}", crate::mcp::SERVER_NAME);
+            assert!(tool_open(&owned), "`{owned}` was refused");
+        }
+        // The name that was not chosen, and why.
+        assert!(tool_shut("read_page"), "`read` no longer guards reading files");
+        // Reading a file is still refused, under every spelling it has.
+        for n in ["view", "read", "Read a file"] {
+            assert!(!tool_open(n), "`{n}` was granted");
+        }
+    }
+
+    #[test]
     fn a_human_title_alone_grants_nothing() {
         assert!(!tool_open("Fetch https://example.com"));
         assert!(!tool_open("Search the web for rust"));
