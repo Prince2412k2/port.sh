@@ -317,7 +317,7 @@ impl Frames for Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Api, Endpoint, Model, Options, Tool};
+    use crate::types::{Api, Endpoint, Model, Options};
     use crate::Accumulator;
     use futures_util::StreamExt;
 

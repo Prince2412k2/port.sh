@@ -526,7 +526,7 @@ fn prompt_blocks(params: &Value) -> Vec<Block> {
             Some("text") => item
                 .get("text")
                 .and_then(Value::as_str)
-                .map(|t| Block::text(t)),
+                .map(Block::text),
             Some("image") => {
                 let data = item.get("data").and_then(Value::as_str)?;
                 let mime = item.get("mimeType").and_then(Value::as_str)?;

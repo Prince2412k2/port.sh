@@ -338,7 +338,7 @@ impl Shell {
     }
 
     /// Exchanges finished since the last call, for the visit log.
-    pub fn drain_logged(&mut self) -> Vec<(String, String)> {
+    pub fn drain_logged(&mut self) -> Vec<crate::ask::Logged> {
         self.ask.drain_logged()
     }
 

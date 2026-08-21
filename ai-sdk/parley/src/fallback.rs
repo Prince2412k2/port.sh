@@ -100,9 +100,7 @@ impl Wire for Fallback {
                         return Some((event, state));
                     }
                     if state.current.is_none() {
-                        let Some(attempt) = state.attempts.get(state.at).cloned() else {
-                            return None;
-                        };
+                        let attempt = state.attempts.get(state.at).cloned()?;
                         let mut request = state.request.clone();
                         request.model = attempt.model.clone();
                         request.endpoint = attempt.endpoint;

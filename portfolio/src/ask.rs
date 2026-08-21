@@ -57,6 +57,30 @@ pub struct Turn {
     pub done: bool,
     /// Stopped at the visitor's request rather than finished.
     pub cancelled: bool,
+    /// What the agent said this turn cost. Never drawn -- it goes to the visit
+    /// log with the question, because it is the operator's business and not the
+    /// visitor's. The last report wins: they arrive per request and the final
+    /// one is the turn's total.
+    pub spent: Option<crate::acp::Spend>,
+}
+
+/// One exchange, on its way to the visit log.
+///
+/// A struct rather than a pair because there are three things now and a
+/// `(String, String, Option<Spend>)` at four call sites is the kind of thing
+/// that gets its arguments swapped.
+pub struct Logged {
+    pub q: String,
+    pub a: String,
+    pub spent: Option<crate::acp::Spend>,
+}
+
+impl Logged {
+    /// An exchange no model was involved in -- `/coffee`, `/cert`, `/reach`.
+    /// Nothing was spent, and that is different from nobody telling us.
+    pub fn local(q: String, a: String) -> Logged {
+        Logged { q, a, spent: None }
+    }
 }
 
 /// Something showing at the side of the page.
@@ -557,7 +581,7 @@ pub struct Ask {
     /// visit log. Kept here rather than logged from here: this file draws a
     /// page, and what the log does with a finished turn is `session.rs`'s
     /// business and the same for both transports.
-    logged: Vec<(String, String)>,
+    logged: Vec<Logged>,
 }
 
 impl Default for Ask {
@@ -640,7 +664,7 @@ impl Ask {
     }
 
     /// Exchanges finished since the last call, for the visit log.
-    pub fn drain_logged(&mut self) -> Vec<(String, String)> {
+    pub fn drain_logged(&mut self) -> Vec<Logged> {
         std::mem::take(&mut self.logged)
     }
 
@@ -771,6 +795,11 @@ impl Ask {
                         t.a.push_str(&s);
                     }
                 }
+                Event::Spent(s) => {
+                    if let Some(t) = self.turns.last_mut() {
+                        t.spent = Some(s);
+                    }
+                }
                 Event::Thought(s) => {
                     if let Some(t) = self.turns.last_mut() {
                         // Only the latest line: the point is to show that
@@ -811,7 +840,11 @@ impl Ask {
                 Event::Done => {
                     if let Some(t) = self.turns.last_mut() {
                         t.done = true;
-                        self.logged.push((t.q.clone(), t.a.clone()));
+                        self.logged.push(Logged {
+                            q: t.q.clone(),
+                            a: t.a.clone(),
+                            spent: t.spent,
+                        });
                     }
                     // The answer is in and it never asked for a picture, so
                     // whatever is beside it belongs to an older question. It
@@ -868,7 +901,7 @@ impl Ask {
                 Local::Said(said) => {
                     self.history.push(q.clone());
                     self.hist_at = None;
-                    self.logged.push((q.clone(), said.clone()));
+                    self.logged.push(Logged::local(q.clone(), said.clone()));
                     self.turns.push(Turn { q, a: said, done: true, ..Default::default() });
                     self.input.clear();
                     self.scroll = 0;
@@ -1103,7 +1136,10 @@ impl Ask {
              The other one is /coffee card.",
             code.how, code.payload
         );
-        self.logged.push((format!("/coffee {which}").trim_end().to_string(), said.clone()));
+        self.logged.push(Logged::local(
+            format!("/coffee {which}").trim_end().to_string(),
+            said.clone(),
+        ));
         self.panel = Some(Panel::new(Show::Code(code)));
         self.turns.push(Turn {
             q: if which.is_empty() { "/coffee".into() } else { format!("/coffee {which}") },
@@ -1132,7 +1168,7 @@ impl Ask {
             crate::cert::ISSUER,
             crate::cert::SHOWN,
         );
-        self.logged.push(("/cert".to_string(), said.clone()));
+        self.logged.push(Logged::local("/cert".to_string(), said.clone()));
         self.panel = Some(Panel::new(Show::Cert));
         self.turns.push(Turn { q: "/cert".into(), a: said, done: true, ..Default::default() });
         self.input.clear();
@@ -1167,7 +1203,7 @@ impl Ask {
         // still something somebody said here, and the message itself is already
         // in reach.jsonl -- this is the record that they said it during *this*
         // visit.
-        self.logged.push((line.clone(), said.clone()));
+        self.logged.push(Logged::local(line.clone(), said.clone()));
         self.turns.push(Turn {
             q: line,
             a: said,

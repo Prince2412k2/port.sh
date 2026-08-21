@@ -88,12 +88,11 @@ impl Connection {
         tokio::spawn(async move {
             let mut lines = BufReader::new(input).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                match rpc::parse(&line) {
-                    Some(Incoming::Response { id, result }) => peer.resolve(&id, result),
-                    // Servers may send progress notifications and log messages.
-                    // Nothing here acts on them yet, and dropping one is better
-                    // than refusing to speak to a server that sends them.
-                    _ => {}
+                // Only responses are acted on. Servers may also send progress
+                // notifications and log messages; dropping one is better than
+                // refusing to speak to a server that sends them.
+                if let Some(Incoming::Response { id, result }) = rpc::parse(&line) {
+                    peer.resolve(&id, result);
                 }
             }
         });

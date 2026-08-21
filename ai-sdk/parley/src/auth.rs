@@ -694,7 +694,7 @@ mod tests {
     /// overwrite each other and sign one account's requests as the other's.
     #[test]
     fn our_own_copy_is_named_after_the_login_it_came_from() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK.blocking_lock();
         std::env::remove_var("ENVOY_AUTH_STORE");
         std::env::set_var("XDG_DATA_HOME", "/app/agent");
         assert_eq!(
@@ -756,7 +756,7 @@ mod tests {
     /// through `fresh` and writes nothing at all.
     #[tokio::test]
     async fn a_fresh_seed_resolves_without_renewing_or_writing() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("parley-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -795,7 +795,7 @@ mod tests {
     /// And the diagnosis when there is nothing: the file, and the command.
     #[tokio::test]
     async fn no_login_at_all_names_the_file_and_the_fix() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = ENV_LOCK.lock().await;
         std::env::set_var("ENVOY_AUTH_STORE", std::env::temp_dir().join("parley-none"));
         let why = fresh(&Auth::Opencode(PathBuf::from("/nowhere/auth.json")))
             .await
@@ -808,7 +808,13 @@ mod tests {
 
     /// One lock, because these set environment variables and cargo runs tests
     /// on threads that share them.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    ///
+    /// Tokio's rather than std's: two of these tests are async, and holding a
+    /// std guard across an `await` is a real hazard rather than a lint -- on a
+    /// multi-threaded runtime the task can be resumed on another thread. The
+    /// async ones take it with `.await`, the sync ones with `blocking_lock`,
+    /// and it is the same lock either way, which is the whole point.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// The shape of opencode's file, as it is actually on disk. The tokens are
     /// stand-ins; every key name is real, including the camel case one that a
@@ -909,7 +915,7 @@ mod tests {
         assert!(names.contains(&"chatgpt-account-id"));
         assert!(names.contains(&"originator"));
         assert!(names.contains(&"OpenAI-Beta"));
-        assert_eq!(resolved.api_key.is_some(), true);
+        assert!(resolved.api_key.is_some());
         // The source is for logs, and must never be the credential.
         assert!(!resolved.source.contains("eyJ"), "{}", resolved.source);
     }

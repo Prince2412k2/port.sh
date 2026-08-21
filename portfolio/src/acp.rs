@@ -57,12 +57,33 @@ pub enum Event {
     /// A tool call starting, or changing state. Shown live: watching it reach
     /// for something is most of what makes this different from a chat box.
     Tool(Call),
+    /// What this answer cost, as the agent counted it.
+    ///
+    /// Not shown on screen -- see the decision about never naming the backend,
+    /// and note that a token count is a billing detail belonging to whoever pays
+    /// for it, not to the stranger reading a portfolio. It goes in the visit log
+    /// beside the question, which is where "what did that cost me" can actually
+    /// be answered.
+    Spent(Spend),
     /// The current answer is complete.
     Done,
     /// The visitor stopped it. Not a failure, and not the model's fault -- the
     /// tier stays in play.
     Cancelled,
     Failed(String),
+}
+
+/// What one answer cost.
+///
+/// `used` against `window` is how full the context is; `cost` is money, and
+/// absent when the agent does not price the model. Absent is not zero -- an
+/// unpriced model reporting 0 would make a paid session look free, which is why
+/// the field is omitted rather than defaulted at both ends.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spend {
+    pub used: u64,
+    pub window: u64,
+    pub cost: Option<f64>,
 }
 
 /// What the handshake settled on. All of it is for the screen.
@@ -831,6 +852,27 @@ fn forward(tx: &Sender<Event>, u: &Value) {
                 let _ = tx.send(Event::Tool(c));
             }
         }
+        // Tokens against the window, and a price if the agent knows one. Ours
+        // sends this; opencode and Copilot do not, so everything downstream has
+        // to work without it.
+        "usage_update" => {
+            let n = |k: &str| u.get(k).and_then(|v| v.as_f64());
+            if let (Some(used), Some(window)) = (n("used"), n("size")) {
+                let _ = tx.send(Event::Spent(Spend {
+                    used: used.max(0.0) as u64,
+                    window: window.max(0.0) as u64,
+                    // Zero is not free, it is unpriced -- the agent omits the
+                    // field rather than sending 0 for exactly that reason, and
+                    // reading a missing one as free would make a paid session
+                    // look free.
+                    cost: u
+                        .get("cost")
+                        .and_then(|c| c.get("amount"))
+                        .and_then(|v| v.as_f64())
+                        .filter(|c| *c > 0.0),
+                }));
+            }
+        }
         _ => {}
     }
 }
@@ -841,7 +883,21 @@ fn call_of(u: &Value) -> Option<Call> {
     if id.is_empty() {
         return None;
     }
-    let title = u.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    // The machine name where the agent sends one, and the human title
+    // otherwise. ACP's `ToolCall` has no `name` field, so an agent that wants
+    // to pass one has to put it in `_meta` -- ours does, and Copilot sent an
+    // empty title once, which is how a row came to read as a tick with nothing
+    // beside it. Rows are grouped by this string, so a name beats prose: eight
+    // calls titled "Looking up Jaipur..." are eight groups, and eight named
+    // `locate_place` are one.
+    let title = u
+        .get("_meta")
+        .and_then(|m| m.get("name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| u.get("title").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
     let status = match u.get("status").and_then(|v| v.as_str()).unwrap_or("pending") {
         "completed" => Status::Done,
         "failed" => Status::Failed,
@@ -1225,6 +1281,77 @@ mod tests {
             let v = json::parse(no).unwrap();
             assert!(!takes_http_tools(&v), "offered tools on {no}");
         }
+    }
+
+    #[test]
+    /// The tool's own name, from `_meta`. ACP's `ToolCall` has no `name` field,
+    /// so an agent that has one has to put it there -- ours does.
+    ///
+    /// This is not cosmetic: the rows are *grouped* by this string, so eight
+    /// calls whose titles are prose about each place become eight groups, and
+    /// eight named `locate_place` become one row with eight places under it.
+    /// A title is still used when that is all there is.
+    fn a_tool_call_is_named_from_meta_and_falls_back_to_the_title() {
+        let (tx, rx) = channel();
+        forward(&tx, &upd(
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Looking up Jaipur",
+               "_meta":{"name":"locate_place"},"rawInput":{"name":"Jaipur"}}"#,
+        ));
+        forward(&tx, &upd(
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t2","title":"Fetch docs",
+               "rawInput":{"url":"https://example.com/a"}}"#,
+        ));
+        // An empty name in `_meta` is not a name.
+        forward(&tx, &upd(
+            r#"{"sessionUpdate":"tool_call","toolCallId":"t3","title":"Fetch docs",
+               "_meta":{"name":"  "},"rawInput":{"url":"https://example.com/b"}}"#,
+        ));
+        drop(tx);
+
+        let got: Vec<Event> = rx.iter().collect();
+        let titles: Vec<&str> = got
+            .iter()
+            .filter_map(|e| match e {
+                Event::Tool(c) => Some(c.title.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, vec!["locate_place", "Fetch docs", "Fetch docs"]);
+    }
+
+    /// What a turn cost is read and passed on. An agent that says nothing about
+    /// it -- opencode, Copilot -- must leave everything downstream working, and
+    /// an unpriced model must not be reported as a free one.
+    #[test]
+    fn usage_becomes_a_spend_and_an_unpriced_model_is_not_a_free_one() {
+        let (tx, rx) = channel();
+        forward(&tx, &upd(
+            r#"{"sessionUpdate":"usage_update","used":1256,"size":128000,
+               "cost":{"amount":0.00074,"currency":"USD"}}"#,
+        ));
+        forward(&tx, &upd(r#"{"sessionUpdate":"usage_update","used":1391,"size":128000}"#));
+        // Zero is what an agent sends when it has no price at all. It is not a
+        // price, and reading it as one makes a paid session look free.
+        forward(&tx, &upd(
+            r#"{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0}}"#,
+        ));
+        // Nothing to report is not an event.
+        forward(&tx, &upd(r#"{"sessionUpdate":"usage_update"}"#));
+        drop(tx);
+
+        let spends: Vec<Spend> = rx
+            .iter()
+            .filter_map(|e| match e {
+                Event::Spent(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spends.len(), 3, "{spends:?}");
+        assert_eq!(spends[0].used, 1256);
+        assert_eq!(spends[0].window, 128_000);
+        assert!((spends[0].cost.expect("no cost") - 0.00074).abs() < 1e-9);
+        assert!(spends[1].cost.is_none(), "an absent price became a price");
+        assert!(spends[2].cost.is_none(), "zero was read as a price");
     }
 
     #[test]

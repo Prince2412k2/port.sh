@@ -233,10 +233,29 @@ impl Visit {
 
     /// Record one exchange. Both halves, because the question alone says what
     /// people want and the answer says whether they got it.
-    pub fn asked(&mut self, question: &str, answer: &str) {
+    pub fn asked(&mut self, question: &str, answer: &str, spent: Option<crate::acp::Spend>) {
         self.turns += 1;
+        // What it cost, where the agent reported it. Here rather than on screen:
+        // a token count is a billing detail belonging to whoever pays for it,
+        // and this file is the answer to "what did strangers cost me". A `/cert`
+        // or a `/coffee` never reached a model, so the fields are absent rather
+        // than zero -- absent and free are different claims.
+        let cost = match spent {
+            None => String::new(),
+            Some(s) => format!(
+                r#","used":{},"window":{}{}"#,
+                s.used,
+                s.window,
+                match s.cost {
+                    // Six places, because a cheap answer is a fraction of a
+                    // cent and rounding it to two makes every one of them free.
+                    Some(c) => format!(r#","cost":{c:.6}"#),
+                    None => String::new(),
+                }
+            ),
+        };
         append(&format!(
-            r#"{{"at":{},"event":"ask","session":{},"n":{},"q":{},"a":{}}}"#,
+            r#"{{"at":{},"event":"ask","session":{},"n":{},"q":{},"a":{}{cost}}}"#,
             now(),
             json::quote(&self.session),
             self.turns,
@@ -329,7 +348,7 @@ mod tests {
         std::env::set_var("PORTFOLIO_VISITS", &p);
 
         let mut v = Visit::open(ssh_visitor("alice", "SHA256:AAA"));
-        v.asked("why braille?", "Because dots.");
+        v.asked("why braille?", "Because dots.", None);
         v.close();
         std::env::remove_var("PORTFOLIO_VISITS");
 
@@ -394,6 +413,50 @@ mod tests {
 
     /// A question is a stranger's text going into a file read with `jq`. A
     /// newline in it must not become a second record.
+    /// What a turn cost lands with the question, and only when something
+    /// reported it. `/cert` never reached a model, and "free" is a different
+    /// claim from "nobody told us".
+    #[test]
+    fn what_an_answer_cost_is_recorded_beside_it_when_it_is_known() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = scratch("spend");
+        std::env::set_var("PORTFOLIO_VISITS", &p);
+
+        let mut v = Visit::open(ssh_visitor("alice", "SHA256:AAA"));
+        v.asked(
+            "where is jaipur",
+            "Rajasthan.",
+            Some(crate::acp::Spend { used: 1256, window: 128_000, cost: Some(0.000_74) }),
+        );
+        // A priced-at-nothing model: the window is known, the money is not.
+        v.asked("and kochi", "Kerala.", Some(crate::acp::Spend { used: 1391, window: 128_000, cost: None }));
+        v.asked("/cert", "A badge.", None);
+        v.close();
+        std::env::remove_var("PORTFOLIO_VISITS");
+
+        let rows = read(&p);
+        let asks: Vec<&crate::json::Value> = rows
+            .iter()
+            .filter(|r| r.get("event").and_then(|e| e.as_str()) == Some("ask"))
+            .collect();
+        assert_eq!(asks.len(), 3);
+
+        assert_eq!(asks[0].get("used").and_then(|u| u.as_f64()), Some(1256.0));
+        assert_eq!(asks[0].get("window").and_then(|u| u.as_f64()), Some(128_000.0));
+        // Six places, because two would round this one to free.
+        let cost = asks[0].get("cost").and_then(|c| c.as_f64()).expect("no cost");
+        assert!((cost - 0.000_74).abs() < 1e-9, "{cost}");
+
+        assert_eq!(asks[1].get("used").and_then(|u| u.as_f64()), Some(1391.0));
+        assert!(asks[1].get("cost").is_none(), "an unpriced model was given a price");
+
+        assert!(asks[2].get("used").is_none(), "a local command reported tokens");
+        assert!(asks[2].get("cost").is_none(), "a local command reported a cost");
+
+        // And every row is still one parseable line.
+        assert!(rows.iter().all(|r| r.get("at").is_some()));
+    }
+
     #[test]
     fn a_hostile_question_cannot_forge_a_record() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -401,7 +464,11 @@ mod tests {
         std::env::set_var("PORTFOLIO_VISITS", &p);
 
         let mut v = Visit::open(ssh_visitor("x", "SHA256:X"));
-        v.asked("first\n{\"event\":\"arrive\",\"id\":\"forged\"}", "and \"quoted\" \\ too");
+        v.asked(
+            "first\n{\"event\":\"arrive\",\"id\":\"forged\"}",
+            "and \"quoted\" \\ too",
+            None,
+        );
         v.close();
         std::env::remove_var("PORTFOLIO_VISITS");
 

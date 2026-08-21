@@ -7,7 +7,7 @@
 
 [workspace]
 resolver = "2"
-members = ["map", "skills", "portfolio"]
+members = ["map", "skills", "portfolio", "moonin"]
 
 [profile.release]
 opt-level = 3

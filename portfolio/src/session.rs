@@ -301,8 +301,8 @@ async fn pump(
         shell.tick(wait.as_secs_f64());
         // Written as they finish rather than all at once at the end: a session
         // that is killed mid-conversation should still have the conversation.
-        for (q, a) in shell.drain_logged() {
-            visit.asked(&q, &a);
+        for turn in shell.drain_logged() {
+            visit.asked(&turn.q, &turn.a, turn.spent);
         }
         terminal.draw(|f| shell.render(f))?;
     }
