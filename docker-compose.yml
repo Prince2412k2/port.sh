@@ -101,6 +101,16 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # The web tools -- `search_web` and `fetch_page`. These two are spent by
+      # the portfolio itself rather than by an agent: no tier declares them, so
+      # `spawn_command` strips them from every agent's environment. Without
+      # them the two tools are not offered at all, and the section carries on
+      # with whatever web tools the agent brings of its own.
+      #
+      # A search costs money, so the ceiling is compiled in --
+      # `gates.rs: web_calls` per conversation, and `--probe` prints it.
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
       # The visitor's own address is geolocated to put a marker on the map.
       # Set this to anything to turn that off.
       # TERMAP_NO_CLIENT_LOOKUP: "1"
@@ -195,6 +205,16 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # The web tools -- `search_web` and `fetch_page`. These two are spent by
+      # the portfolio itself rather than by an agent: no tier declares them, so
+      # `spawn_command` strips them from every agent's environment. Without
+      # them the two tools are not offered at all, and the section carries on
+      # with whatever web tools the agent brings of its own.
+      #
+      # A search costs money, so the ceiling is compiled in --
+      # `gates.rs: web_calls` per conversation, and `--probe` prints it.
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
       # A browser tab left open in the background answers everything and would
       # otherwise hold its session indefinitely.
       # PORTFOLIO_IDLE_SECS: "900"

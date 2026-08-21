@@ -23,6 +23,12 @@
 //!   knowing where something is and deciding to draw it are different
 //!   decisions, and most answers want the first without the second.
 //!
+//! Two more, in `browse.rs`, are offered only when this box has the keys for
+//! them: `search_web` and `fetch_page`. They are the ones that leave the
+//! machine and cost money, so they are counted -- `GATES.web_calls` per session,
+//! spent before the request goes out and reported back to the agent so it can
+//! budget rather than discover the ceiling by hitting it.
+//!
 //! Nothing here is a general-purpose endpoint. The listener is bound to
 //! loopback, the path carries a per-session token, and a call with an unknown
 //! token is answered with an error and dropped -- a tool call is an instruction
@@ -74,6 +80,13 @@ struct Board {
     /// finishes after the visitor arrives, and a tool called ten seconds in
     /// should see the answer.
     place: Option<std::sync::Arc<Mutex<Option<termap::home::Where>>>>,
+    /// Searches and page reads this session has spent.
+    ///
+    /// Per board rather than per process: one visitor asking a lot of questions
+    /// should not be able to leave the next one with nothing, and a counter that
+    /// resets when the session ends is the same thing as one that lives on the
+    /// board -- `forget` takes it with the rest.
+    spent: usize,
 }
 
 /// Somewhere on the map, as the agent described it.
@@ -116,7 +129,7 @@ pub fn register(
     boards()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(token.clone(), Board { to: tx, place });
+        .insert(token.clone(), Board { to: tx, place, spent: 0 });
     token
 }
 
@@ -503,9 +516,8 @@ fn tool_list() -> String {
         picture that appears for everything stops meaning anything. It clears \
         itself when an answer does not ask for one, so there is nothing to tidy \
         up.";
-    format!(
-        r#"{{"tools":[
-        {{"name":"locate_place",
+    let core = format!(
+        r#"{{"name":"locate_place",
           "description":"Look up where anything is by name: a country, a state, a city, a town, a village, a monument, a lake, a mall, a cafe. Returns latitude, longitude, a zoom that frames it, `source` -- the map data on this box, or OpenStreetMap -- and `on_this_map`. That last one matters: the lookup covers the world and the map on screen only covers India, so `on_this_map:false` means you know where the place is and cannot show it. Say where it is in words and do not call show_map, because an empty frame presented as a map of Paris is worse than no picture. Pass the zoom back to show_map unless the answer is about something smaller than what you looked up.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt tries three things in order and you need not care which answers: an index of India built into this box, then that city's own streets, then OpenStreetMap. `found:false` means all three came up empty, and then say you cannot place it rather than guessing a point.",
           "inputSchema":{{"type":"object","properties":{{
             "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}},
@@ -533,9 +545,69 @@ fn tool_list() -> String {
           "inputSchema":{{"type":"object","properties":{{}}}}}},
         {{"name":"hide_map",
           "description":"Take the map off the screen. Only needed when a map is showing and the answer has moved on to something that is not a place; otherwise it goes by itself.",
-          "inputSchema":{{"type":"object","properties":{{}}}}}}
-    ]}}"#,
+          "inputSchema":{{"type":"object","properties":{{}}}}}}"#,
         json::quote(map_when)
+    );
+
+    // The web tools are listed only when this box can actually use them. A tool
+    // an agent can see and cannot use is worse than one it cannot see: it
+    // reaches for it, gets a failure, and reports having looked.
+    let mut tools = vec![core];
+    if crate::browse::can_search() {
+        tools.push(one("search_web", SEARCH_WHEN, "query", QUERY_ARG));
+    }
+    if crate::browse::can_read() {
+        tools.push(one("fetch_page", FETCH_WHEN, "url", URL_ARG));
+    }
+    format!(r#"{{"tools":[{}]}}"#, tools.join(","))
+}
+
+/// When to search, in the agent's words rather than ours. See `tool_list` for
+/// why this is a description and not a line in the system prompt.
+const SEARCH_WHEN: &str = "Search the web and get back the pages that answer a \
+    question, each with its address and a paragraph of its own text.\n\n\
+    Reach for it whenever an answer needs something this box cannot know: \
+    anything current, anything after your training, documentation, a fact about \
+    the world, or a claim you are about to make and are not certain of. Looking \
+    something up and saying what you found is worth far more than a confident \
+    guess, and the visitor can tell the difference.\n\n\
+    Not for questions about Prince, his work, or this site. All of that is \
+    already in front of you; searching the web for it finds somebody else with \
+    the same name.\n\n\
+    It costs money and this conversation has a small allowance, so ask one \
+    well-formed question rather than three vague ones. Every reply says how many \
+    lookups are left. Read the gists before deciding you need the whole page -- \
+    often they are already the answer.";
+
+const QUERY_ARG: &str = "What to search for, as a question or a phrase. Write it \
+    the way you would type it into a search box, not as a sentence addressed to \
+    the visitor.";
+
+const FETCH_WHEN: &str = "Read one web page and get it back as text you can \
+    quote.\n\n\
+    Use it when a search result's gist is not enough, or when the visitor gives \
+    you a link and asks what is in it. Give the whole address, including \
+    https://.\n\n\
+    A long page comes back cut off and the reply says so. If the part you were \
+    given does not contain the answer, say that rather than filling in the rest. \
+    It comes out of the same allowance as search_web.\n\n\
+    A page that is not there usually comes back as the site's own \"not found\" \
+    page rather than as an error, because that is genuinely what is at that \
+    address -- the reader read what was there. If that is what you are looking \
+    at, say the link is dead instead of describing it.";
+
+const URL_ARG: &str = "The full address of the page, including https://. One \
+    page per call.";
+
+/// One tool with one string argument, which is the shape both web tools have.
+fn one(name: &str, when: &str, arg: &str, about: &str) -> String {
+    format!(
+        r#"{{"name":{},"description":{},"inputSchema":{{"type":"object","properties":{{{}:{{"type":"string","description":{}}}}},"required":[{}]}}}}"#,
+        json::quote(name),
+        json::quote(when),
+        json::quote(arg),
+        json::quote(about),
+        json::quote(arg)
     )
 }
 
@@ -683,6 +755,57 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 ),
             }
         }
+        "search_web" => {
+            // Checked before anything is spent: a malformed call is our mistake
+            // to report, not the visitor's allowance to pay for.
+            let query = arg_str("query").trim();
+            if query.len() < 2 {
+                return err("search_web needs a `query`");
+            }
+            match spend(token) {
+                Err(why) => err(why),
+                Ok(left) => match crate::browse::search(query) {
+                    Err(why) => err(&why),
+                    Ok(hits) => {
+                        let rows: Vec<String> = hits
+                            .iter()
+                            .map(|h| {
+                                format!(
+                                    r#"{{"title":{},"url":{},"gist":{}}}"#,
+                                    json::quote(&h.title),
+                                    json::quote(&h.url),
+                                    json::quote(&h.gist)
+                                )
+                            })
+                            .collect();
+                        text(&format!(
+                            r#"{{"found":{},"lookups_left":{left},"results":[{}]}}"#,
+                            rows.len(),
+                            rows.join(",")
+                        ))
+                    }
+                },
+            }
+        }
+        "fetch_page" => {
+            let url = arg_str("url").trim();
+            if url.is_empty() {
+                return err("fetch_page needs a `url`");
+            }
+            match spend(token) {
+                Err(why) => err(why),
+                Ok(left) => match crate::browse::read(url) {
+                    Err(why) => err(&why),
+                    Ok(page) => text(&format!(
+                        r#"{{"url":{},"title":{},"clipped":{},"lookups_left":{left},"text":{}}}"#,
+                        json::quote(&page.url),
+                        json::quote(&page.title),
+                        page.clipped,
+                        json::quote(&page.text)
+                    )),
+                },
+            }
+        }
         "hide_map" => match send(token, Directive::Clear) {
             true => text(r#"{"hidden":true}"#),
             false => err("that screen is gone"),
@@ -701,6 +824,11 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
     let num_of = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_f64());
     match name {
         "locate_place" => str_of("name").to_string(),
+        // The question, and the address. Both are the whole point of the row:
+        // a visitor watching `search_web` with nothing beside it cannot tell
+        // whether it went looking for what they asked about.
+        "search_web" => str_of("query").to_string(),
+        "fetch_page" => str_of("url").to_string(),
         "show_map" if args.and_then(|a| a.get("from")).is_some() => {
             let label = str_of("label");
             match label.is_empty() {
@@ -728,6 +856,31 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Spend one of this session's web lookups, and say how many are left.
+///
+/// Spent *before* the request goes out, not after it succeeds: the abuse case is
+/// a tool called in a loop, and a call that fails costs the service the same
+/// work as one that does not. The cost of that choice is that a flaky minute can
+/// eat a session's allowance, which is the cheaper mistake.
+///
+/// The error is the sentence the agent is given, because the two ways this can
+/// fail are different things to be told: a session that has gone is not
+/// something to try again, and an exhausted allowance is not something to
+/// apologise for -- it is a reason to answer from what is already known.
+fn spend(token: &str) -> Result<usize, &'static str> {
+    let mut table = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(board) = table.get_mut(token) else {
+        return Err("that screen is gone");
+    };
+    let ceiling = crate::gates::GATES.web_calls;
+    if board.spent >= ceiling {
+        return Err("this conversation has used all of its web lookups -- \
+                    answer from what you already have, and say that is what you are doing");
+    }
+    board.spent += 1;
+    Ok(ceiling - board.spent)
 }
 
 fn send(token: &str, d: Directive) -> bool {
@@ -901,6 +1054,119 @@ mod tests {
         assert!(names.contains(&"show_map".to_string()), "{names:?}");
         assert!(names.contains(&"hide_map".to_string()), "{names:?}");
         assert!(names.contains(&"locate_visitor".to_string()), "{names:?}");
+    }
+
+    /// The two that cost money are offered only when this box can pay: a tool
+    /// an agent can see and cannot use gets reached for, fails, and is then
+    /// reported as a search that happened.
+    #[test]
+    fn the_web_tools_are_offered_only_when_this_box_has_the_keys() {
+        let _lock = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let names = || -> Vec<String> {
+            let out = handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
+            result_of(&out)
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .expect("no tools")
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect()
+        };
+
+        std::env::remove_var("EXA_API_KEY");
+        std::env::remove_var("JINA_API_KEY");
+        let without = names();
+        assert!(!without.contains(&"search_web".to_string()), "{without:?}");
+        assert!(!without.contains(&"fetch_page".to_string()), "{without:?}");
+        // The map tools do not depend on a credential and never disappear.
+        assert!(without.contains(&"show_map".to_string()), "{without:?}");
+
+        // Empty is the same as absent -- compose passes `${EXA_API_KEY:-}`, so
+        // the variable exists and is blank on any host that has not set one.
+        std::env::set_var("EXA_API_KEY", "");
+        assert!(!names().contains(&"search_web".to_string()));
+
+        std::env::set_var("EXA_API_KEY", "k");
+        std::env::set_var("JINA_API_KEY", "k");
+        let with = names();
+        assert!(with.contains(&"search_web".to_string()), "{with:?}");
+        assert!(with.contains(&"fetch_page".to_string()), "{with:?}");
+        std::env::remove_var("EXA_API_KEY");
+        std::env::remove_var("JINA_API_KEY");
+
+        // Whatever the environment, the list is still JSON an agent can read.
+        assert!(crate::json::parse(&handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap()).is_some());
+    }
+
+    /// The allowance is per session and it runs out.
+    ///
+    /// Also proves the *order*: the ceiling is checked before the request goes
+    /// out. If it were checked after, this test would either reach the network
+    /// or report a missing key, and both read differently from what it asserts.
+    #[test]
+    fn the_web_lookups_run_out_and_say_so() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let board = register(tx, None);
+
+        for i in 0..crate::gates::GATES.web_calls {
+            assert!(spend(&board).is_ok(), "lookup {i} was refused early");
+        }
+        assert!(spend(&board).is_err(), "the ceiling did not hold");
+
+        let out = handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"search_web",
+               "arguments":{"query":"where is the nearest cafe"}}}"#,
+        )
+        .unwrap();
+        let r = result_of(&out);
+        assert_eq!(r.get("isError").and_then(|e| e.as_bool()), Some(true), "{out}");
+        let said = r
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(said.contains("web lookups"), "{said}");
+
+        // A different session still has its own.
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let other = register(tx2, None);
+        assert!(spend(&other).is_ok(), "one visitor spent another's allowance");
+        forget(&board);
+        forget(&other);
+    }
+
+    /// A malformed call is not charged for. The reply says what is missing.
+    #[test]
+    fn a_call_with_nothing_to_look_up_costs_nothing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let board = register(tx, None);
+        for bad in [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_web","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_web","arguments":{"query":" "}}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fetch_page","arguments":{}}}"#,
+        ] {
+            let out = handle(&board, bad).unwrap();
+            assert_eq!(
+                result_of(&out).get("isError").and_then(|e| e.as_bool()),
+                Some(true),
+                "{out}"
+            );
+        }
+        let left = boards().lock().unwrap().get(&board).map(|b| b.spent);
+        assert_eq!(left, Some(0), "a malformed call spent a lookup");
+        forget(&board);
+    }
+
+    /// The row the visitor watches. A search with nothing beside it does not
+    /// say whether the agent looked for what was asked about.
+    #[test]
+    fn a_web_call_says_what_it_went_looking_for() {
+        let args = crate::json::parse(r#"{"query":"acp schema","url":"https://x.test/a"}"#).unwrap();
+        assert_eq!(detail_of("search_web", Some(&args)), "acp schema");
+        assert_eq!(detail_of("fetch_page", Some(&args)), "https://x.test/a");
     }
 
     /// An unknown method is an error, not an empty success. Same rule as the

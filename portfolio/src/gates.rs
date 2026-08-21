@@ -46,6 +46,18 @@ pub struct Gates {
     /// A total rather than a rate, because the thing being prevented is somebody
     /// using this box as a free web crawler, and that is a total.
     pub tool_calls: usize,
+    /// Searches and page reads per session, across every question.
+    ///
+    /// Separate from `tool_calls` because these are the only tools that cost
+    /// money: a map lookup reads an index on this disk, a search is seven tenths
+    /// of a cent on somebody's account. Any username with any key opens a
+    /// session here, so an uncapped search tool is a stranger's budget.
+    ///
+    /// Also a total, and for the same reason -- but a smaller one, because the
+    /// failure it prevents is a bill rather than a busy afternoon. Twelve is one
+    /// per question, which is what an honest conversation needs; the reply tells
+    /// the agent how many are left so it can spend them on purpose.
+    pub web_calls: usize,
 }
 
 /// The shipped policy: read the web, let us stop it, nothing else.
@@ -57,6 +69,7 @@ pub const GATES: Gates = Gates {
     cancel: true,
     turns: 12,
     tool_calls: 24,
+    web_calls: 12,
 };
 
 /// A tool the agent may reach for, and whether it may.
@@ -122,6 +135,19 @@ pub const TOOLS: &[Tool] = &[
     Tool { name: "show_map", aka: &[], open: true, ours: true, blurb: "draw a map" },
     Tool { name: "locate_visitor", aka: &[], open: true, ours: true, blurb: "where you are" },
     Tool { name: "hide_map", aka: &[], open: true, ours: true, blurb: "put the map away" },
+    // Also ours, and the only two that leave this box. They are here because
+    // "can look something up" used to arrive and leave with whichever server was
+    // answering: Copilot's seat brings its own web tools, most of the free models
+    // bring none, and the agent in `ai-sdk/` has none at all by design. The two
+    // above them stay open as well -- a server that brings its own search should
+    // use it rather than spend ours.
+    //
+    // Named so that no prose can match one. `search_web` rather than
+    // `web_search`, which is already Copilot's spelling of its own; `fetch_page`
+    // rather than `read_page`, because `read` is a shut tool and containment
+    // would have refused ours under the name of that one.
+    Tool { name: "search_web", aka: &[], open: true, ours: true, blurb: "find pages about a thing" },
+    Tool { name: "fetch_page", aka: &[], open: true, ours: true, blurb: "read a page as text" },
     // Nothing provides this one. `/reach` is handled in ask.rs before the
     // agent ever sees the line, deliberately: a message meant for a person
     // should arrive whether or not a model is up, and word for word rather

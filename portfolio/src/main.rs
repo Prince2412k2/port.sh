@@ -4,6 +4,7 @@ mod acp;
 mod about;
 mod boot;
 mod ask;
+mod browse;
 mod cert;
 mod coffee;
 mod context;
@@ -123,7 +124,15 @@ fn main() -> io::Result<()> {
                 for (cap, open) in gates::capabilities() {
                     println!("  acp   {:<12} {}", cap, if open { "on" } else { "off" });
                 }
-                println!("  budget  {} questions, {} tool calls", gates::GATES.turns, gates::GATES.tool_calls);
+                println!(
+                    "  budget  {} questions, {} tool calls, {} web lookups",
+                    gates::GATES.turns, gates::GATES.tool_calls, gates::GATES.web_calls
+                );
+                println!(
+                    "  web     search {}, reader {}",
+                    if browse::can_search() { "keyed" } else { "no key" },
+                    if browse::can_read() { "keyed" } else { "no key" }
+                );
                 println!("  advertised  {}", gates::client_capabilities());
                 println!();
 

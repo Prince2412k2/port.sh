@@ -242,6 +242,8 @@ and it is not a file to commit:
 ```bash
 OLLAMA_API_KEY=...
 OPENCODE_API_KEY=...
+EXA_API_KEY=...          # search_web, below
+JINA_API_KEY=...         # fetch_page, below
 ```
 
 Or log in instead, which writes to `auth.json` on the `agent` volume and so
@@ -264,6 +266,28 @@ opencode still serves the zen and ollama tiers underneath, and still has its own
 login (`opencode auth login <provider>`) if you ever point a tier at a provider
 that needs one.
 
+**Its own web tools.** The section used to be able to look something up only
+when the answering server happened to bring web tools of its own: Copilot's seat
+does, most of the free models do not. So two of them are ours now, served from
+this process like the map tools — `search_web` (Exa) and `fetch_page` (Jina's
+reader) — and every tier has them.
+
+| what | variable | without it |
+|---|---|---|
+| search | `EXA_API_KEY` | `search_web` is not offered at all |
+| reading a page | `JINA_API_KEY` | `fetch_page` is not offered at all |
+
+Both go in the same `.env`. Neither is handed to an agent: no tier declares them,
+so `spawn_command` strips them from every agent's environment, and the only thing
+that spends them is this binary. **A search costs about seven tenths of a cent,**
+and the box takes any username, so the ceiling is compiled in with the rest of
+the policy — `gates.rs: web_calls`, twelve a conversation, counted per session
+and reported back to the agent in every reply so it can spend them deliberately.
+An empty variable counts as absent, which is what compose passes when the host
+has not set one.
+
+`portfolio --probe` prints whether each key is present, without printing it.
+
 **What it may do.** One table, `portfolio/src/gates.rs`, and everything else
 derives from it: the `clientCapabilities` in the ACP handshake, the server's own
 `tools` and `permission` blocks where it has them, and the check on every inbound
@@ -285,9 +309,10 @@ a stranger. A file on disk is one bad mount from being absent or empty — see t
 dangling-symlink incident — so turning one on is a rebuild and a redeploy. That
 is the right amount of friction for the question.
 
-**What it costs you.** Strangers' questions spend your tokens. Two brakes, in
-`gates.rs`: `turns` (twelve questions a connection) and `tool_calls` (twenty-four
-a session). Neither stops a reconnect. If this gets found by something automated,
+**What it costs you.** Strangers' questions spend your tokens, and their
+searches spend real money. Three brakes, all in `gates.rs`: `turns` (twelve
+questions a connection), `tool_calls` (twenty-four a session) and `web_calls`
+(twelve searches or page reads a session). None of them stops a reconnect. If this gets found by something automated,
 the lever is `models.txt` — empty it and the section turns itself off.
 
 **Which server.** Any ACP server, not just opencode. A tier in `models.txt` may

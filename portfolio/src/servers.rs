@@ -63,6 +63,14 @@ pub const SECRETS: &[&str] = &[
     "OPENCODE_API_KEY",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    // The web tools' keys, and the reason this list is by subtraction. These
+    // two belong to *this* process -- `browse.rs` spends them, behind a
+    // per-session ceiling and a tool description that says what they are for.
+    // No tier declares them, so every agent starts without them, which is the
+    // point: an agent handed a search key can search as much as it likes and
+    // nothing here would count it.
+    "EXA_API_KEY",
+    "JINA_API_KEY",
 ];
 
 /// One ACP server: what to run, and how to tell it which model to use.
