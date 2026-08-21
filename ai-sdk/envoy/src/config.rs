@@ -18,6 +18,45 @@ use parley::types::{Api, Cost, Endpoint, Model};
 use parley::{Fallback, Tier};
 use serde::{Deserialize, Serialize};
 
+/// One MCP server, named in the environment. See `mcp_from_env`.
+pub const MCP_VAR: &str = "ENVOY_MCP_HTTP";
+
+/// An HTTP MCP server from the environment, appended to what the config says.
+///
+/// `ENVOY_MCP_HTTP=name=url`, or just a url. This is narrower than
+/// `ENVOY_CONFIG_CONTENT` on purpose, and it is the variable a client actually
+/// needs: the address of a client's own tool server cannot be known when a
+/// config file is written, because it does not exist until the session does.
+/// Everything else about the run still comes from the document, so there is one
+/// catalogue rather than two that can disagree about which models exist.
+///
+/// Appended rather than replacing: a deployment may have servers of its own and
+/// a client asking for one is not asking to be the only one.
+pub fn mcp_from_env() -> Option<McpConfig> {
+    let raw = std::env::var(MCP_VAR).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // A url has a scheme and a name does not, which is enough to tell
+    // `name=url` from a url that happens to contain an `=` in its query.
+    let (name, url) = match raw.split_once('=') {
+        Some((name, rest)) if rest.starts_with("http") && !name.contains("://") => (name, rest),
+        _ => ("client", raw),
+    };
+    if !url.starts_with("http") {
+        eprintln!("envoy: ${MCP_VAR} is not an http url, ignoring it");
+        return None;
+    }
+    Some(McpConfig {
+        name: name.trim().to_string(),
+        command: None,
+        args: Vec::new(),
+        url: Some(url.trim().to_string()),
+        headers: Vec::new(),
+    })
+}
+
 /// Where a whole config document can arrive instead of a path. See
 /// `Config::from_env_or`.
 pub const CONTENT_VAR: &str = "ENVOY_CONFIG_CONTENT";
@@ -229,16 +268,42 @@ impl TierConfig {
     }
 }
 
-/// `~` at the front of a path, since a config file is written by a person.
+/// `~`, `$HOME` and `$XDG_DATA_HOME` at the front of a path.
+///
+/// A config file is written by a person, so `~` was always going to be in one.
+/// `$XDG_DATA_HOME` is here for a harder reason: the credential this reads is
+/// written by another program, and *where* that program writes it differs
+/// between a laptop and a container. The portfolio's image sets
+/// `XDG_DATA_HOME=/app/agent` so opencode's login lands on a volume that
+/// survives a rebuild; on a laptop nothing sets it and the same login is under
+/// `~/.local/share`. One path that resolves correctly in both places is worth
+/// more than two config files that differ by one line.
+///
+/// The fallback is the specified one -- `$HOME/.local/share` -- rather than
+/// leaving the variable unexpanded, because a literal `$XDG_DATA_HOME` in a path
+/// fails as "no such file" and says nothing about why.
 fn expand(path: &std::path::Path) -> PathBuf {
     let text = path.to_string_lossy();
-    match text.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => PathBuf::from(home).join(rest),
-            None => path.to_path_buf(),
-        },
-        None => path.to_path_buf(),
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    for (prefix, base) in [
+        ("~/", home()),
+        ("$HOME/", home()),
+        (
+            "$XDG_DATA_HOME/",
+            match std::env::var_os("XDG_DATA_HOME") {
+                Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+                _ => home().map(|h| h.join(".local/share")),
+            },
+        ),
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return match base {
+                Some(base) => base.join(rest),
+                None => path.to_path_buf(),
+            };
+        }
     }
+    path.to_path_buf()
 }
 
 /// What a tier resolved to, and why it did not if it did not.
@@ -271,7 +336,11 @@ impl Config {
     pub fn from_env_or(path: &str) -> std::io::Result<(Config, String)> {
         match std::env::var(CONTENT_VAR) {
             Ok(text) if !text.trim().is_empty() => {
-                let config = serde_json::from_str(&text).map_err(std::io::Error::other)?;
+                // Named in the error as well as in the log: a document that will
+                // not parse used to report the path of the file it did not read,
+                // which is the exact confusion the source line exists to stop.
+                let config = serde_json::from_str(&text)
+                    .map_err(|e| std::io::Error::other(format!("${CONTENT_VAR}: {e}")))?;
                 Ok((config, format!("${CONTENT_VAR}")))
             }
             _ => Ok((Config::read(path)?, path.to_string())),
@@ -514,6 +583,72 @@ mod tests {
     /// One test in this file sets an environment variable, and cargo runs tests
     /// on threads that share it.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The one address a config file cannot contain, arriving the only way it
+    /// can. Both spellings, and the ways it can be wrong.
+    /// One path, two machines. The container puts opencode's login on a volume
+    /// under `$XDG_DATA_HOME`; a laptop leaves it under `~/.local/share`.
+    #[test]
+    fn a_credential_path_resolves_the_same_way_in_both_places() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let of = |p: &str| expand(std::path::Path::new(p));
+
+        std::env::set_var("HOME", "/home/someone");
+        std::env::set_var("XDG_DATA_HOME", "/app/agent");
+        assert_eq!(of("$XDG_DATA_HOME/opencode/auth.json"), PathBuf::from("/app/agent/opencode/auth.json"));
+        assert_eq!(of("~/x"), PathBuf::from("/home/someone/x"));
+        assert_eq!(of("$HOME/x"), PathBuf::from("/home/someone/x"));
+
+        // Nothing set it: the specified default, not a literal `$XDG_DATA_HOME`
+        // that fails later as "no such file" and says nothing about why.
+        std::env::remove_var("XDG_DATA_HOME");
+        assert_eq!(
+            of("$XDG_DATA_HOME/opencode/auth.json"),
+            PathBuf::from("/home/someone/.local/share/opencode/auth.json")
+        );
+        // Empty is the same as unset, as everywhere else here.
+        std::env::set_var("XDG_DATA_HOME", "");
+        assert_eq!(
+            of("$XDG_DATA_HOME/opencode/auth.json"),
+            PathBuf::from("/home/someone/.local/share/opencode/auth.json")
+        );
+        std::env::remove_var("XDG_DATA_HOME");
+
+        // An absolute path is left alone, and so is a `$VAR` nobody handles.
+        assert_eq!(of("/etc/x"), PathBuf::from("/etc/x"));
+        assert_eq!(of("$SOMETHING/x"), PathBuf::from("$SOMETHING/x"));
+    }
+
+    #[test]
+    fn a_client_can_name_its_own_tool_server_in_the_environment() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        std::env::remove_var(MCP_VAR);
+        assert!(mcp_from_env().is_none());
+
+        std::env::set_var(MCP_VAR, "portfolio=http://127.0.0.1:5555/mcp/abc");
+        let one = mcp_from_env().expect("named server not read");
+        assert_eq!(one.name, "portfolio");
+        assert_eq!(one.url.as_deref(), Some("http://127.0.0.1:5555/mcp/abc"));
+
+        // A bare url still works, and gets a name it can be reported under.
+        std::env::set_var(MCP_VAR, "http://127.0.0.1:5555/mcp/abc");
+        let one = mcp_from_env().expect("bare url not read");
+        assert_eq!(one.name, "client");
+        assert_eq!(one.url.as_deref(), Some("http://127.0.0.1:5555/mcp/abc"));
+
+        // An `=` in the url's own query is not a name.
+        std::env::set_var(MCP_VAR, "http://x.test/mcp?a=b");
+        assert_eq!(mcp_from_env().unwrap().url.as_deref(), Some("http://x.test/mcp?a=b"));
+
+        // Not an address at all: ignored and said so, rather than configured as
+        // a server that will fail to start on every prompt.
+        std::env::set_var(MCP_VAR, "/tmp/socket");
+        assert!(mcp_from_env().is_none());
+        std::env::set_var(MCP_VAR, "  ");
+        assert!(mcp_from_env().is_none());
+        std::env::remove_var(MCP_VAR);
+    }
 
     #[test]
     fn an_opencode_login_is_a_credential_a_tier_can_name() {

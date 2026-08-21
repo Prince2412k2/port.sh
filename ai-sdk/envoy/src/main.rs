@@ -18,6 +18,9 @@ envoy -- an agent that speaks the Agent Client Protocol over stdio
 
     envoy [--config PATH] [--model PROVIDER/MODEL]
 
+    $ENVOY_MCP_HTTP carries one HTTP MCP server as `name=url`, for a client whose
+    tool server has no address until the session exists.
+
     --config PATH   tiers, budget and system prompt (default: $ENVOY_CONFIG,
                     then ./envoy.json). $ENVOY_CONFIG_CONTENT carries the whole
                     document instead, and wins: a client that composes one per
@@ -56,6 +59,9 @@ async fn main() -> std::process::ExitCode {
 
     let (mut config, source) = match Config::from_env_or(&path) {
         Ok(pair) => pair,
+        // The error already names its own source when it came from the
+        // environment; the path is only right for the file case.
+        Err(e) if e.to_string().starts_with('$') => return fail(&e.to_string()),
         Err(e) => return fail(&format!("{path}: {e}")),
     };
     eprintln!("envoy: configured from {source}");
@@ -77,6 +83,12 @@ async fn main() -> std::process::ExitCode {
         eprintln!("envoy: no tier has a usable credential; prompts will fail until one does");
         placeholder()
     });
+
+    // A client's own tool server, if it named one. Appended before anything is
+    // started so it is gathered with the rest and reported the same way.
+    if let Some(theirs) = envoy::config::mcp_from_env() {
+        config.mcp_servers.push(theirs);
+    }
 
     // MCP servers, if any. Tools are gathered once; a server that will not
     // start is named on stderr and the agent runs without it.

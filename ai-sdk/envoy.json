@@ -20,7 +20,7 @@
       "reasoning": true,
       "effort": "low",
       "auth": {
-        "opencode": "~/.local/share/opencode/auth.json"
+        "opencode": "$XDG_DATA_HOME/opencode/auth.json"
       }
     },
     {
