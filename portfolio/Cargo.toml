@@ -15,6 +15,12 @@ skysheet = { path = "../skills" }
 russh = "0.62"
 rand = "0.10"
 anyhow = "1"
+
+# HTTPS, for the geocoder. The rest of this project talks to one HTTP service
+# over a bare socket on port 80 because that was all it needed; Nominatim is
+# TLS-only, and hand-rolling TLS is not a thing anybody should do. Pinned to the
+# versions in the offline registry -- see the environment notes in SESSION.md.
+ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
 bytes = "1"
 futures-util = "0.3"
 # Pinned exactly: 0.8.9 wants tokio-tungstenite 0.29, which is not in the

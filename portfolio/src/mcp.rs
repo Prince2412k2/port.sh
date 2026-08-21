@@ -165,6 +165,22 @@ pub fn forget(token: &str) {
 /// special case on the page.
 static INDEX: OnceLock<termap::gazetteer::Gazetteer> = OnceLock::new();
 
+/// What the basemap actually covers, in world coordinates.
+///
+/// Needed because the geocoder is worldwide and the archive is not. Asked for
+/// the Eiffel Tower it now returns the right coordinates -- and there are no
+/// tiles within a thousand miles of them, so drawing that point is a blank
+/// rectangle presented as a map of Paris. The tool says which it is and lets
+/// the agent tell the visitor.
+static COVERS: OnceLock<[f64; 4]> = OnceLock::new();
+
+/// Whether there is a map to draw at this point.
+fn on_this_map(lat: f64, lon: f64) -> bool {
+    let Some([x0, y0, x1, y1]) = COVERS.get() else { return false };
+    let [x, y] = termap::geo::lonlat_to_world(lon, lat);
+    x >= *x0 && x <= *x1 && y >= *y0 && y <= *y1
+}
+
 pub fn warm_index() {
     if INDEX.get().is_some() {
         return;
@@ -176,6 +192,7 @@ pub fn warm_index() {
             let _ = INDEX.set(termap::gazetteer::Gazetteer::default());
             return;
         }
+        let _ = COVERS.set(src.bounds());
         let started = std::time::Instant::now();
         let g = termap::gazetteer::Gazetteer::build(&mut src);
         eprintln!(
@@ -262,6 +279,202 @@ fn look_nearby(centre: (f64, f64), what: &str) -> Option<termap::gazetteer::Entr
     })
 }
 
+/// Who we say we are to OpenStreetMap's geocoder.
+///
+/// Nominatim's usage policy requires a User-Agent that identifies the
+/// application and gives a way to reach whoever runs it. That is not a
+/// formality: it is how they tell a portfolio from a scraper, and the penalty
+/// for anonymous traffic is a block on the address. Overridable so a fork does
+/// not pretend to be this deployment.
+fn agent_line() -> String {
+    std::env::var("PORTFOLIO_GEOCODE_UA").unwrap_or_else(|_| {
+        "terminal-portfolio/0.1 (+https://github.com/Prince2412k2; prince240102@gmail.com)"
+            .to_string()
+    })
+}
+
+/// One geocoded answer.
+struct Placed {
+    lat: f64,
+    lon: f64,
+    name: String,
+    zoom: f64,
+}
+
+/// A zoom that frames what came back, from its bounding box.
+///
+/// Nominatim gives a box rather than a zoom, and the box is the useful part: a
+/// country and a cafe both arrive as one point and only their extent says which
+/// is which. Banded rather than a formula because the bands are legible and a
+/// log of a ratio is not.
+fn zoom_for(span: f64) -> f64 {
+    match span {
+        s if s > 6.0 => 5.0,
+        s if s > 2.0 => 7.0,
+        s if s > 0.5 => 9.0,
+        s if s > 0.1 => 11.0,
+        s if s > 0.02 => 13.0,
+        _ => 14.0,
+    }
+}
+
+thread_local! {
+    /// Answers already asked for, and when the last request went out.
+    ///
+    /// Both halves matter. The cache is because a conversation asks about the
+    /// same handful of places repeatedly, and a miss is worth remembering too --
+    /// a name the geocoder does not know will not learn it while somebody is
+    /// still typing. The clock is Nominatim's usage policy: at most one request a
+    /// second, and exceeding it gets the address blocked rather than
+    /// rate-limited.
+    static GEOCODED: std::cell::RefCell<Asked> = const { std::cell::RefCell::new(Asked::new()) };
+}
+
+/// What has been asked for, and when the last request went out.
+struct Asked {
+    seen: Vec<(String, Option<Placed>)>,
+    last: Option<std::time::Instant>,
+}
+
+impl Asked {
+    const fn new() -> Asked {
+        Asked { seen: Vec::new(), last: None }
+    }
+}
+
+/// Ask OpenStreetMap where something is.
+///
+/// The last resort behind `locate_place`: the basemap knows India's settlements
+/// and, swept deeply, a city's own landmarks -- this knows the rest of the world
+/// and everything with a name on it. It is also the only part of this box that
+/// makes an outbound TLS connection, and the reason `ureq` is a dependency.
+///
+/// Off entirely with `PORTFOLIO_NO_GEOCODE`, and silent on any failure: a
+/// portfolio whose chat stops working because somebody else's service is down
+/// is a worse thing than one that cannot place a cafe.
+fn geocode(query: &str) -> Option<Placed> {
+    let query = query.trim();
+    if query.len() < 3 || std::env::var_os("PORTFOLIO_NO_GEOCODE").is_some() {
+        return None;
+    }
+
+    let cached = GEOCODED.with(|g| {
+        let g = g.borrow();
+        g.seen.iter().find(|(q, _)| q == query).map(|(_, found)| {
+            found.as_ref().map(|p| Placed { lat: p.lat, lon: p.lon, name: p.name.clone(), zoom: p.zoom })
+        })
+    });
+    if let Some(hit) = cached {
+        return hit;
+    }
+
+    // One request a second, as their policy asks. This blocks the tool server's
+    // thread, which is acceptable for something that runs when a place is asked
+    // about for the first time and never in a loop.
+    GEOCODED.with(|g| {
+        let last = g.borrow().last;
+        if let Some(last) = last {
+            let since = last.elapsed();
+            if since < std::time::Duration::from_secs(1) {
+                std::thread::sleep(std::time::Duration::from_secs(1) - since);
+            }
+        }
+        g.borrow_mut().last = Some(std::time::Instant::now());
+    });
+
+    let found = ask_nominatim(query);
+    match &found {
+        Some(p) => eprintln!("portfolio: geocoded `{query}` to {:.4},{:.4}", p.lat, p.lon),
+        None => eprintln!("portfolio: no geocode for `{query}`"),
+    }
+    GEOCODED.with(|g| {
+        let mut g = g.borrow_mut();
+        // Bounded: a long conversation should not turn this into a leak.
+        if g.seen.len() >= 64 {
+            g.seen.remove(0);
+        }
+        let keep = found.as_ref().map(|p| Placed {
+            lat: p.lat,
+            lon: p.lon,
+            name: p.name.clone(),
+            zoom: p.zoom,
+        });
+        g.seen.push((query.to_string(), keep));
+    });
+    found
+}
+
+fn ask_nominatim(query: &str) -> Option<Placed> {
+    let url = format!(
+        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q={}",
+        urlencode(query)
+    );
+    let body = ureq::get(&url)
+        .header("User-Agent", &agent_line())
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(8)))
+        .build()
+        .call()
+        .ok()?
+        .body_mut()
+        .read_to_string()
+        .ok()?;
+    parse_nominatim(&body)
+}
+
+/// The first result, or nothing. Split out so it can be tested against a
+/// recorded response -- this machine cannot reach the service.
+fn parse_nominatim(body: &str) -> Option<Placed> {
+    let first = json::parse(body)?.as_array()?.first()?.clone();
+    let num = |k: &str| {
+        first.get(k).and_then(|v| match v {
+            // Nominatim sends lat and lon as strings, and the box as strings too.
+            Value::Str(s) => s.parse::<f64>().ok(),
+            other => other.as_f64(),
+        })
+    };
+    let (lat, lon) = (num("lat")?, num("lon")?);
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    // `boundingbox` is [south, north, west, east], as strings.
+    let span = first
+        .get("boundingbox")
+        .and_then(|b| b.as_array())
+        .and_then(|b| {
+            let f = |i: usize| b.get(i).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+            Some(((f(1)? - f(0)?).abs()).max((f(3)? - f(2)?).abs()))
+        })
+        .unwrap_or(0.0);
+    Some(Placed {
+        lat,
+        lon,
+        name: first
+            .get("display_name")
+            .or_else(|| first.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string(),
+        zoom: zoom_for(span),
+    })
+}
+
+/// Percent-encode a query. Only what a place name can contain, which is why
+/// this is nine lines rather than a dependency.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// The tools, as MCP describes them.
 ///
 /// The descriptions are the only instructions the agent gets about *when* to
@@ -293,10 +506,10 @@ fn tool_list() -> String {
     format!(
         r#"{{"tools":[
         {{"name":"locate_place",
-          "description":"Look up where a named place in India is: a state, a city, a town, a village. Returns latitude, longitude and a zoom that frames it, and the zoom should be passed back to show_map unchanged.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt knows places people live, not buildings or monuments: asked for the Taj Mahal, Ward's Lake or a waterfall it returns found:false. That is not a dead end -- search the web for the coordinates and pass those to show_map, mentioning in a few words that the point came from a search rather than from the map data. Falling back to the town it is in is also fine if you say that is what you are showing. Only when both come up empty say you cannot place it.",
+          "description":"Look up where anything is by name: a country, a state, a city, a town, a village, a monument, a lake, a mall, a cafe. Returns latitude, longitude, a zoom that frames it, `source` -- the map data on this box, or OpenStreetMap -- and `on_this_map`. That last one matters: the lookup covers the world and the map on screen only covers India, so `on_this_map:false` means you know where the place is and cannot show it. Say where it is in words and do not call show_map, because an empty frame presented as a map of Paris is worse than no picture. Pass the zoom back to show_map unless the answer is about something smaller than what you looked up.\n\nAlways look a place up rather than recalling its coordinates. A wrong one puts the camera in the sea and nothing on screen says so.\n\nIt tries three things in order and you need not care which answers: an index of India built into this box, then that city's own streets, then OpenStreetMap. `found:false` means all three came up empty, and then say you cannot place it rather than guessing a point.",
           "inputSchema":{{"type":"object","properties":{{
             "name":{{"type":"string","description":"The place name, e.g. Jaipur, Kerala, Ahmedabad."}},
-            "near":{{"type":"string","description":"The town or city to look inside, when `name` is something within one -- a cafe, a mall, a park, a hospital, a temple. Without this only settlements are searched. With it the map data for that city is read street by street, which finds a great many named places but not all of them: on a miss, fall back to a web search as usual."}}
+            "near":{{"type":"string","description":"The town or city to look inside, when `name` is something within one -- a cafe, a mall, a park, a hospital, a temple. Give it whenever you have it: it is what tells a Zen Cafe in Ahmedabad from the several elsewhere, and it lets this box search that city's own streets before going out to the internet."}}
           }},"required":["name"]}}}},
         {{"name":"show_map",
           "description":{},
@@ -351,30 +564,50 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
             // answer to a question nobody asked. A caller that names a city has
             // told us which of the identically named places it means.
             let near = arg_str("near");
-            let found = match near.trim().is_empty() {
+            // Three tiers, cheapest first, and the order is the whole design.
+            // The country-wide index is in memory. The deep sweep of one city is
+            // fifty milliseconds of local disk. OpenStreetMap is somebody else's
+            // server across the internet, so it goes last and only when the two
+            // that cost nothing have both come up empty.
+            let local = match near.trim().is_empty() {
                 false => index()
                     .and_then(|g| g.find(near))
                     .and_then(|city| look_nearby(city.lonlat, want))
                     .or_else(|| index().and_then(|g| g.find(want)).cloned()),
                 true => index().and_then(|g| g.find(want)).cloned(),
             };
-            match found.as_ref() {
+            match local {
                 Some(e) => text(&format!(
-                    r#"{{"found":true,"name":{},"kind":{},"lat":{:.5},"lon":{:.5},"zoom":{:.2}}}"#,
+                    r#"{{"found":true,"name":{},"kind":{},"lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"map data"}}"#,
                     json::quote(&e.name),
                     json::quote(e.what),
                     e.lonlat.1,
                     e.lonlat.0,
                     e.zoom
                 )),
-                // Deliberately not the nearest thing. The archive has real
-                // holes in it -- Kochi is not in it under any spelling -- and
-                // answering a miss with a town forty kilometres away would look
-                // exactly like an answer.
-                None => text(&format!(
-                    r#"{{"found":false,"name":{},"why":"not in the map data this box has"}}"#,
-                    json::quote(want)
-                )),
+                None => match geocode(&match near.trim().is_empty() {
+                    // The city goes into the query rather than being a separate
+                    // field: "Zen Cafe" alone finds a Zen Cafe, and there are a
+                    // great many of them.
+                    true => want.to_string(),
+                    false => format!("{want}, {near}"),
+                }) {
+                    Some(p) => text(&format!(
+                        r#"{{"found":true,"name":{},"kind":"geocoded","lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"OpenStreetMap","on_this_map":{}}}"#,
+                        json::quote(&p.name),
+                        p.lat,
+                        p.lon,
+                        p.zoom,
+                        on_this_map(p.lat, p.lon)
+                    )),
+                    // Deliberately not the nearest thing. Answering a miss with
+                    // a town forty kilometres away would look exactly like an
+                    // answer.
+                    None => text(&format!(
+                        r#"{{"found":false,"name":{},"why":"not in the map data and not in OpenStreetMap either"}}"#,
+                        json::quote(want)
+                    )),
+                },
             }
         }
         "show_map" => {
@@ -782,6 +1015,60 @@ mod tests {
         assert!(out.contains("Kapadwanj"), "the late answer never arrived: {out}");
         assert!(out.contains("23.02"), "{out}");
         forget(&token);
+    }
+
+    /// The geocoder's answers, parsed from responses it really sent.
+    ///
+    /// Recorded rather than mocked, and recorded through tmux because the
+    /// sandbox blocks the call: these are the exact bodies Nominatim returned
+    /// for a monument, a state, a cafe and a nonsense query. The shape has two
+    /// traps in it and both are in here -- `lat` and `lon` arrive as *strings*,
+    /// and so do the four numbers of the bounding box.
+    #[test]
+    fn a_recorded_geocode_is_read_correctly() {
+        let monument = r#"[{"place_id":248874686,"osm_type":"way","lat":"18.9219661","lon":"72.8345657","category":"building","type":"yes","addresstype":"building","name":"Gateway of India","display_name":"Gateway of India, Apollo Bandar, Mumbai, Maharashtra, 400039, India","boundingbox":["18.9217929","18.9221323","72.8343573","72.8347646"]}]"#;
+        let p = parse_nominatim(monument).expect("a monument did not parse");
+        assert!((p.lat - 18.9219661).abs() < 1e-7, "{}", p.lat);
+        assert!((p.lon - 72.8345657).abs() < 1e-7, "{}", p.lon);
+        assert!(p.name.starts_with("Gateway of India"), "{}", p.name);
+        // A box a few ten-thousandths of a degree across is a building.
+        assert_eq!(p.zoom, 14.0, "a monument was framed at {}", p.zoom);
+
+        let state = r#"[{"place_id":252892919,"osm_type":"relation","lat":"10.3528744","lon":"76.5120396","category":"boundary","type":"administrative","addresstype":"state","name":"Kerala","display_name":"Kerala, India","boundingbox":["8.2935318","12.7960559","74.8640682","77.4123612"]}]"#;
+        let p = parse_nominatim(state).expect("a state did not parse");
+        assert_eq!(p.name, "Kerala, India");
+        // Four and a half degrees tall, so it must not be framed like a cafe.
+        assert_eq!(p.zoom, 7.0, "a state was framed at {}", p.zoom);
+
+        // The cross-check worth having: OpenStreetMap and the basemap agree
+        // about where this cafe is, to four decimal places.
+        let cafe = r#"[{"place_id":248205078,"osm_type":"node","lat":"23.0362229","lon":"72.5494261","category":"amenity","type":"cafe","addresstype":"amenity","name":"Zen Cafe","display_name":"Zen Cafe, 120 Feet Ring Road, Ahmedabad, Gujarat, India","boundingbox":["23.0361729","23.0362729","72.5493761","72.5494761"]}]"#;
+        let p = parse_nominatim(cafe).expect("a cafe did not parse");
+        assert!((p.lat - 23.03622).abs() < 1e-4 && (p.lon - 72.54942).abs() < 1e-4);
+        assert_eq!(p.zoom, 14.0);
+
+        // Nothing found is an empty array, not an error and not a null.
+        assert!(parse_nominatim("[]").is_none(), "an empty result invented a place");
+        assert!(parse_nominatim("not json at all").is_none());
+        // And a point off the globe is refused rather than drawn.
+        assert!(parse_nominatim(r#"[{"lat":"91.0","lon":"0.0"}]"#).is_none());
+    }
+
+    /// The query is escaped, because place names have spaces and commas in them.
+    #[test]
+    fn a_place_name_survives_being_put_in_a_url() {
+        assert_eq!(urlencode("Gateway of India, Mumbai"), "Gateway+of+India%2C+Mumbai");
+        assert_eq!(urlencode("Ward's Lake"), "Ward%27s+Lake");
+        // Not ASCII, and not a reason to send a malformed request.
+        assert_eq!(urlencode("गेटवे"), "%E0%A4%97%E0%A5%87%E0%A4%9F%E0%A4%B5%E0%A5%87");
+    }
+
+    /// The user agent identifies the deployment, which their policy requires.
+    #[test]
+    fn the_geocoder_says_who_it_is() {
+        let ua = agent_line();
+        assert!(ua.contains("terminal-portfolio"), "{ua}");
+        assert!(ua.contains('@') || ua.contains("http"), "no way to reach anybody: {ua}");
     }
 
     /// A name the index does not have is a miss, not the nearest thing.
