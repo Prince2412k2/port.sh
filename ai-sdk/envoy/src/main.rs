@@ -19,7 +19,9 @@ envoy -- an agent that speaks the Agent Client Protocol over stdio
     envoy [--config PATH] [--model PROVIDER/MODEL]
 
     --config PATH   tiers, budget and system prompt (default: $ENVOY_CONFIG,
-                    then ./envoy.json)
+                    then ./envoy.json). $ENVOY_CONFIG_CONTENT carries the whole
+                    document instead, and wins: a client that composes one per
+                    session has nowhere to write a file.
     --model  M      use only the tier whose provider/model matches, so a client
                     can pin one without rewriting the file
     --version
@@ -52,17 +54,18 @@ async fn main() -> std::process::ExitCode {
         }
     }
 
-    let mut config = match Config::read(&path) {
-        Ok(config) => config,
+    let (mut config, source) = match Config::from_env_or(&path) {
+        Ok(pair) => pair,
         Err(e) => return fail(&format!("{path}: {e}")),
     };
+    eprintln!("envoy: configured from {source}");
 
     if let Some(pin) = &pin {
         config.tiers.retain(|t| {
             format!("{}/{}", t.provider, t.model) == *pin || t.model == *pin
         });
         if config.tiers.is_empty() {
-            return fail(&format!("no tier in {path} matches `{pin}`"));
+            return fail(&format!("no tier in {source} matches `{pin}`"));
         }
     }
 
