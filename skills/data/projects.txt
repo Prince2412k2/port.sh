@@ -8,10 +8,14 @@
 #   beat   a heading, then the paragraph under it. Two to four per project.
 #          These are the engineering, and they are the point of the card.
 #
-# Sourced from the repositories themselves — netjail's docs/netjail-design.md,
-# clippy's README, logify's and coolify_logs' READMEs — rather than paraphrased
-# from a summary. The three with no usable README (watch-party is private,
-# stylized-maps has none, Noter's is two lines) are DRAFTS and marked so.
+# Sourced from the repositories themselves rather than paraphrased from a
+# summary. The cards were re-checked against the actual source in Aug 2026 —
+# every public repo read file by file — which corrected several things a README
+# had got out of date about its own code. Where a repo's README and its source
+# disagreed, the source won and the card says what the code does.
+#
+# watch-party is the one DRAFT left: it is private, so its card is still written
+# from a summary and marked so. Anything that reads a card is told that.
 
 project netjail
   name   netjail
@@ -100,6 +104,18 @@ project logify
     is not neutral. It carries whatever the application decided to print, and
     sooner or later that includes something it should not have. Scoping only
     helps if revoking is easy, so it lives in a UI and not a config file.
+  beat   Shaped for something that cannot see a screen
+    The TUI is for a person; the one-shot CLI is for an agent, and the two share
+    one client. Run it bare and it prints its own command manifest and whether
+    the directory is bound to a project, so a model reads what it may do instead
+    of guessing. Output is plain lines by default and JSON only on request,
+    which is the opposite of the usual rule and the right way round for
+    something that reads text faster than it parses it. Exit codes carry the
+    diagnosis: 3 not found, 4 ambiguous, 5 auth, 6 network, 7 not allowed.
+  beat   The admin verbs are not read-only, and say so
+    `restart` and `redeploy` POST against live services. A tool an agent drives
+    should be honest about which of its verbs change the world, because the
+    agent cannot find out by being careful — it can only find out by doing it.
   beat   WebSockets are where reverse proxies go wrong quietly
     Buffering, idle timeouts and upgrade headers each break a long-lived stream
     in a different way, and none of them log anything useful when they do.
@@ -112,8 +128,8 @@ project clippy
   mark   clip
   year   2026
   repo   github.com/Prince2412k2/clip
-  tag    Copy on one machine, paste on another — over your own tailnet.
-  stats  Go, stdlib only, no cgo · single static binary · spec, plan and design docs
+  tag    Send a file to one chosen machine on your tailnet.
+  stats  Go · ~3,300 LOC · stdlib plus two TUI crates, no cgo · 4 test files
   tools  go, tailscale, linux, docker
   beat   The tailnet is the trust boundary
     There is no application-level auth. That is the design, not an omission.
@@ -128,6 +144,17 @@ project clippy
     copy. Identical repeats are deduped by content hash. Both are one sentence
     long and both are unit-tested. They look obvious written down and cost a
     lot to find at runtime.
+  beat   Text is the one thing it will not send
+    Files and images sync machine to machine; plain text deliberately does not.
+    A fleet whose clipboards all follow each other means every password you copy
+    on a laptop lands on three other machines, so text moves one way only —
+    phone to PC, through the web page, when you ask for it. The daemon returns
+    early on a text copy and says why in one line.
+  beat   The path is the payload
+    A received file is saved, `docker cp`'d into a chosen container at the same
+    absolute path, and then that path is put on the clipboard as text. It exists
+    for a coding agent running headless in a dev container with no display of
+    its own: you send a screenshot from your phone and paste a path it can read.
   beat   One binary, no cgo
     Three operating systems with three unrelated ideas of what a clipboard is,
     and the usual answer is cgo. The standard library alone keeps the single
@@ -141,9 +168,8 @@ project stylized-maps
   year   2026
   repo   github.com/Prince2412k2/stylized-maps
   tag    A custom vector-tile pipeline for stylized maps of India.
-  stats  Python + TypeScript + Java · in progress · Docker Compose behind Caddy
+  stats  Python + TypeScript + Java · ~4,000 lines · 8-stage resumable build · ~21 GiB of tiles
   tools  python, typescript, openjdk, planetiler, vectortiles, openapiinitiative, docker, caddy
-  draft  yes
   beat   The default profile decides what a map may contain
     Planetiler's stock profile drops administrative boundaries and stops its
     places layer at city level, so a national view turns up with no state
@@ -155,10 +181,23 @@ project stylized-maps
     instead of as a diff. So the schema is versioned and the API has a spec.
     Coordinate order, zoom bounds and error shapes are all places where
     undocumented ends up meaning wrong.
+  beat   Noise hashed from the world, not from the tile
+    Four videogame styles, and two of them paint the ground from elevation and
+    landcover rather than from polygons. Texture generated per tile seams at
+    every tile edge, because neighbouring tiles generate different noise for the
+    same ground. Hashing the world coordinate instead makes the texture a
+    function of the place, so independently rendered metatiles butt together and
+    the seam is not there to hide. The same hash jitters the hachures, the tree
+    glyphs and the marsh ticks.
   beat   The build has to be pausable
     A full run does not fit in the spare capacity of the machine it runs on, so
     the CLI can start, pause and resume, with automatic, full and manual CPU and
-    RAM profiles. Otherwise a build that dies at 80% starts again at zero.
+    RAM profiles. Otherwise a build that dies at 80% starts again at zero. The
+    resume state lives inside the output file — a table of finished jobs in the
+    tile database itself, committed with the tiles — so a killed render restarts
+    tile-exactly with nothing on the side to get out of step. The build id is a
+    hash of the pipeline's own source, so editing a renderer produces a new
+    release rather than a quietly stale one.
 
 project termap
   name   termap
@@ -195,17 +234,24 @@ project noter
   year   2026
   repo   github.com/Prince2412k2/Noter
   tag    A terminal notepad that keeps its own history.
-  stats  Python · curses + DuckDB · git-backed versioning
-  tools  python, curses, duckdb, git
-  draft  yes
+  stats  Python · ~1,300 lines of its own · curses, git, and nvim
+  tools  python, curses, git, linux
   beat   The best decision here was to leave something out
     Reimplementing an editor is months of work to end up somewhere worse than
     the one already configured. Shelling out to $EDITOR means the app inherits
     every keybinding, plugin and habit its user already has, for free.
   beat   The history is a commit graph, not a table imitating one
     Every change is committed to git in the background, so the version history
-    is real: dated, browsable from inside the app, and still there if the app is
-    not. Notes should outlive the program that wrote them.
+    is real: dated, browsable from inside the app in a two-pane time machine,
+    and still there if the app is not. Notes should outlive the program that
+    wrote them.
+  beat   It started on a database and ended on files
+    The first version kept notes in DuckDB. What shipped keeps each note as a
+    plain file in a git repository and a small JSON index for nothing but the
+    done checkbox — which is why the versioning is real git rather than a table
+    imitating one. The database branch is still there and no longer runs. That
+    is the lesson, and it is the one the README claims: the interesting part of
+    a small program is usually which half you delete.
 
 project gitswitch
   name   gitswitch
@@ -232,7 +278,7 @@ project vcs
   year   2026
   repo   github.com/Prince2412k2/vcs
   tag    Git, rebuilt from scratch, to find out how it actually works.
-  stats  Python · pip-installable · deliberately not for production
+  stats  Python · ~700 lines · no dependencies · a learning exercise, not a tool
   tools  python, git
   beat   Writing the object store is what stops it being magic
     init, commit, log, checkout, merge, reset and cat-file, with a
@@ -240,10 +286,14 @@ project vcs
     the name of a thing is its own hash, deduplication and integrity and
     immutability stop being features somebody built and turn into consequences
     you can point at.
-  beat   Merge is the one you cannot learn from its output
-    Find the common ancestor, diff both sides against it, and admit when the two
-    disagree. Writing it turns conflict markers from an annoyance into the only
-    sensible answer to a genuinely ambiguous question.
+  beat   What it leaves out is the other half of the lesson
+    No index, no zlib, no packfiles, no network — objects go to disk raw under
+    their own hash, flat. Leaving those out is what makes the rest legible:
+    every object on disk is a file you can open and read, so the DAG is
+    something you can walk with `ls` rather than something you take on faith.
+    Finding out where the shortcuts hurt — the merge here is a two-way diff, not
+    a three-way one against the common ancestor — is the part that teaches you
+    what git is actually doing for you.
 
 project harbr
   name   harbr
