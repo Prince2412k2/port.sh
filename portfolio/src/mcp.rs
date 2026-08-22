@@ -542,6 +542,49 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Which tools this box can serve right now, by name.
+///
+/// Kept beside `tool_list` and checked against it by a test, because the two
+/// answer the same question and a disagreement between them is the shape of the
+/// bug this exists to prevent: an agent quietly missing a capability, with the
+/// handshake succeeding and nothing anywhere saying which tools it got.
+fn on_offer() -> Vec<&'static str> {
+    let mut names = vec!["locate_place", "show_map", "locate_visitor", "hide_map", "show_project"];
+    if crate::browse::can_search() {
+        names.push("search_web");
+    }
+    if crate::browse::can_read() {
+        names.push("fetch_page");
+    }
+    names
+}
+
+/// Say what the agent is getting, and what it is not getting and why.
+///
+/// Printed once at start. The alternative is how this was found: the section
+/// answers a question that wanted the web, says it cannot search, and there is
+/// nothing in the log to distinguish "no key on this box" from a bug -- because
+/// a tool that is not offered leaves no trace at all. One line at boot is the
+/// whole diagnosis.
+fn say_what_is_offered() {
+    let names = on_offer();
+    eprintln!("portfolio: serving {} tools: {}", names.len(), names.join(", "));
+    for (what, keyed, var) in [
+        ("search_web", crate::browse::can_search(), "EXA_API_KEY"),
+        ("fetch_page", crate::browse::can_read(), "JINA_API_KEY"),
+    ] {
+        if !keyed {
+            eprintln!(
+                "portfolio: no {what} -- ${var} is unset or empty, so the agent has no {}",
+                match what {
+                    "search_web" => "way to search the web",
+                    _ => "way to read a page",
+                }
+            );
+        }
+    }
+}
+
 /// The tools, as MCP describes them.
 ///
 /// The descriptions are the only instructions the agent gets about *when* to
@@ -1172,6 +1215,7 @@ pub fn serve() {
     if let Ok(Some(addr)) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
         let _ = WHERE.set(addr);
         eprintln!("portfolio: tool server on http://{addr}");
+        say_what_is_offered();
     }
 }
 
@@ -1239,6 +1283,39 @@ mod tests {
         assert!(names.contains(&"show_map".to_string()), "{names:?}");
         assert!(names.contains(&"hide_map".to_string()), "{names:?}");
         assert!(names.contains(&"locate_visitor".to_string()), "{names:?}");
+    }
+
+    /// What the log says it serves is what `tools/list` serves.
+    ///
+    /// Two lists that answer the same question, and the whole point of the log
+    /// line is to be trustworthy about a thing that is otherwise invisible. A
+    /// log that says `search_web` while the agent was handed four tools would
+    /// be worse than no log at all.
+    #[test]
+    fn the_log_line_lists_exactly_what_the_agent_is_handed() {
+        let _lock = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (exa, jina) in [(false, false), (true, false), (false, true), (true, true)] {
+            match exa {
+                true => std::env::set_var("EXA_API_KEY", "k"),
+                false => std::env::remove_var("EXA_API_KEY"),
+            }
+            match jina {
+                true => std::env::set_var("JINA_API_KEY", "k"),
+                false => std::env::remove_var("JINA_API_KEY"),
+            }
+            let out = handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
+            let served: Vec<String> = result_of(&out)
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .expect("no tools")
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                .collect();
+            let said: Vec<String> = on_offer().iter().map(|s| s.to_string()).collect();
+            assert_eq!(said, served, "the log and the server disagree (exa {exa}, jina {jina})");
+        }
+        std::env::remove_var("EXA_API_KEY");
+        std::env::remove_var("JINA_API_KEY");
     }
 
     /// The two that cost money are offered only when this box can pay: a tool
