@@ -250,6 +250,19 @@ fn corner(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
     Hit { pips: Rect { x: px, y: py, width: pw, height: 1 } }
 }
 
+/// A mark, centred in a rect, at whatever size it was authored.
+///
+/// Public because the ask section draws one beside an answer now: the agent
+/// names a project and its mark arrives at the side of the page. The card and
+/// the chat draw the same art the same way rather than each owning a copy of
+/// the half-block blitter -- which is the whole reason this crate is a library
+/// as well as a binary.
+pub fn mark_into(buf: &mut Buffer, area: Rect, m: &marks::Mark, light: f32) {
+    let x = area.x as i32 + (area.width as i32 - m.art.cols as i32) / 2;
+    let y = area.y as i32 + (area.height as i32 - m.art.rows as i32) / 2;
+    draw_mark(buf, area, x, y, m, light);
+}
+
 fn draw_mark(buf: &mut Buffer, clip: Rect, x: i32, y: i32, m: &marks::Mark, light: f32) {
     let a = &m.art;
     for r in 0..a.rows as i32 {

@@ -135,6 +135,10 @@ pub const TOOLS: &[Tool] = &[
     Tool { name: "show_map", aka: &[], open: true, ours: true, blurb: "draw a map" },
     Tool { name: "locate_visitor", aka: &[], open: true, ours: true, blurb: "where you are" },
     Tool { name: "hide_map", aka: &[], open: true, ours: true, blurb: "put the map away" },
+    // The projects, from the same file the projects section reads. Open for the
+    // same reason as the map tools: it draws and it looks things up, and both
+    // of those are what this section is for.
+    Tool { name: "show_project", aka: &[], open: true, ours: true, blurb: "a project, drawn" },
     // Also ours, and the only two that leave this box. They are here because
     // "can look something up" used to arrive and leave with whichever server was
     // answering: Copilot's seat brings its own web tools, most of the free models

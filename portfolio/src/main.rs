@@ -188,6 +188,22 @@ fn main() -> io::Result<()> {
                                 );
                             }
                         }
+                        mcp::Directive::Work { id, mark, diagram } => {
+                            let mut parts = Vec::new();
+                            if mark {
+                                parts.push("mark");
+                            }
+                            if diagram {
+                                parts.push("diagram");
+                            }
+                            println!(
+                                "  work    {id}  {}",
+                                match parts.is_empty() {
+                                    true => "facts only".to_string(),
+                                    false => parts.join(" + "),
+                                }
+                            );
+                        }
                         mcp::Directive::Clear => println!("  map     cleared"),
                     }
                 }

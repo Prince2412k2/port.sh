@@ -126,6 +126,28 @@ pub enum Show {
     Place(Tour),
     /// The certification badge, and the code that verifies it.
     Cert,
+    /// One of the projects, drawn by `skysheet` -- its mark, its diagram, or
+    /// both. Same arrangement as `Place`: this file says which project and what
+    /// of it, and the shell puts it there, because the art and the scenes live
+    /// in a crate this file has no handle on.
+    Work(Work),
+}
+
+/// A project on the page, and how much of it.
+///
+/// The agent asks for parts rather than a whole card because the three are
+/// different answers. "What is netjail" wants the diagram; "which projects are
+/// there" wants nine marks and no diagrams; and a question the answer merely
+/// mentions a project in wants neither -- the tool hands over the facts and
+/// draws nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Work {
+    /// The project's id in `projects.txt`, already checked to exist.
+    pub id: String,
+    /// The extruded mark, large.
+    pub mark: bool,
+    /// The animated diagram, if this project has one and there is room.
+    pub diagram: bool,
 }
 
 /// A route the visitor can walk, one stop at a time.
@@ -691,6 +713,24 @@ impl Ask {
         }
     }
 
+    /// Raise the nth project's panel, as though an agent had asked for it.
+    ///
+    /// For `--snapshot --section ask --scroll N`, which is how these are looked
+    /// at: a panel otherwise needs a live model to decide to draw one, and
+    /// "render it and look" is the only way anything in this app gets tuned.
+    pub fn show_work(&mut self, n: usize) {
+        let ids: Vec<String> =
+            crate::mcp::project_ids().iter().map(|s| s.to_string()).collect();
+        let Some(id) = ids.get(n).cloned() else { return };
+        self.panel = Some(Panel::new(Show::Work(Work { id, mark: true, diagram: true })));
+        if let Some(p) = &mut self.panel {
+            // Straight to held: a snapshot of the first frame of a fade is a
+            // picture of a fade, not of the thing.
+            p.life = Life::Held;
+            p.since = 9.0;
+        }
+    }
+
     /// Do what the agent asked.
     fn obey(&mut self, d: crate::mcp::Directive) {
         use crate::mcp::Directive;
@@ -710,6 +750,33 @@ impl Ask {
                 if let Some(t) = self.turns.last_mut() {
                     let id = format!("ours-{}-{}", tool, t.calls.len());
                     t.calls.push(Call { id, title: tool, status: Status::Done, detail });
+                }
+            }
+            Directive::Work { id, mark, diagram } => {
+                // Nothing to draw is a directive too: the agent asked for the
+                // facts and no picture, and whatever is showing should still go
+                // rather than sitting there beside an answer about something
+                // else.
+                if !mark && !diagram {
+                    if let Some(p) = &mut self.panel {
+                        p.leave();
+                    }
+                    return;
+                }
+                let work = Work { id, mark, diagram };
+                match &mut self.panel {
+                    // Already showing this project: change what of it is on
+                    // screen without fading out and in again. Asking for the
+                    // diagram after the mark is one picture growing, not two
+                    // pictures.
+                    Some(p @ Panel { what: Show::Work(_), .. }) => {
+                        p.what = Show::Work(work);
+                        if p.life == Life::Leaving {
+                            p.life = Life::Arriving;
+                            p.since = 0.0;
+                        }
+                    }
+                    _ => self.panel = Some(Panel::new(Show::Work(work))),
                 }
             }
             Directive::Map { stops } => {
@@ -1458,6 +1525,27 @@ pub fn showing_place(a: &Ask) -> Option<&Spot> {
 /// full body, behind everything, with the words written over the top. A
 /// `Paragraph` writes only the cells its text covers, so the map shows through
 /// around every line, and the shell knocks it back under the reading column so
+/// Where a project goes, and which one.
+///
+/// The same shape as `map_panel` and deliberately so: a picture beside the
+/// answer, on the right, ending where it ends. A visitor should not have to
+/// learn a second layout because the subject changed from a place to a project.
+pub fn work_panel(area: Rect, a: &Ask) -> Option<(Rect, Work, f32)> {
+    if area.width < 30 || area.height < 8 {
+        return None;
+    }
+    let p = a.panel.as_ref()?;
+    let Show::Work(work) = &p.what else { return None };
+    let w = (area.width * 3 / 5).max(40).min(area.width);
+    let at = Rect {
+        x: area.x + area.width - w,
+        width: w,
+        height: area.height.saturating_sub(2),
+        ..area
+    };
+    (at.height >= 8 && at.width >= 30).then_some((at, work.clone(), p.fade()))
+}
+
 /// the prose still reads. Overlap is the point rather than a thing to avoid.
 pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     if area.width < 30 || area.height < 8 {
@@ -1851,6 +1939,18 @@ fn panel_width(p: &Panel, area: Rect) -> u16 {
         // fifths, floored at what was there before and capped so the prose keeps
         // a readable measure.
         Show::Place(_) => (area.width * 2 / 5).clamp(46, 92),
+        // As much as the diagram actually needs, which the scene knows and
+        // nothing else does -- `footprint` is measured rather than guessed, and
+        // a guess here is a diagram cropped at its right edge, which reads as a
+        // rendering fault. A mark on its own wants far less.
+        Show::Work(w) => {
+            let (dw, _) = skysheet::scene::footprint(&w.id);
+            let mw = skysheet::marks::find(&w.id).map_or(24, |m| m.art.cols);
+            match w.diagram {
+                true => (dw + 4).min(area.width),
+                false => (mw + 6).min(area.width),
+            }
+        }
         // The badge and its code are the same width on purpose -- see the
         // generator. Whichever is wider decides, so neither is ever clipped by
         // a column the other one chose.
@@ -1875,6 +1975,44 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
             }
         }
         Show::Cert => badge(f, area, fade),
+        // Only the caption, for the same reason as a place: the mark and the
+        // diagram belong to `skysheet`, and the shell draws them there.
+        Show::Work(w) => {
+            let Some(p) = crate::mcp::project(&w.id) else { return };
+            let lead = crate::paint::lead();
+            let bottom = area.y + area.height;
+            let tag = wrap(&p.tag, area.width as usize);
+            let foot = format!("{}   {}", p.year, p.repo);
+            let mut y = bottom.saturating_sub(1 + tag.len() as u16 + 2);
+            let row = |f: &mut Frame, y: &mut u16, spans: Vec<Span<'static>>| {
+                if *y < bottom {
+                    f.render_widget(
+                        Paragraph::new(Line::from(spans)),
+                        Rect { x: area.x, y: *y, width: area.width, height: 1 },
+                    );
+                    *y += 1;
+                }
+            };
+            row(
+                f,
+                &mut y,
+                vec![Span::styled(
+                    p.name.clone(),
+                    Style::default()
+                        .fg(crate::paint::dim_to(lead, fade))
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+            for l in tag {
+                row(f, &mut y, vec![Span::styled(l, Style::default().fg(crate::paint::dim_to(DIM, fade)))]);
+            }
+            row(f, &mut y, vec![]);
+            row(
+                f,
+                &mut y,
+                vec![Span::styled(foot, Style::default().fg(crate::paint::dim_to(FAINT, fade)))],
+            );
+        }
         // Only the caption. The picture above it belongs to the map renderer
         // and the shell draws it there -- see `map_panel`.
         Show::Place(tour) => {

@@ -60,6 +60,12 @@ pub enum Directive {
     /// Put one or more points on the map. More than one is a route the visitor
     /// can walk with ctrl-n and ctrl-b; the camera flies between them.
     Map { stops: Vec<Stop> },
+    /// Put a project on screen: its mark, its diagram, or both.
+    ///
+    /// Which parts, rather than a whole card, because the three are different
+    /// answers -- and an agent that merely mentions a project in passing asks
+    /// for none of them and gets the facts alone.
+    Work { id: String, mark: bool, diagram: bool },
     /// Take whatever is showing away.
     Clear,
     /// A tool was called, and this is what it was asked for.
@@ -167,6 +173,54 @@ fn token() -> String {
 /// table grows by one entry for every visitor for the life of the process.
 pub fn forget(token: &str) {
     boards().lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+}
+
+/// The projects, parsed once from the same file the projects section reads.
+///
+/// Compiled in, like every other reader of this file -- the projects section,
+/// the card renderer and the first prompt all `include_str!` it. Unlike
+/// `models.txt` it is not mounted, so a tool call is a lookup in memory rather
+/// than a file read, and the tool cannot disagree with the section about which
+/// projects exist.
+fn projects() -> &'static [skysheet::data::Project] {
+    static P: OnceLock<Vec<skysheet::data::Project>> = OnceLock::new();
+    P.get_or_init(|| {
+        skysheet::data::parse(include_str!("../../skills/data/projects.txt")).unwrap_or_default()
+    })
+}
+
+/// Every project's id, in the order the file lists them.
+pub fn project_ids() -> Vec<&'static str> {
+    projects().iter().map(|p| p.id.as_str()).collect()
+}
+
+/// One project by id, for the page. Public because `ask.rs` draws its caption
+/// and would otherwise need its own copy of the file.
+pub fn project(id: &str) -> Option<&'static skysheet::data::Project> {
+    projects().iter().find(|p| p.id == id)
+}
+
+/// Find a project by what the agent called it.
+///
+/// By id first, then by name, then by a loose contains -- a model asked about
+/// "the netjail project" or "watch party" should not be told there is no such
+/// thing over a word or a hyphen. Stingy enough not to match everything: the
+/// needle has to be at least four characters before containment is tried.
+fn project_named(want: &str) -> Option<&'static skysheet::data::Project> {
+    let want = want.trim().to_lowercase();
+    let flat = |s: &str| s.to_lowercase().replace(['-', '_', ' '], "");
+    let needle = flat(&want);
+    if needle.is_empty() {
+        return None;
+    }
+    let all = projects();
+    all.iter()
+        .find(|p| flat(&p.id) == needle || flat(&p.name) == needle)
+        .or_else(|| {
+            (needle.len() >= 4)
+                .then(|| all.iter().find(|p| flat(&p.id).contains(&needle)))
+                .flatten()
+        })
 }
 
 /// The place index, built once and shared.
@@ -552,7 +606,7 @@ fn tool_list() -> String {
     // The web tools are listed only when this box can actually use them. A tool
     // an agent can see and cannot use is worse than one it cannot see: it
     // reaches for it, gets a failure, and reports having looked.
-    let mut tools = vec![core];
+    let mut tools = vec![core, one_of("show_project", PROJECT_WHEN, PROJECT_ARGS)];
     if crate::browse::can_search() {
         tools.push(one("search_web", SEARCH_WHEN, "query", QUERY_ARG));
     }
@@ -598,6 +652,40 @@ const FETCH_WHEN: &str = "Read one web page and get it back as text you can \
 
 const URL_ARG: &str = "The full address of the page, including https://. One \
     page per call.";
+
+const PROJECT_WHEN: &str = "Everything this box knows about one of Prince's \
+    projects, and optionally its picture beside your answer.\n\n\
+    It always returns the facts -- what it is, when, the repository, what it is \
+    built with, and the two to four paragraphs of engineering that are the \
+    point of it. Use those to answer; they are more specific and more accurate \
+    than anything you can recall about a repository you have not read.\n\n\
+    `show` is what appears on screen, and the three are different answers:\n\
+    - `mark` -- the project's emblem, large. For naming one in passing, or for \
+    listing several: call it once per project and the last one stays up.\n\
+    - `diagram` -- an animated drawing of how the thing actually works, made \
+    for that project. This is the one worth reaching for when somebody asks \
+    what a project *is* or how it works: it explains in a way a paragraph \
+    cannot, and it is sitting right there.\n\
+    - both, for a full answer about one project.\n\n\
+    Leave `show` out entirely when the project is a passing mention, or when \
+    the question is about something else. A picture that arrives for every \
+    answer stops meaning anything, and the page clears itself when the next \
+    answer does not ask for one.\n\n\
+    Ask by name -- `netjail`, `watch-party`, `termap`. `found:false` lists what \
+    there is, so an unfamiliar name costs one call rather than a wrong answer.";
+
+const PROJECT_ARGS: &str = r#""name":{"type":"string","description":"Which project, by name. Hyphens and spaces are both fine."},
+            "show":{"type":"array","description":"What to draw beside your answer: `mark`, `diagram`, both, or leave it out for the facts alone.","items":{"type":"string","enum":["mark","diagram"]}}"#;
+
+/// A tool with a hand-written argument block, for the ones whose arguments are
+/// not all one string.
+fn one_of(name: &str, when: &str, args: &str) -> String {
+    format!(
+        r#"{{"name":{},"description":{},"inputSchema":{{"type":"object","properties":{{{args}}},"required":["name"]}}}}"#,
+        json::quote(name),
+        json::quote(when)
+    )
+}
 
 /// One tool with one string argument, which is the shape both web tools have.
 fn one(name: &str, when: &str, arg: &str, about: &str) -> String {
@@ -831,6 +919,61 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 },
             }
         }
+        "show_project" => {
+            let want = arg_str("name");
+            let Some(p) = project_named(want) else {
+                let known: Vec<String> =
+                    projects().iter().map(|p| json::quote(&p.id)).collect();
+                return text(&format!(
+                    r#"{{"found":false,"asked":{},"projects":[{}]}}"#,
+                    json::quote(want),
+                    known.join(",")
+                ));
+            };
+            // What to draw. An unknown word in the list is ignored rather than
+            // refused: the facts are the answer and a typo in the picture should
+            // not cost them.
+            let asked = |what: &str| {
+                args.and_then(|a| a.get("show"))
+                    .and_then(|s| s.as_array())
+                    .is_some_and(|list| {
+                        list.iter().any(|v| v.as_str().is_some_and(|s| s.trim() == what))
+                    })
+            };
+            let (mark, diagram) = (asked("mark"), asked("diagram"));
+            send(token, Directive::Work { id: p.id.clone(), mark, diagram });
+
+            let beats: Vec<String> = p
+                .beats
+                .iter()
+                .map(|b| {
+                    format!(
+                        r#"{{"heading":{},"text":{}}}"#,
+                        json::quote(&b.head),
+                        json::quote(&b.body)
+                    )
+                })
+                .collect();
+            let tools: Vec<String> = p.tools.iter().map(|t| json::quote(t)).collect();
+            text(&format!(
+                r#"{{"found":true,"id":{},"name":{},"year":{},"repo":{},"what":{},"built_with":[{}],"scale":{},"engineering":[{}],"drawn":{{"mark":{mark},"diagram":{diagram}}}{}}}"#,
+                json::quote(&p.id),
+                json::quote(&p.name),
+                json::quote(&p.year),
+                json::quote(&p.repo),
+                json::quote(&p.tag),
+                tools.join(","),
+                json::quote(&p.stats),
+                beats.join(","),
+                // Said plainly, because a card written from a summary rather
+                // than from the source is a thing the visitor is entitled to
+                // know before they trust a detail of it.
+                match p.draft {
+                    true => r#","note":"this description was written from a summary rather than from the repository, and may be wrong in its details -- say so if you lean on it"#.to_string() + "\"",
+                    false => String::new(),
+                }
+            ))
+        }
         "hide_map" => match send(token, Directive::Clear) {
             true => text(r#"{"hidden":true}"#),
             false => err("that screen is gone"),
@@ -853,6 +996,7 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
         // a visitor watching `search_web` with nothing beside it cannot tell
         // whether it went looking for what they asked about.
         "search_web" => str_of("query").to_string(),
+        "show_project" => str_of("name").to_string(),
         "fetch_page" => str_of("url").to_string(),
         "show_map" if args.and_then(|a| a.get("from")).is_some() => {
             let label = str_of("label");
@@ -1042,6 +1186,22 @@ pub fn url_for(token: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A tool's answer, parsed. The result carries JSON *inside* a JSON string,
+    /// so matching escaped substrings against it is a test that fails on its own
+    /// escaping rather than on the answer -- which is exactly what happened to
+    /// the first version of the tests below.
+    fn answer(out: &str) -> Value {
+        let text = result_of(out)
+            .get("content")
+            .and_then(|c| c.as_array())
+            .and_then(|c| c.first())
+            .and_then(|c| c.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
+        json::parse(&text).unwrap_or_else(|| panic!("not json: {text}"))
+    }
+
     fn result_of(out: &str) -> Value {
         json::parse(out).expect("not json").get("result").cloned().expect("no result")
     }
@@ -1192,6 +1352,146 @@ mod tests {
         let args = crate::json::parse(r#"{"query":"acp schema","url":"https://x.test/a"}"#).unwrap();
         assert_eq!(detail_of("search_web", Some(&args)), "acp schema");
         assert_eq!(detail_of("fetch_page", Some(&args)), "https://x.test/a");
+    }
+
+    /// The facts always come back; the picture is optional and separate.
+    ///
+    /// This is the shape the tool exists for: "tell me about netjail" wants the
+    /// diagram, "which projects are there" wants marks and no diagrams, and an
+    /// answer that merely mentions one wants neither -- and all three are one
+    /// call with the same return.
+    #[test]
+    fn a_project_returns_its_facts_and_draws_only_what_was_asked_for() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let ask = |show: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"show_project",
+                   "arguments":{{"name":"netjail"{show}}}}}}}"#
+            )
+        };
+        // Facts alone: no `show`, so nothing is drawn -- but the panel is still
+        // told, because an answer about something else should not leave the
+        // last picture sitting there.
+        let a = answer(&handle(&token, &ask("")).unwrap());
+        assert_eq!(a.get("found").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(a.get("id").and_then(|v| v.as_str()), Some("netjail"));
+        assert!(a.get("repo").is_some() && a.get("built_with").is_some(), "{a:?}");
+        let beats = a.get("engineering").and_then(|b| b.as_array()).expect("no beats");
+        assert!(beats.len() >= 2, "a project with no engineering on it");
+        assert!(beats[0].get("heading").and_then(|h| h.as_str()).is_some());
+        match rx.try_iter().find_map(|d| match d {
+            Directive::Work { id, mark, diagram } => Some((id, mark, diagram)),
+            _ => None,
+        }) {
+            Some((id, mark, diagram)) => {
+                assert_eq!(id, "netjail");
+                assert!(!mark && !diagram, "drew a picture nobody asked for");
+            }
+            None => panic!("the page was never told"),
+        }
+
+        // A diagram, and only a diagram.
+        let a = answer(&handle(&token, &ask(r#","show":["diagram"]"#)).unwrap());
+        let drawn = a.get("drawn").expect("no `drawn`");
+        assert_eq!(drawn.get("mark").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(drawn.get("diagram").and_then(|v| v.as_bool()), Some(true));
+        let drew = rx.try_iter().find_map(|d| match d {
+            Directive::Work { mark, diagram, .. } => Some((mark, diagram)),
+            _ => None,
+        });
+        assert_eq!(drew, Some((false, true)));
+
+        // Both.
+        handle(&token, &ask(r#","show":["mark","diagram"]"#)).unwrap();
+        let drew = rx.try_iter().find_map(|d| match d {
+            Directive::Work { mark, diagram, .. } => Some((mark, diagram)),
+            _ => None,
+        });
+        assert_eq!(drew, Some((true, true)));
+        forget(&token);
+    }
+
+    /// A name that is not a project lists the ones that are, so the model spends
+    /// one call rather than answering from memory about a repository it has
+    /// never read.
+    #[test]
+    fn an_unknown_project_answers_with_the_ones_there_are() {
+        let out = handle(
+            "t",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_project",
+               "arguments":{"name":"kubernetes"}}}"#,
+        )
+        .unwrap();
+        let a = answer(&out);
+        assert_eq!(a.get("found").and_then(|v| v.as_bool()), Some(false));
+        let known: Vec<&str> = a
+            .get("projects")
+            .and_then(|p| p.as_array())
+            .expect("no list of what there is")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(known.contains(&"netjail") && known.contains(&"termap"), "{known:?}");
+    }
+
+    /// Asked the way a model actually asks: with a space, with the display name,
+    /// with a hyphen. All three are the same project.
+    #[test]
+    fn a_project_answers_to_what_a_model_would_call_it() {
+        for name in ["watch-party", "watch party", "Watch Party", "watchparty"] {
+            let found = project_named(name).map(|p| p.id.as_str());
+            assert_eq!(found, Some("watch-party"), "`{name}` did not resolve");
+        }
+        // And stinginess: a short word must not match half the list.
+        assert!(project_named("a").is_none());
+        assert!(project_named("").is_none());
+        assert!(project_named("   ").is_none());
+    }
+
+    /// A card written from a summary says so in the tool's own answer, so the
+    /// agent can hedge instead of stating a guess as a fact.
+    #[test]
+    fn a_draft_card_admits_it_to_the_agent() {
+        let drafts: Vec<&str> = projects()
+            .iter()
+            .filter(|p| p.draft)
+            .map(|p| p.id.as_str())
+            .collect();
+        if drafts.is_empty() {
+            return; // every card is written from source now, which is the goal
+        }
+        let out = handle(
+            "t",
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"show_project",
+                   "arguments":{{"name":"{}"}}}}}}"#,
+                drafts[0]
+            ),
+        )
+        .unwrap();
+        let note = answer(&out).get("note").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        assert!(note.contains("written from a summary"), "a draft did not admit it: {note:?}");
+    }
+
+    /// An unknown scene name is ignored rather than refused: the facts are the
+    /// answer, and a typo in the picture should not cost them.
+    #[test]
+    fn a_nonsense_part_costs_the_picture_and_not_the_answer() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let out = handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_project",
+               "arguments":{"name":"termap","show":["hologram"]}}}"#,
+        )
+        .unwrap();
+        let a = answer(&out);
+        assert_eq!(a.get("found").and_then(|v| v.as_bool()), Some(true));
+        let drawn = a.get("drawn").expect("no `drawn`");
+        assert_eq!(drawn.get("mark").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(drawn.get("diagram").and_then(|v| v.as_bool()), Some(false));
+        forget(&token);
     }
 
     /// An unknown method is an error, not an empty success. Same rule as the

@@ -730,7 +730,14 @@ impl Shell {
     /// Jump straight to a work. For snapshots, which need a frame to be a
     /// pure function of the flags that produced it.
     pub fn set_scroll(&mut self, n: u16) {
-        self.museum.jump(n as usize);
+        // Whichever section is open decides what a number means. In the room it
+        // is which work is on the wall; in the chat it is which project's panel
+        // to raise, which is the only way to draw one without a live agent --
+        // and drawing one to a PNG is how the panel gets tuned at all.
+        match self.section {
+            Section::Ask => self.ask.show_work(n as usize),
+            _ => self.museum.jump(n as usize),
+        }
     }
 
     fn home_key(&mut self, k: KeyEvent) {
@@ -917,6 +924,73 @@ impl Shell {
                     if let Some((said, age)) = chord {
                         ask::chord_note(f, at, &said, (1.0 - age / CHORD_SECS) as f32);
                     }
+                }
+                // A project, the same way and in the same place as a map: the
+                // art and the scenes live in `skysheet`, which this shell
+                // already holds a sheet of, and `ask.rs` holds neither.
+                if let Some((at, work, fade)) = ask::work_panel(body, &self.ask) {
+                    if let Some(p) = crate::mcp::project(&work.id) {
+                        // The caption sits at the foot of the column, so the
+                        // picture gets everything above it.
+                        let stage = Rect { height: at.height.saturating_sub(6), ..at };
+                        let mark = work.mark.then(|| skysheet::marks::find(&p.mark)).flatten();
+                        let (dw, dh) = skysheet::scene::footprint(&p.id);
+                        // Scenes are laid out by hand at a fixed size, so a
+                        // stage smaller than the diagram crops it rather than
+                        // scaling it. Better the mark alone than half a diagram:
+                        // a picture cut off at its edge reads as a fault, and a
+                        // mark is a whole thing at the only size it has.
+                        let room = work.diagram && stage.width >= dw && stage.height >= dh;
+                        // Stacked, not overlaid. The first version put the mark
+                        // in the stage's top-left corner when both were asked
+                        // for, which is inside the diagram -- so the emblem was
+                        // drawn underneath a box of its own diagram and neither
+                        // read.
+                        let cap = mark.map_or(0, |m| m.art.rows + 2);
+                        let both = room && mark.is_some() && stage.height >= dh + cap;
+                        let mut drew = false;
+                        if room {
+                            let top = match both {
+                                true => stage.y + cap + (stage.height - cap - dh) / 2,
+                                false => stage.y + (stage.height - dh) / 2,
+                            };
+                            drew = skysheet::scene::draw(
+                                f.buffer_mut(),
+                                Rect {
+                                    x: stage.x + (stage.width - dw) / 2,
+                                    y: top,
+                                    width: dw,
+                                    height: dh,
+                                },
+                                p,
+                                self.ask.t,
+                            );
+                        }
+                        // The mark: asked for, or standing in for a diagram that
+                        // had nowhere to go, because an empty column beside an
+                        // answer about a project is worse than either.
+                        if let Some(m) = mark.or_else(|| (!drew).then(|| skysheet::marks::find(&p.mark)).flatten())
+                        {
+                            let room = match (drew, both) {
+                                // Above the diagram, in the strip left for it.
+                                (true, true) => Rect { height: cap, ..stage },
+                                // The diagram took the room; the mark waits for
+                                // a wider window rather than sitting on top of
+                                // it.
+                                (true, false) => Rect { height: 0, ..stage },
+                                (false, _) => stage,
+                            };
+                            if room.height > 0 {
+                                skysheet::cards::mark_into(f.buffer_mut(), room, m, 1.0);
+                            }
+                        }
+                    }
+                    // The same dissolve and the same knock-back as the map. Two
+                    // pictures at the side of one page should not arrive by two
+                    // different rules.
+                    paint::feather(f, at, fade);
+                    let over = ask::prose_rect(body, &self.ask).intersection(at);
+                    paint::veil_ramp(f, over, 0.34, 1.0);
                 }
                 ask::render(f, body, &self.ask);
             }
