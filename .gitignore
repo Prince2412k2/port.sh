@@ -30,3 +30,9 @@ map-data/
 # entire text — and not data at all.
 map/data/*
 !map/data/places.txt
+
+# Somebody else's repository, cloned in as reference for `moonin`: 37 MB with
+# its own .git, its own README and its own LICENSE. Committing it would either
+# vendor another project's history into this one or leave a gitlink nothing here
+# can resolve. `moonin/refs/*.png` is covered by the rule above.
+moonin/ian-xiaohei-illustrations-en/
