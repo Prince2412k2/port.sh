@@ -181,11 +181,39 @@ pub struct Overlay {
 /// This is a real trade and the number is the knob: lower for cheaper frames,
 /// higher for smoother gradients. Below about 16 the terrain stipple starts to
 /// show banding.
+///
+/// The ramp is two-tier. Neutral tints must stay on 24, because xterm's grey
+/// indices 232..255 *are* that ramp and the cheap encoding depends on landing
+/// exactly on it. Anything with hue rides truecolor anyway, so it takes a finer
+/// 48 — the extra steps cost nothing on the wire for cells that were never
+/// going to share an index escape, and they are where gradients live (museum
+/// fields, water, tinted terrain in colour mode).
 const LEVELS: f32 = 24.0;
+const LEVELS_HUED: f32 = 48.0;
 
 #[inline]
 fn quantise(l: f32) -> f32 {
     (l.clamp(0.0, 1.0) * LEVELS).round() / LEVELS
+}
+
+#[inline]
+fn quantise_hued(l: f32) -> f32 {
+    (l.clamp(0.0, 1.0) * LEVELS_HUED).round() / LEVELS_HUED
+}
+
+/// Same spread rule `ink()` applies to the resolved colour, decided here on the
+/// unmultiplied tint instead -- so a tint either rides the grey index ramp end
+/// to end or keeps truecolor the whole way, never switches mid-fade.
+#[inline]
+fn is_neutral(r: u8, g: u8, b: u8) -> bool {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    max - min <= 8
+}
+
+#[inline]
+fn quantise_for(l: f32, r: u8, g: u8, b: u8) -> f32 {
+    if is_neutral(r, g, b) { quantise(l) } else { quantise_hued(l) }
 }
 
 /// Turn a resolved colour into the cheapest escape that still draws it.
@@ -474,7 +502,9 @@ impl Canvas {
                     } else {
                         TINT_RGB[o.tint as usize]
                     };
-                    let l = quantise(o.lum);
+                    // Labels are exempt from the haze and the outline on
+                    // purpose: they are ink on the page, not things in it.
+                    let l = quantise_for(o.lum, r, g, b);
                     let mut style = Style::default().fg(ink(
                         (r as f32 * l) as u8,
                         (g as f32 * l) as u8,
@@ -491,8 +521,8 @@ impl Canvas {
 
                 if let Some(l) = self.lines[cy * self.cw + cx] {
                     let table = if l.heavy { &LINE_HEAVY } else { &LINE_LIGHT };
-                    let lum = quantise(fog.factor(l.depth));
                     let (r, g, b) = if mono { TINT_RGB[0] } else { TINT_RGB[l.tint as usize] };
+                    let lum = quantise_for(fog.factor(l.depth), r, g, b);
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
                         cell.set_char(table[(l.mask & 15) as usize]).set_fg(ink(
                             (r as f32 * lum) as u8,
@@ -599,7 +629,7 @@ impl Canvas {
                 // when the map is deliberately monochrome.
                 let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
                 let (r, g, b) = if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
-                let l = quantise(lum);
+                let l = quantise_for(lum, r, g, b);
                 let color = ink(
                     (r as f32 * l) as u8,
                     (g as f32 * l) as u8,
@@ -611,5 +641,18 @@ impl Canvas {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn neutral_tints_keep_the_index_exact_ramp_and_hues_get_the_finer_one() {
+        let l = 0.52;
+        assert_eq!(quantise_for(l, 232, 232, 226), quantise(l));
+        assert_eq!(quantise_for(l, 140, 186, 140), quantise_hued(l));
+        assert_ne!(quantise(l), quantise_hued(l));
     }
 }
