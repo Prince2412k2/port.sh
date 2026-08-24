@@ -76,7 +76,7 @@ reach. The image runs one already-unprivileged process, with:
 
 | | |
 |---|---|
-| filesystem | fully read-only, no `tmpfs` anywhere |
+| filesystem | read-only root with a bounded scratch `tmpfs` and explicit data volumes |
 | web transport | no pty, no subprocess, no shell — see above |
 | capabilities | all dropped, none re-added |
 | account | a system user with `nologin`, never used to log in |
@@ -98,10 +98,19 @@ generated, because there is no `ssh-keygen` in this image to compute it after
 the fact:
 
 ```bash
-docker compose logs portfolio | grep fingerprint
+docker compose logs portfolio | grep ssh_host_key
 ```
 
-Publish that so people can check it before trusting the connection.
+The next log line prints the DNS record payload:
+
+```text
+SSHFP 4 2 <sha256-hex>
+```
+
+Publish it as an `SSHFP` record on the SSH hostname. The owner is the hostname,
+not the port. DNSSEC is required for clients to authenticate this record rather
+than merely display it. Verify it with `dig SSHFP <host>` and OpenSSH's
+`VerifyHostKeyDNS yes`.
 
 ## Session limits
 
@@ -110,7 +119,11 @@ A stranger's session should not be able to take the box down or run forever:
 | | |
 |---|---|
 | concurrent sessions | 128 (`MAX_SESSIONS` in `net.rs`) |
+| concurrent SSH connections | 192 globally, 4 per address |
 | idle timeout | 15 minutes with no keystroke (`PORTFOLIO_IDLE_SECS`, `0` disables it) |
+| maximum session | 1 hour (`PORTFOLIO_MAX_SESSION_SECS`, `0` disables it) |
+| daily visits | 24 per key/id and address (`PORTFOLIO_DAILY_VISITS`) |
+| daily AI allocation | $10, reserving $0.25 per provider attempt (`PORTFOLIO_DAILY_AI_USD`, `PORTFOLIO_AI_REQUEST_USD`) |
 | container | 1.5 CPUs, 512 MB, 256 pids (`docker-compose.yml`) |
 
 ## The map data

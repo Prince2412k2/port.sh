@@ -1,161 +1,20 @@
-# models
+# Envoy is the only agent used by the ask section. It owns provider selection,
+# authentication, tool policy, and fallback behavior in ai-sdk/envoy.json.
 #
-# The agent behind the ask section, in tiers. A tier is a place the questions
-# can go; the models inside one are alternatives within it.
-#
-# Tiers are tried in order and the first that answers is the one sessions use,
-# until the next check. Within a tier the models are tried in order too, so a
-# tier survives one of its models being withdrawn or rate limited.
-#
-# Order here is cheapest-to-us first, not best first. Copilot is a seat that is
-# already paid for; zen is a free tier on somebody's personal account; the
-# cloud models are the backstop that keeps the section alive when the other two
-# are out for the day.
-#
-# Names are opencode's `provider/model`. `opencode models` inside the container
-# lists what it can actually reach, and that list moves faster than this file
-# does -- trust it over these. Anything unreachable is skipped at the next
-# check rather than breaking the section.
-#
-# Mounted in docker-compose.yml: edit and restart, nothing is compiled in. An
-# empty file turns the ask section off, which is the lever to pull if this ever
-# gets found by something automated.
-#
-#
-# ANY ACP SERVER
-#
-# A tier may name the ACP server its models are reached through. Left out, it is
-# `opencode acp`, which is what every tier below uses:
-#
-#   tier  some other agent
-#     command  npx -y @zed-industries/claude-code-acp
-#     pin      flag --model
-#     model    claude-sonnet-4-5
-#
-# `command` is the program and its arguments, split on whitespace and never
-# passed through a shell. `pin` is how the model name reaches it:
-#
-#   opencode-config   a whole opencode config document in
-#                     OPENCODE_CONFIG_CONTENT. The default, and the only one
-#                     that also carries the tool policy to the server.
-#   flag  --model     appended to the command line, followed by the model name.
-#   env   NAME        a named environment variable holding just the model name.
-#   none              the server picks for itself.
-#
-# Naming a `command` that is not opencode switches `pin` to `none` unless a
-# `pin` line says otherwise, because handing OPENCODE_CONFIG_CONTENT to
-# something else is at best ignored and at worst silently relied upon.
-#
-# `secrets` lists the credentials that tier's process may see; every other one
-# the container carries is removed from its environment before it starts.
-# `secrets none` gives it nothing. Separate credential directories are not
-# isolation on their own -- without this every agent inherited every token.
-#
-# What a server may do is NOT set here. That is `portfolio/src/gates.rs`,
-# compiled in, and it applies to every server in this file -- adding one cannot
-# widen what an agent is allowed to do. Only `opencode-config` pushes the policy
-# into the server as well; for everything else the client-side gate is the only
-# enforcement, which is what it was always for.
+# The names here are the model ids passed to Envoy. The file is mounted by
+# docker-compose so the order can be changed without rebuilding the image.
 
-tier  envoy luna
-  # Our own agent, `ai-sdk/`. First because it is ours: the turn loop, the tool
-  # calls and the compaction are all in this repository, so a bug in any of them
-  # is a bug somebody here can fix rather than wait on.
-  #
-  # It speaks real ACP over stdio like every other server in this file. Two
-  # things are different and both are lines below:
-  #
-  #   `pin flag --model` -- it takes the model as a flag, and refuses to start
-  #   if no tier in its own catalogue matches, which is a loud failure rather
-  #   than a quiet fallback to something else.
-  #
-  #   `tools env ENVOY_MCP_HTTP` -- it does not advertise
-  #   `mcpCapabilities.http`, so it cannot be handed our tool server in
-  #   `session/new`. It reads the address from that variable instead. Without
-  #   this line the map tools do not exist on this tier and nothing says so.
-  #
-  # Its model catalogue is its own -- endpoints, context windows and which
-  # credential each tier uses live in `envoy.json`, mounted beside this file.
-  # Deliberately not duplicated here: two catalogues that can disagree about
-  # which models exist is worse than one in a second file.
-  #
-  # Its credential is the same opencode OAuth login the tier below uses. It
-  # reads `auth.json` directly rather than going through opencode.
+tier  envoy codex
   command  envoy
   pin      flag --model
   tools    env ENVOY_MCP_HTTP
-  # It reads the login from the volume, not from the environment. Nothing here
-  # needs a key, and a key it does not use is a key it should not see.
   secrets  none
-  model  gpt-5.6-luna
+  model    gpt-5.6-luna
 
-tier  openai luna
-  # First because it is the one chosen on purpose. `openai/gpt-5.6-luna` is in
-  # the registry opencode reads -- checked with `opencode models` in the
-  # container rather than assumed.
-  #
-  # Its credential is an **OAuth login**, not a key: `opencode auth login` once
-  # inside the container, pick openai, and the token lands in
-  # `$XDG_DATA_HOME/opencode/auth.json` -- `/app/agent/opencode/auth.json`,
-  # which is on the `agent` named volume and so survives restarts and rebuilds.
-  # Nothing needs to go in `.env` for this tier.
-  #
-  # Note what that means for `secrets` below: compose passes
-  # `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`, so the variable exists and is empty
-  # whenever the host does not set one. An empty credential is worse than an
-  # absent one -- a server that checks whether a key is present rather than
-  # usable would take it and stop looking, past a perfectly good OAuth token.
-  # `spawn_command` strips empty secrets for exactly that reason.
-  #
-  # `option` lines become `provider.<id>.models.<id>.options` in the config
-  # document opencode is handed. The keys belong to opencode, not to us: these
-  # were read off the shipped binary (`reasoningEffort`, `reasoningSummary`,
-  # `textVerbosity`) rather than guessed at. `minimal` is also accepted and is
-  # the nearer reading of "no reasoning" if `low` still thinks too hard.
-  option  reasoningEffort low
-  model  openai/gpt-5.6-luna
-  # The fast variant as the fallback inside this tier, so one of them being
-  # busy does not drop the whole tier.
-  model  openai/gpt-5.6-luna-fast
-
-tier  opencode free
-  # Free, and the free tier is a daily allowance rather than a guarantee. These
-  # are the ones the registry actually lists today: `opencode/grok-code` and
-  # `opencode/code-supernova` were in this file and are **gone** -- a tier of
-  # two withdrawn ids is a tier that fails every check and tells nobody why.
-  model  opencode/nemotron-3.5-lightning-free
-  model  opencode/deepseek-v4-flash-free
-  model  opencode/mimo-v2.5-free
-  model  opencode/hy3-free
-  model  opencode/nemotron-3-ultra-free
-
-tier  github copilot
-  # Copilot's own ACP server rather than opencode's Copilot provider: it is the
-  # first-party path to a seat that is already paid for, it takes the model as a
-  # flag, and it accepts the gates' allow-list directly.
-  #
-  # It will not open a session until it has been logged in -- it answers
-  # `session/new` with "Authentication required" and advertises `copilot-login`.
-  # Either put a fine-grained PAT with "Copilot Requests" in GH_TOKEN, or run
-  # `copilot login` once in the container. See deploy/README.md.
-  command  copilot --acp
+tier  envoy ollama
+  command  envoy
   pin      flag --model
-  tools    flag --available-tools
-  # Only the GitHub PAT. The provider keys below are stripped from this
-  # process's environment before it starts, and its PAT from theirs.
-  secrets  GH_TOKEN GITHUB_TOKEN
-  # `auto` lets Copilot pick, which is the right default for a seat: the good
-  # model on any given week is theirs to know, not ours to pin.
-  model  auto
-
-tier  ollama cloud
-  # The backstop. Slower and further away, and still an answer.
-  #
-  # `ollama-cloud`, not `ollama`: there is no plain `ollama` provider in the
-  # registry opencode reads. And the ids carried a `-cloud` suffix, which is how
-  # a *local* ollama daemon names the cloud models it proxies -- there is no
-  # daemon in this image, so that spelling asked a provider that does not exist
-  # for a model that does not exist. This goes straight to ollama.com, which
-  # wants OLLAMA_API_KEY. See deploy/README.md.
-  model  ollama-cloud/gpt-oss:120b
-  model  ollama-cloud/qwen3.5:397b
+  tools    env ENVOY_MCP_HTTP
+  secrets  OLLAMA_API_KEY
+  model    qwen3.5:397b
+  model    gpt-oss:120b

@@ -272,13 +272,34 @@ impl Server {
     pub fn spawn_command(&self, model: &str, tools: Option<&str>) -> Command {
         let mut c = Command::new(&self.command);
         c.args(&self.args);
-        // Least privilege by subtraction. Everything else about the environment
-        // is inherited -- PATH, HOME, the XDG paths -- because an agent needs
-        // all of that to run at all; only the credentials are pruned.
+        c.env_clear();
+        for var in [
+            "PATH",
+            "HOME",
+            "ENVOY_CONFIG",
+            "ENVOY_CONFIG_CONTENT",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "COPILOT_HOME",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ] {
+            if let Some(value) = std::env::var_os(var) {
+                c.env(var, value);
+            }
+        }
         for var in SECRETS {
             let declared = self.secrets.iter().any(|s| s == var);
-            // Removed if this tier does not declare it -- and removed if it is
-            // declared but empty, which is the case that bites. Compose passes
+            // Included only when this tier declares a non-empty value. Compose passes
             // `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`, so the variable exists with
             // no value whenever the host does not set one, and a server that
             // tests whether a credential is *present* rather than whether it is
@@ -286,9 +307,13 @@ impl Server {
             // credential here is an OAuth login in opencode's own store on the
             // volume, and an empty environment variable must not shadow it.
             let usable = std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
-            if !declared || !usable {
-                c.env_remove(var);
+            if declared && usable {
+                c.env(var, std::env::var(var).expect("checked above"));
             }
+        }
+        let work = std::env::temp_dir().join("portfolio-agent");
+        if std::fs::create_dir_all(&work).is_ok() {
+            c.current_dir(work);
         }
         if let Some(flag) = &self.tool_flag {
             let list = crate::gates::open_tool_names().join(",");
@@ -361,9 +386,6 @@ mod tests {
                 v.map(|v| v.to_string_lossy().to_string())
             })
         };
-        let removed = |c: &Command, var: &str| {
-            c.get_envs().any(|(k, v)| k == var && v.is_none())
-        };
 
         let c = server.spawn_command("gpt-5.6-luna", Some("http://127.0.0.1:9/mcp/tok"));
         assert_eq!(
@@ -376,13 +398,13 @@ mod tests {
         // No screen: the check has none, and neither does a session whose page
         // has gone. An empty variable would configure a server at no address.
         let c = server.spawn_command("gpt-5.6-luna", None);
-        assert!(removed(&c, "ENVOY_MCP_HTTP"), "an empty tool address was passed");
+        assert!(set(&c, "ENVOY_MCP_HTTP").is_none(), "an empty tool address was passed");
 
         // A server that does not take them this way is never given the variable
         // whatever we know.
         let plain = Server::default();
         let c = plain.spawn_command("openai/gpt", Some("http://127.0.0.1:9/mcp/tok"));
-        assert!(set(&c, "ENVOY_MCP_HTTP").is_none() && !removed(&c, "ENVOY_MCP_HTTP"));
+        assert!(set(&c, "ENVOY_MCP_HTTP").is_none());
     }
 
     /// `tools none` means neither route, not just the flag.
@@ -421,27 +443,26 @@ mod tests {
                 })
                 .collect()
         };
-        // `None` in the override list means "remove this from the child".
-        let removed = |c: &Command, var: &str| {
-            seen(c).iter().any(|(k, v)| k == var && v.is_none())
+        let present = |c: &Command, var: &str| {
+            seen(c).iter().any(|(key, value)| key == var && value.is_some())
         };
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "") };
         let c = server.spawn_command("openai/gpt-5.6-luna", None);
-        assert!(removed(&c, "OPENAI_API_KEY"), "an empty key was passed through");
+        assert!(!present(&c, "OPENAI_API_KEY"), "an empty key was passed through");
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "   ") };
         let c = server.spawn_command("openai/gpt-5.6-luna", None);
-        assert!(removed(&c, "OPENAI_API_KEY"), "whitespace counted as a credential");
+        assert!(!present(&c, "OPENAI_API_KEY"), "whitespace counted as a credential");
 
         unsafe { std::env::set_var("OPENAI_API_KEY", "sk-real") };
         let c = server.spawn_command("openai/gpt-5.6-luna", None);
-        assert!(!removed(&c, "OPENAI_API_KEY"), "a real key was stripped");
+        assert!(present(&c, "OPENAI_API_KEY"), "a real key was stripped");
 
         // And a secret this tier never declared stays gone whatever its value.
         unsafe { std::env::set_var("GH_TOKEN", "ghp-real") };
         let c = server.spawn_command("openai/gpt-5.6-luna", None);
-        assert!(removed(&c, "GH_TOKEN"), "an undeclared secret leaked in");
+        assert!(!present(&c, "GH_TOKEN"), "an undeclared secret leaked in");
 
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
         unsafe { std::env::remove_var("GH_TOKEN") };
@@ -621,28 +642,28 @@ mod tests {
         let mut copilot = Server::default();
         copilot.command_line("copilot --acp");
         copilot.secrets_line("GH_TOKEN GITHUB_TOKEN");
-        let removed = |c: &Command| -> Vec<String> {
+        let present = |c: &Command| -> Vec<String> {
             c.get_envs()
-                .filter(|(_, v)| v.is_none())
+                .filter(|(_, value)| value.is_some())
                 .map(|(k, _)| k.to_string_lossy().to_string())
                 .collect()
         };
-        let cleared = removed(&copilot.spawn_command("auto", None));
+        let inherited = present(&copilot.spawn_command("auto", None));
         for gone in ["OLLAMA_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
-            assert!(cleared.contains(&gone.to_string()), "{gone} still reaches copilot: {cleared:?}");
+            assert!(!inherited.contains(&gone.to_string()), "{gone} still reaches copilot: {inherited:?}");
         }
         for kept in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            assert!(!cleared.contains(&kept.to_string()), "{kept} was taken from copilot");
+            assert!(inherited.contains(&kept.to_string()), "{kept} was taken from copilot");
         }
 
         // And the other way: opencode fronts the providers and has no business
         // holding a GitHub PAT.
-        let cleared = removed(&Server::default().spawn_command("a/b", None));
+        let inherited = present(&Server::default().spawn_command("a/b", None));
         for gone in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            assert!(cleared.contains(&gone.to_string()), "{gone} still reaches opencode: {cleared:?}");
+            assert!(!inherited.contains(&gone.to_string()), "{gone} still reaches opencode: {inherited:?}");
         }
         for kept in ["OPENCODE_API_KEY", "OLLAMA_API_KEY"] {
-            assert!(!cleared.contains(&kept.to_string()), "{kept} was taken from opencode");
+            assert!(inherited.contains(&kept.to_string()), "{kept} was taken from opencode");
         }
 
         for var in SECRETS {
@@ -657,13 +678,13 @@ mod tests {
         s.secrets_line("none");
         assert!(s.secrets.is_empty());
         let c = s.spawn_command("a/b", None);
-        let cleared: Vec<String> = c
+        let inherited: Vec<String> = c
             .get_envs()
-            .filter(|(_, v)| v.is_none())
+            .filter(|(_, value)| value.is_some())
             .map(|(k, _)| k.to_string_lossy().to_string())
             .collect();
         for var in SECRETS {
-            assert!(cleared.contains(&var.to_string()), "{var} survived `secrets none`");
+            assert!(!inherited.contains(&var.to_string()), "{var} survived `secrets none`");
         }
     }
 

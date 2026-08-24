@@ -62,14 +62,10 @@ services:
       # wants to keep, and the only writable path outside the tmpfs below.
       - messages:/app/messages
 
-      # opencode's credential store. Shared with the web service on purpose:
-      # `opencode auth login github-copilot` is done once and serves both.
+      # Envoy's Codex credential store, shared by the web and SSH services.
       - agent:/app/agent
 
-    # opencode insists on a writable HOME for its logs and scratch. None of it
-    # survives a restart -- but without it the ask section fails at spawn on a
-    # read-only filesystem, with an error nobody sees because its stderr goes
-    # nowhere.
+    # Envoy's scratch space is ephemeral.
     #
     # The agents' *cache* is deliberately not here: XDG_CACHE_HOME points at the
     # volume instead. Copilot unpacks 209 MB of itself into it on first run,
@@ -83,29 +79,17 @@ services:
       # Where termap looks for all of the above.
       TERMAP_DATA: /app/data
 
-      # The agent's credentials. Whichever provider data/models.txt names
-      # needs its key here; opencode reads the standard variables. Keep them
-      # in a .env file beside this one -- compose picks that up on its own,
+      # Ollama's credential. Keep it in a .env file beside this one -- compose
+      # picks that up on its own,
       # and it is not a file to commit.
       #
       # With no key the ask section reports that the agent would not start and
       # every other section carries on. That is deliberate: a missing key
       # should cost one tab, not the site.
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      # Copilot's own ACP server takes either of these: a fine-grained PAT
-      # with the "Copilot Requests" permission, in precedence order. Set one
-      # and the Copilot tier needs no login step at all. Leave both empty and
-      # it falls back to whatever `copilot login` put on the agent volume;
-      # with neither, the tier reports that it needs authenticating and the
-      # zen and ollama tiers carry the section.
-      GH_TOKEN: ${GH_TOKEN:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # The ollama-cloud tier. A key from ollama.com, which talks to
       # https://ollama.com/v1 directly -- there is no ollama daemon in
       # this image for the local provider to reach.
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # The web tools -- `search_web` and `fetch_page`. These two are spent by
       # the portfolio itself rather than by an agent: no tier declares them, so
       # `spawn_command` strips them from every agent's environment. Without
@@ -121,6 +105,10 @@ services:
       # TERMAP_NO_CLIENT_LOOKUP: "1"
       # How long an idle session is kept open. 0 disables the timeout.
       # PORTFOLIO_IDLE_SECS: "900"
+      # PORTFOLIO_MAX_SESSION_SECS: "3600"
+      # PORTFOLIO_DAILY_AI_USD: "10"
+      # PORTFOLIO_AI_REQUEST_USD: "0.25"
+      # PORTFOLIO_DAILY_VISITS: "24"
 
     # A stranger's session should not be able to take the box down. Sized for
     # a handful of concurrent visitors on a small VPS; the map holds 96 tiles
@@ -147,7 +135,7 @@ services:
     healthcheck:
       # The portfolio prints plain text when there is no terminal, which makes
       # it its own health check.
-      test: ["CMD-SHELL", "/usr/local/bin/portfolio | grep -q ."]
+      test: ["CMD", "/usr/local/bin/portfolio", "--health"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -180,37 +168,24 @@ services:
       - messages:/app/messages
       - agent:/app/agent
 
-    # As above: scratch only. The agents' cache lives on the volume, because
-    # Copilot cannot unpack itself into a small noexec tmpfs.
+    # Envoy's scratch space is ephemeral.
     tmpfs:
       - /tmp:size=64m,mode=1777
 
     environment:
       TERMAP_DATA: /app/data
 
-      # The agent's credentials. Whichever provider data/models.txt names
-      # needs its key here; opencode reads the standard variables. Keep them
-      # in a .env file beside this one -- compose picks that up on its own,
+      # Ollama's credential. Keep it in a .env file beside this one -- compose
+      # picks that up on its own,
       # and it is not a file to commit.
       #
       # With no key the ask section reports that the agent would not start and
       # every other section carries on. That is deliberate: a missing key
       # should cost one tab, not the site.
-      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
-      # Copilot's own ACP server takes either of these: a fine-grained PAT
-      # with the "Copilot Requests" permission, in precedence order. Set one
-      # and the Copilot tier needs no login step at all. Leave both empty and
-      # it falls back to whatever `copilot login` put on the agent volume;
-      # with neither, the tier reports that it needs authenticating and the
-      # zen and ollama tiers carry the section.
-      GH_TOKEN: ${GH_TOKEN:-}
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # The ollama-cloud tier. A key from ollama.com, which talks to
       # https://ollama.com/v1 directly -- there is no ollama daemon in
       # this image for the local provider to reach.
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # The web tools -- `search_web` and `fetch_page`. These two are spent by
       # the portfolio itself rather than by an agent: no tier declares them, so
       # `spawn_command` strips them from every agent's environment. Without
@@ -224,6 +199,10 @@ services:
       # A browser tab left open in the background answers everything and would
       # otherwise hold its session indefinitely.
       # PORTFOLIO_IDLE_SECS: "900"
+      # PORTFOLIO_MAX_SESSION_SECS: "3600"
+      # PORTFOLIO_DAILY_AI_USD: "10"
+      # PORTFOLIO_AI_REQUEST_USD: "0.25"
+      # PORTFOLIO_DAILY_VISITS: "24"
 
     cpus: 1.5
     mem_limit: 512M
@@ -236,7 +215,7 @@ services:
       - ALL
 
     healthcheck:
-      test: ["CMD-SHELL", "/usr/local/bin/portfolio | grep -q ."]
+      test: ["CMD", "/usr/local/bin/portfolio", "--health"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -246,6 +225,5 @@ volumes:
   # Messages left through `/reach`, one JSON document per line. Read them:
   #   docker compose exec portfolio cat /app/messages/messages.jsonl
   messages:
-  # opencode's credentials. Keep this volume: losing it means logging the
-  # agent back in, not just a restart.
+  # Envoy credentials. Keep this volume: losing it means logging Codex back in.
   agent:

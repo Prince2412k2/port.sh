@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn the_shipped_file_parses_into_ordered_tiers() {
         let t = tiers();
-        assert!(t.len() >= 3, "{t:?}");
+        assert!(!t.is_empty(), "{t:?}");
         // Which tier leads is the operator's choice and lives in the file; what
         // is checked here is that parsing preserves the order it is written in.
         let src = std::fs::read_to_string("portfolio/data/models.txt")
