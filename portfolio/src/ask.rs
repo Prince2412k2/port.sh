@@ -6,9 +6,9 @@
 //!
 //! **The page takes the width it is given**, and anything that is a picture --
 //! a code, and the map and the marks when tools can ask for them -- arrives at
-//! the side rather than in the middle of the prose. Not in a box: it fades up
-//! out of the background and the words keep their own column. A bordered widget
-//! in the centre of a terminal is a dialog, which is the look this is avoiding.
+//! the side rather than in the middle of the prose. The map remains part of the
+//! page's ground and fades into the words; other views get a quiet canvas rail
+//! so the tool run and the thing it produced read as one system.
 //!
 //! **The wait is the answer arriving.** A run of glyphs churns at the head of
 //! what has been written and settles as the tokens land behind it, so the motion
@@ -18,14 +18,15 @@
 //! Everything that moves is a pure function of a clock, like the rest of this
 //! app, so a frame can be snapshotted at an exact moment and looked at.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use serde::{Deserialize, Serialize};
 
 use crate::acp::{self, Call, Event, Status};
-use crate::paint::{wrap, ACCENT, CYAN, DIM, FAINT, FG};
+use crate::paint::{ACCENT, CYAN, DIM, FAINT, FG, wrap};
 
 /// The longest question anybody can ask.
 ///
@@ -38,6 +39,39 @@ pub const MAX_WORDS: usize = 1000;
 /// bites at the thousandth word and not part way through it.
 pub fn words(s: &str) -> usize {
     s.split_whitespace().count()
+}
+
+fn previous_char(s: &str, at: usize) -> usize {
+    s[..at].char_indices().next_back().map_or(0, |(i, _)| i)
+}
+
+fn next_char(s: &str, at: usize) -> usize {
+    s[at..]
+        .char_indices()
+        .nth(1)
+        .map_or(s.len(), |(i, _)| at + i)
+}
+
+fn delete_word_before(s: &mut String, at: usize) -> usize {
+    let mut start = at;
+    while start > 0
+        && s[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        start = previous_char(s, start);
+    }
+    while start > 0
+        && s[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace())
+    {
+        start = previous_char(s, start);
+    }
+    s.replace_range(start..at, "");
+    start
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +96,8 @@ pub struct Turn {
     /// visitor's. The last report wins: they arrive per request and the final
     /// one is the turn's total.
     pub spent: Option<crate::acp::Spend>,
+    /// The view this answer produced, detached from its runtime animation state.
+    pub panel: Option<SavedView>,
 }
 
 /// One exchange, on its way to the visit log.
@@ -73,28 +109,65 @@ pub struct Logged {
     pub q: String,
     pub a: String,
     pub spent: Option<crate::acp::Spend>,
+    pub panel: Option<SavedView>,
 }
 
 impl Logged {
     /// An exchange no model was involved in -- `/coffee`, `/cert`, `/reach`.
     /// Nothing was spent, and that is different from nobody telling us.
     pub fn local(q: String, a: String) -> Logged {
-        Logged { q, a, spent: None }
+        Logged {
+            q,
+            a,
+            spent: None,
+            panel: None,
+        }
     }
+}
+
+/// The completed part of a turn that can be restored on a later visit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedTurn {
+    pub q: String,
+    pub a: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<SavedView>,
+}
+
+/// A view without transient fade or animation state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedView {
+    pub show: SavedShow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SavedShow {
+    Code(String),
+    Place(Tour),
+    Cert,
+    Work(Work),
+    Diagram(skysheet::diagram::Spec),
 }
 
 /// Something showing at the side of the page.
 ///
-/// Not in a box and not in the middle: it arrives at the edge, fades up out of
-/// the background, and the prose keeps its own column. A terminal is a canvas
-/// and a bordered widget in the centre of one is a dialog box -- which is the
-/// look this is trying not to have.
+/// It arrives at the edge and the prose keeps its own column. Maps dissolve into
+/// the page without a seam; the other views use a quiet rail and source label.
 #[derive(Debug, Clone)]
 pub struct Panel {
     pub what: Show,
+    /// The completed tool row that produced this view. Local panels have none.
+    pub source: Option<String>,
     /// Seconds in the current state. Drives both fades, and stops mattering
     /// once one is over -- nothing here loops.
     pub since: f64,
+    /// Time belonging to this view's story. It advances only while this panel is
+    /// the view for the answer in flight.
+    pub story: f64,
+    pub live: bool,
     pub life: Life,
 }
 
@@ -131,6 +204,9 @@ pub enum Show {
     /// of it, and the shell puts it there, because the art and the scenes live
     /// in a crate this file has no handle on.
     Work(Work),
+    /// A composed explainer authored for the current answer and laid out by
+    /// `skysheet`. Like project scenes, the shell owns the renderer.
+    Diagram(skysheet::diagram::Spec),
 }
 
 /// A project on the page, and how much of it.
@@ -140,7 +216,7 @@ pub enum Show {
 /// there" wants nine marks and no diagrams; and a question the answer merely
 /// mentions a project in wants neither -- the tool hands over the facts and
 /// draws nothing at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Work {
     /// The project's id in `projects.txt`, already checked to exist.
     pub id: String,
@@ -154,7 +230,7 @@ pub struct Work {
 ///
 /// One place is a tour of length one, so there is a single shape to draw rather
 /// than a special case for the common thing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tour {
     pub stops: Vec<Spot>,
     pub at: usize,
@@ -162,7 +238,10 @@ pub struct Tour {
 
 impl Tour {
     pub fn one(spot: Spot) -> Tour {
-        Tour { stops: vec![spot], at: 0 }
+        Tour {
+            stops: vec![spot],
+            at: 0,
+        }
     }
 
     pub fn here(&self) -> &Spot {
@@ -181,7 +260,7 @@ impl Tour {
 }
 
 /// Somewhere on the map, and what to say underneath it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spot {
     /// The tour stop this is, when it is one. `/map` flies there, and the map
     /// draws the stop's own pin, so the thumbnail does not add a second marker.
@@ -210,13 +289,18 @@ pub struct Atlas {
 
 impl Default for Atlas {
     fn default() -> Self {
-        Atlas { places: termap::place::load(), covers: None }
+        Atlas {
+            places: termap::place::load(),
+            covers: None,
+        }
     }
 }
 
 impl Atlas {
     fn drawable(&self, lonlat: (f64, f64)) -> bool {
-        let Some([x0, y0, x1, y1]) = self.covers else { return false };
+        let Some([x0, y0, x1, y1]) = self.covers else {
+            return false;
+        };
         let [x, y] = termap::geo::lonlat_to_world(lonlat.0, lonlat.1);
         x >= x0 && x <= x1 && y >= y0 && y <= y1
     }
@@ -392,7 +476,61 @@ pub fn spot_for(q: &str, atlas: &Atlas) -> Option<Spot> {
 
 impl Panel {
     pub fn new(what: Show) -> Panel {
-        Panel { what, since: 0.0, life: Life::Arriving }
+        Panel {
+            what,
+            source: None,
+            since: 0.0,
+            story: 0.0,
+            live: true,
+            life: Life::Arriving,
+        }
+    }
+
+    fn from_tool(what: Show, source: Option<String>) -> Panel {
+        Panel {
+            what,
+            source,
+            since: 0.0,
+            story: 0.0,
+            live: true,
+            life: Life::Arriving,
+        }
+    }
+
+    fn held(view: &SavedView) -> Option<Panel> {
+        let what = view.show.restore()?;
+        let live = Self::animated(&what);
+        Some(Panel {
+            what,
+            source: view.source.clone(),
+            since: 1.0,
+            story: 0.0,
+            live,
+            life: Life::Held,
+        })
+    }
+
+    fn animated(show: &Show) -> bool {
+        match show {
+            Show::Work(work) => work.diagram,
+            Show::Diagram(spec) => !spec.beats.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn keep_looping(&mut self) {
+        self.live = Self::animated(&self.what);
+    }
+
+    pub fn looping(&self) -> bool {
+        self.live && Self::animated(&self.what)
+    }
+
+    fn saved(&self) -> Option<SavedView> {
+        Some(SavedView {
+            show: SavedShow::from_show(&self.what)?,
+            source: self.source.clone(),
+        })
     }
 
     /// How visible it is, 0 to 1. Smoothstepped so it comes up and goes down
@@ -425,6 +563,9 @@ impl Panel {
     /// Advance, and say whether it has finished leaving and should be dropped.
     fn step(&mut self, dt: f64) -> bool {
         self.since += dt;
+        if self.live {
+            self.story += dt;
+        }
         const OVER: f64 = 0.55;
         match self.life {
             Life::Arriving if self.since >= OVER => {
@@ -433,6 +574,47 @@ impl Panel {
             }
             Life::Leaving if self.since >= OVER => true,
             _ => false,
+        }
+    }
+}
+
+impl SavedShow {
+    fn from_show(show: &Show) -> Option<SavedShow> {
+        Some(match show {
+            Show::Code(code) => SavedShow::Code(
+                crate::coffee::ALL
+                    .iter()
+                    .find(|(_, candidate)| candidate.payload == code.payload)
+                    .map(|(key, _)| (*key).to_string())?,
+            ),
+            Show::Place(tour) => SavedShow::Place(tour.clone()),
+            Show::Cert => SavedShow::Cert,
+            Show::Work(work) => SavedShow::Work(work.clone()),
+            Show::Diagram(spec) => SavedShow::Diagram(spec.clone()),
+        })
+    }
+
+    fn restore(&self) -> Option<Show> {
+        match self {
+            SavedShow::Code(key) => crate::coffee::ALL
+                .iter()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, code)| Show::Code(code)),
+            SavedShow::Place(tour) if !tour.stops.is_empty() => {
+                let mut tour = tour.clone();
+                tour.at = tour.at.min(tour.stops.len() - 1);
+                Some(Show::Place(tour))
+            }
+            SavedShow::Place(_) => None,
+            SavedShow::Cert => Some(Show::Cert),
+            SavedShow::Work(work) if crate::mcp::project(&work.id).is_some() => {
+                Some(Show::Work(work.clone()))
+            }
+            SavedShow::Work(_) => None,
+            SavedShow::Diagram(spec) if skysheet::diagram::validate(spec).is_ok() => {
+                Some(Show::Diagram(spec.clone()))
+            }
+            SavedShow::Diagram(_) => None,
         }
     }
 }
@@ -519,7 +701,9 @@ fn subsequence(hay: &str, needle: &str) -> Option<usize> {
     let mut first = None;
     let mut gaps = 0;
     for want in needle.chars() {
-        let found = hay[at..].iter().position(|c| c.eq_ignore_ascii_case(&want))?;
+        let found = hay[at..]
+            .iter()
+            .position(|c| c.eq_ignore_ascii_case(&want))?;
         if first.is_none() {
             first = Some(at + found);
         } else {
@@ -544,6 +728,9 @@ pub struct Ask {
     client: Option<acp::Ask>,
     pub state: State,
     pub input: String,
+    /// Byte offset of the insertion point. `None` is the end, which keeps
+    /// direct assignments in tests and local commands naturally append-only.
+    cursor: Option<usize>,
     pub turns: Vec<Turn>,
     /// What the handshake settled on, once it has. Drives the header: the
     /// section can say which server and which protocol version answered rather
@@ -558,10 +745,8 @@ pub struct Ask {
     /// How many rows the last frame could have scrolled. Kept from the render
     /// so the key handler can clamp without laying the page out twice.
     reach: std::cell::Cell<usize>,
-    /// Questions asked this session, oldest first, for the up arrow.
-    history: Vec<String>,
-    /// Where the up arrow has walked to. `None` is the live line.
-    hist_at: Option<usize>,
+    /// Which completed answer the arrows are showing. `None` is the live end.
+    viewed: Option<usize>,
     /// The command palette, open while the line starts with `/`.
     pick: usize,
     /// What is showing at the side, and when it arrived, for the fade.
@@ -604,6 +789,8 @@ pub struct Ask {
     /// page, and what the log does with a finished turn is `session.rs`'s
     /// business and the same for both transports.
     logged: Vec<Logged>,
+    submitted: Vec<String>,
+    statuses: Vec<(String, &'static str)>,
 }
 
 impl Default for Ask {
@@ -631,13 +818,13 @@ impl Ask {
             client: None,
             state: State::Cold,
             input: String::new(),
+            cursor: None,
             turns: Vec::new(),
             link: None,
             t: 0.0,
             scroll: 0,
             reach: std::cell::Cell::new(0),
-            history: Vec::new(),
-            hist_at: None,
+            viewed: None,
             pick: 0,
             panel: None,
             goto: None,
@@ -650,6 +837,8 @@ impl Ask {
             drive: false,
             driving: false,
             logged: Vec::new(),
+            submitted: Vec::new(),
+            statuses: Vec::new(),
         }
     }
 
@@ -690,8 +879,45 @@ impl Ask {
         std::mem::take(&mut self.logged)
     }
 
+    pub fn drain_submitted(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.submitted)
+    }
+
+    pub fn drain_statuses(&mut self) -> Vec<(String, &'static str)> {
+        std::mem::take(&mut self.statuses)
+    }
+
+    /// Seed the page with completed exchanges belonging to this stable visitor.
+    pub fn restore(&mut self, saved: Vec<SavedTurn>) {
+        self.turns = saved
+            .into_iter()
+            .map(|turn| Turn {
+                q: turn.q,
+                a: turn.a,
+                panel: turn.panel,
+                done: true,
+                ..Default::default()
+            })
+            .collect();
+        self.panel = self
+            .turns
+            .last()
+            .and_then(|turn| turn.panel.as_ref())
+            .and_then(Panel::held);
+        self.viewed = None;
+        self.scroll = 0;
+    }
+
     pub fn busy(&self) -> bool {
         matches!(self.state, State::Starting | State::Thinking)
+    }
+
+    pub fn can_leave(&self) -> bool {
+        self.state != State::Thinking
+            && self.input.is_empty()
+            && self.viewed.is_none()
+            && self.scroll == 0
+            && !self.picking()
     }
 
     pub fn tick(&mut self, dt: f64) {
@@ -702,8 +928,11 @@ impl Ask {
         // Tool calls before agent events, so a `show_map` that arrived in the
         // same instant as the answer finishing is not treated as a turn that
         // never asked for one.
-        let orders: Vec<_> =
-            self.orders.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        let orders: Vec<_> = self
+            .orders
+            .as_ref()
+            .map(|rx| rx.try_iter().collect())
+            .unwrap_or_default();
         for d in orders {
             self.obey(d);
         }
@@ -713,21 +942,44 @@ impl Ask {
         }
     }
 
+    fn capture_panel(&mut self) {
+        let saved = self.panel.as_ref().and_then(Panel::saved);
+        if let Some(turn) = self.turns.last_mut() {
+            turn.panel = saved;
+        }
+    }
+
+    fn clear_turn_panel(&mut self) {
+        if let Some(turn) = self.turns.last_mut() {
+            turn.panel = None;
+        }
+    }
+
     /// Raise the nth project's panel, as though an agent had asked for it.
     ///
     /// For `--snapshot --section ask --scroll N`, which is how these are looked
     /// at: a panel otherwise needs a live model to decide to draw one, and
     /// "render it and look" is the only way anything in this app gets tuned.
     pub fn show_work(&mut self, n: usize) {
-        let ids: Vec<String> =
-            crate::mcp::project_ids().iter().map(|s| s.to_string()).collect();
-        let Some(id) = ids.get(n).cloned() else { return };
-        self.panel = Some(Panel::new(Show::Work(Work { id, mark: true, diagram: true })));
+        let ids: Vec<String> = crate::mcp::project_ids()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let Some(id) = ids.get(n).cloned() else {
+            return;
+        };
+        self.panel = Some(Panel::new(Show::Work(Work {
+            id,
+            mark: true,
+            diagram: true,
+        })));
         if let Some(p) = &mut self.panel {
             // Straight to held: a snapshot of the first frame of a fade is a
             // picture of a fade, not of the thing.
             p.life = Life::Held;
             p.since = 9.0;
+            p.story = 9.0;
+            p.live = false;
         }
     }
 
@@ -747,9 +999,20 @@ impl Ask {
             // this replaces that row rather than adding a second one -- keyed by
             // the tool and its argument, which is what makes them the same call.
             Directive::Called { tool, detail } => {
+                // Closing a view is a quiet state change, not a unit of work in
+                // the transcript. The fade itself is the feedback.
+                if tool == "hide_map" {
+                    return;
+                }
                 if let Some(t) = self.turns.last_mut() {
                     let id = format!("ours-{}-{}", tool, t.calls.len());
-                    t.calls.push(Call { id, title: tool, status: Status::Done, detail });
+                    t.calls.push(Call {
+                        id,
+                        title: tool,
+                        status: Status::Done,
+                        detail,
+                        rendered: false,
+                    });
                 }
             }
             Directive::Work { id, mark, diagram } => {
@@ -761,23 +1024,56 @@ impl Ask {
                     if let Some(p) = &mut self.panel {
                         p.leave();
                     }
+                    self.clear_turn_panel();
                     return;
                 }
                 let work = Work { id, mark, diagram };
+                let source = mark_rendered(&mut self.turns);
                 match &mut self.panel {
                     // Already showing this project: change what of it is on
                     // screen without fading out and in again. Asking for the
                     // diagram after the mark is one picture growing, not two
                     // pictures.
-                    Some(p @ Panel { what: Show::Work(_), .. }) => {
+                    Some(
+                        p @ Panel {
+                            what: Show::Work(_),
+                            ..
+                        },
+                    ) => {
                         p.what = Show::Work(work);
+                        p.source = source;
+                        p.story = 0.0;
+                        p.live = true;
                         if p.life == Life::Leaving {
                             p.life = Life::Arriving;
                             p.since = 0.0;
                         }
                     }
-                    _ => self.panel = Some(Panel::new(Show::Work(work))),
+                    _ => self.panel = Some(Panel::from_tool(Show::Work(work), source)),
                 }
+                self.capture_panel();
+            }
+            Directive::Diagram(spec) => {
+                let source = mark_rendered(&mut self.turns);
+                match &mut self.panel {
+                    Some(
+                        p @ Panel {
+                            what: Show::Diagram(_),
+                            ..
+                        },
+                    ) => {
+                        p.what = Show::Diagram(spec);
+                        p.source = source;
+                        p.since = 0.0;
+                        p.story = 0.0;
+                        p.live = true;
+                        if p.life == Life::Leaving {
+                            p.life = Life::Arriving;
+                        }
+                    }
+                    _ => self.panel = Some(Panel::from_tool(Show::Diagram(spec), source)),
+                }
+                self.capture_panel();
             }
             Directive::Map { stops } => {
                 let stops: Vec<Spot> = stops
@@ -799,28 +1095,39 @@ impl Ask {
                     })
                     .collect();
                 if stops.is_empty() {
+                    self.clear_turn_panel();
                     return;
                 }
                 let tour = Tour { stops, at: 0 };
+                let source = mark_rendered(&mut self.turns);
                 match &mut self.panel {
                     // Already showing a map: change where it is looking rather
                     // than fading one out and another in. The flight is the
                     // shell's -- see `Locator` -- and a cross-fade would hide
                     // exactly the motion that makes the move legible.
-                    Some(p @ Panel { what: Show::Place(_), .. }) => {
+                    Some(
+                        p @ Panel {
+                            what: Show::Place(_),
+                            ..
+                        },
+                    ) => {
                         p.what = Show::Place(tour);
+                        p.source = source;
+                        p.live = true;
                         if p.life == Life::Leaving {
                             p.life = Life::Arriving;
                             p.since = 0.0;
                         }
                     }
-                    _ => self.panel = Some(Panel::new(Show::Place(tour))),
+                    _ => self.panel = Some(Panel::from_tool(Show::Place(tour), source)),
                 }
+                self.capture_panel();
             }
             Directive::Clear => {
                 if let Some(p) = &mut self.panel {
                     p.leave();
                 }
+                self.clear_turn_panel();
             }
         }
     }
@@ -905,12 +1212,19 @@ impl Ask {
                     }
                 }
                 Event::Done => {
+                    if let Some(panel) = &mut self.panel {
+                        panel.keep_looping();
+                    }
+                    if self.turns.last().is_some_and(|turn| turn.panel.is_some()) {
+                        self.capture_panel();
+                    }
                     if let Some(t) = self.turns.last_mut() {
                         t.done = true;
                         self.logged.push(Logged {
                             q: t.q.clone(),
                             a: t.a.clone(),
                             spent: t.spent,
+                            panel: t.panel.clone(),
                         });
                     }
                     // The answer is in and it never asked for a picture, so
@@ -918,7 +1232,8 @@ impl Ask {
                     // goes -- but only now, not when the question was asked:
                     // clearing on submit empties the column and then refills it,
                     // and a follow-up about the same place should not flicker.
-                    if !self.directed {
+                    let has_view = self.turns.last().is_some_and(|turn| turn.panel.is_some());
+                    if !self.directed && !has_view {
                         if let Some(p) = &mut self.panel {
                             p.leave();
                         }
@@ -928,9 +1243,13 @@ impl Ask {
                 // Stopped on purpose, so the section goes back to ready rather
                 // than to failed -- nothing is wrong and the tier is fine.
                 Event::Cancelled => {
+                    if let Some(panel) = &mut self.panel {
+                        panel.keep_looping();
+                    }
                     if let Some(t) = self.turns.last_mut() {
                         t.done = true;
                         t.cancelled = true;
+                        self.statuses.push((t.q.clone(), "cancelled"));
                         if t.a.trim().is_empty() {
                             t.a = "Stopped.".into();
                         }
@@ -938,8 +1257,12 @@ impl Ask {
                     self.state = State::Ready;
                 }
                 Event::Failed(m) => {
+                    if let Some(panel) = &mut self.panel {
+                        panel.keep_looping();
+                    }
                     if let Some(t) = self.turns.last_mut() {
                         t.done = true;
+                        self.statuses.push((t.q.clone(), "failed"));
                     }
                     self.state = State::Failed(m);
                 }
@@ -948,6 +1271,7 @@ impl Ask {
     }
 
     pub fn submit(&mut self) {
+        self.return_live();
         let q = self.input.trim().to_string();
         if q.is_empty() {
             return;
@@ -963,23 +1287,27 @@ impl Ask {
         if self.busy() && !control {
             return;
         }
+        self.submitted.push(q.clone());
         if q.starts_with('/') {
             match self.local(&q) {
                 Local::Said(said) => {
-                    self.history.push(q.clone());
-                    self.hist_at = None;
                     self.logged.push(Logged::local(q.clone(), said.clone()));
-                    self.turns.push(Turn { q, a: said, done: true, ..Default::default() });
+                    self.turns.push(Turn {
+                        q,
+                        a: said,
+                        done: true,
+                        ..Default::default()
+                    });
                     self.input.clear();
                     self.scroll = 0;
+                    self.viewed = None;
                     return;
                 }
                 // Handled, and nothing to say. Falling through here is what sent
                 // `/map` to a language model as a question.
                 Local::Done => {
-                    self.history.push(q);
-                    self.hist_at = None;
                     self.scroll = 0;
+                    self.viewed = None;
                     return;
                 }
                 Local::Not => {}
@@ -988,13 +1316,21 @@ impl Ask {
         // Nothing asked for a panel yet this turn. Whatever is on screen stays
         // until the answer says otherwise.
         self.directed = false;
-        self.look(&q);
+        if let Some(panel) = &mut self.panel {
+            panel.keep_looping();
+        }
+        let guessed = self.look(&q);
         let Some(c) = &self.client else { return };
         c.send(&q);
-        self.history.push(q.clone());
-        self.hist_at = None;
-        self.turns.push(Turn { q, ..Default::default() });
+        self.turns.push(Turn {
+            q,
+            ..Default::default()
+        });
+        if guessed {
+            self.capture_panel();
+        }
         self.input.clear();
+        self.viewed = None;
         self.state = State::Thinking;
         // Always show the newest exchange; the alternative is typing a question
         // and watching nothing happen because you were scrolled up.
@@ -1019,8 +1355,8 @@ impl Ask {
             "/help" => {
                 let mut s = String::from(
                     "Type a question and press enter. `/` opens the commands; the \
-                     arrows walk them, tab takes one. Up on an empty line brings \
-                     back what you asked before, the wheel and page up scroll, and \
+                     arrows walk them, tab takes one. Up and down on an empty line \
+                     revisit completed answers, the wheel and page up scroll, and \
                      escape stops an answer that is still coming.\n\n",
                 );
                 for (cmd, help) in COMMANDS {
@@ -1060,13 +1396,16 @@ impl Ask {
             "/clear" => {
                 self.turns.clear();
                 self.panel = None;
+                self.viewed = None;
                 self.scroll = 0;
                 self.input.clear();
                 return Local::Done;
             }
-            "/keys" => "enter  ask          /  commands     up  what you asked before\n\
-                        esc    stop         tab  take one    wheel / pgup  scroll\n\
-                        ctrl-u clear the line              tab  leave the section\n\
+            "/keys" => "enter  ask          shift-enter  new line      /  commands\n\
+                        arrows move cursor  ctrl/alt-left/right  move by word\n\
+                        tab    take one     ctrl/alt-backspace  delete word\n\
+                        up/down completed answers           wheel / pgup  scroll\n\
+                        ctrl-u clear input  esc  stop, clear, or back home\n\
                         \n\
                         the map, when one is up:\n\
                         /drive  or ctrl-e   give it the keyboard, then every key\n\
@@ -1148,7 +1487,10 @@ impl Ask {
             }
         }
         match &self.panel {
-            Some(Panel { what: Show::Place(tour), .. }) => tour.here().id.clone(),
+            Some(Panel {
+                what: Show::Place(tour),
+                ..
+            }) => tour.here().id.clone(),
             _ => None,
         }
     }
@@ -1158,31 +1500,38 @@ impl Ask {
     /// The credential first, because it is the narrower match: a question about
     /// a badge is about a badge, and one that also happens to contain a place
     /// name should still draw the badge.
-    fn look(&mut self, q: &str) {
+    fn look(&mut self, q: &str) -> bool {
         // Once the agent has driven this page even once, stop reading the
         // question. Guessing was only ever a stand-in for a model that could
         // not ask, and two opinions about what belongs on screen fight: the
         // keyword match would raise Gateway Corp while the agent was flying the
         // map to Jaipur. Tiers that cannot reach the tool server keep the guess.
         if self.agent_drives {
-            return;
+            return false;
         }
         if asks_about_the_cert(q) {
-            if !matches!(&self.panel, Some(Panel { what: Show::Cert, .. })) {
+            if !matches!(
+                &self.panel,
+                Some(Panel {
+                    what: Show::Cert,
+                    ..
+                })
+            ) {
                 self.panel = Some(Panel::new(Show::Cert));
             }
-            return;
+            return true;
         }
         if let Some(spot) = spot_for(q, &self.atlas) {
             // Not re-raised when it is already the thing on screen: a second
             // question about the same place should leave the picture alone
             // rather than fade it in again underneath the answer.
-            let same =
-                matches!(&self.panel, Some(Panel { what: Show::Place(t), .. }) if *t.here() == spot);
+            let same = matches!(&self.panel, Some(Panel { what: Show::Place(t), .. }) if *t.here() == spot);
             if !same {
                 self.panel = Some(Panel::new(Show::Place(Tour::one(spot))));
             }
+            return true;
         }
+        false
     }
 
     /// Put a code on the page.
@@ -1203,20 +1552,35 @@ impl Ask {
              The other one is /coffee card.",
             code.how, code.payload
         );
-        self.logged.push(Logged::local(
-            format!("/coffee {which}").trim_end().to_string(),
-            said.clone(),
-        ));
         self.panel = Some(Panel::new(Show::Code(code)));
         self.turns.push(Turn {
-            q: if which.is_empty() { "/coffee".into() } else { format!("/coffee {which}") },
+            q: if which.is_empty() {
+                "/coffee".into()
+            } else {
+                format!("/coffee {which}")
+            },
             a: said,
             code: Some(code),
             done: true,
             ..Default::default()
         });
+        if let Some(panel) = &mut self.panel {
+            panel.live = false;
+        }
+        self.capture_panel();
+        self.logged.push(Logged {
+            q: format!("/coffee {which}").trim_end().to_string(),
+            a: self
+                .turns
+                .last()
+                .map(|turn| turn.a.clone())
+                .unwrap_or_default(),
+            spent: None,
+            panel: self.turns.last().and_then(|turn| turn.panel.clone()),
+        });
         self.input.clear();
         self.scroll = 0;
+        self.viewed = None;
     }
 
     /// Put the badge on the page.
@@ -1235,11 +1599,30 @@ impl Ask {
             crate::cert::ISSUER,
             crate::cert::SHOWN,
         );
-        self.logged.push(Logged::local("/cert".to_string(), said.clone()));
         self.panel = Some(Panel::new(Show::Cert));
-        self.turns.push(Turn { q: "/cert".into(), a: said, done: true, ..Default::default() });
+        self.turns.push(Turn {
+            q: "/cert".into(),
+            a: said,
+            done: true,
+            ..Default::default()
+        });
+        if let Some(panel) = &mut self.panel {
+            panel.live = false;
+        }
+        self.capture_panel();
+        self.logged.push(Logged {
+            q: "/cert".to_string(),
+            a: self
+                .turns
+                .last()
+                .map(|turn| turn.a.clone())
+                .unwrap_or_default(),
+            spent: None,
+            panel: self.turns.last().and_then(|turn| turn.panel.clone()),
+        });
         self.input.clear();
         self.scroll = 0;
+        self.viewed = None;
     }
 
     /// Put a message in the file, and answer in the transcript so it reads as
@@ -1249,7 +1632,11 @@ impl Ask {
         // What went on the line, rebuilt rather than kept: `local` splits the
         // command off the message, and the transcript should read back the way
         // it was typed.
-        let line = if body.is_empty() { "/reach".to_string() } else { format!("/reach {body}") };
+        let line = if body.is_empty() {
+            "/reach".to_string()
+        } else {
+            format!("/reach {body}")
+        };
         let said = match crate::reach::leave("", body, &crate::reach::origin()) {
             Sent::Ok => "Left with him. He reads these by hand, so it may be a \
                          few days -- and there is no reply address unless you \
@@ -1279,18 +1666,14 @@ impl Ask {
         });
         self.input.clear();
         self.scroll = 0;
+        self.viewed = None;
     }
 
     /// Whether the command palette is open: the line is a command being typed
     /// and has no argument yet.
     pub fn picking(&self) -> bool {
-        // Not while the up arrow is walking the history. Recalling `/keys` puts
-        // a slash on the line without anybody typing one, and if that reopened
-        // the palette the next press would move through commands instead of
-        // carrying on backwards -- which is what it was pressed for.
-        self.hist_at.is_none()
-            && self.input.starts_with('/')
-            && !self.input.contains(' ')
+        self.input.starts_with('/')
+            && !self.input.chars().any(char::is_whitespace)
             && !self.choices().is_empty()
     }
 
@@ -1319,32 +1702,180 @@ impl Ask {
 
     /// Move through the scrollback. Positive is backwards, into the past.
     pub fn scroll_by(&mut self, rows: i32) {
+        self.return_live();
         let reach = self.reach.get();
         let want = self.scroll as i32 + rows;
         self.scroll = want.clamp(0, reach as i32) as usize;
     }
 
-    /// Walk the questions already asked. `-1` is older, `+1` newer.
-    fn walk_history(&mut self, dir: i32) {
-        if self.history.is_empty() {
+    /// Walk completed answers. `-1` is older, `+1` newer.
+    fn walk_answers(&mut self, dir: i32) {
+        let completed: Vec<usize> = self
+            .turns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, turn)| turn.done.then_some(index))
+            .collect();
+        if completed.is_empty() {
             return;
         }
-        let at = match (self.hist_at, dir) {
-            (None, -1) => self.history.len() - 1,
+        let position = self
+            .viewed
+            .and_then(|selected| completed.iter().position(|index| *index == selected));
+        let at = match (position, dir) {
+            (None, -1) => completed.len() - 1,
             (None, _) => return,
             (Some(0), -1) => 0,
             (Some(i), -1) => i - 1,
-            (Some(i), _) if i + 1 < self.history.len() => i + 1,
-            // Walked forward off the end: back to whatever was being typed,
-            // which is an empty line because that is where this started.
+            (Some(i), _) if i + 1 < completed.len() => i + 1,
             (Some(_), _) => {
-                self.hist_at = None;
-                self.input.clear();
+                self.viewed = None;
+                self.panel = self
+                    .turns
+                    .last()
+                    .and_then(|turn| turn.panel.as_ref())
+                    .and_then(Panel::held);
                 return;
             }
         };
-        self.hist_at = Some(at);
-        self.input = self.history[at].clone();
+        let selected = completed[at];
+        self.viewed = Some(selected);
+        self.panel = self.turns[selected].panel.as_ref().and_then(Panel::held);
+        self.scroll = 0;
+    }
+
+    fn return_live(&mut self) {
+        if self.viewed.take().is_some() {
+            self.panel = self
+                .turns
+                .last()
+                .and_then(|turn| turn.panel.as_ref())
+                .and_then(Panel::held);
+        }
+    }
+
+    fn cursor_at(&self) -> usize {
+        self.cursor
+            .filter(|at| *at <= self.input.len() && self.input.is_char_boundary(*at))
+            .unwrap_or(self.input.len())
+    }
+
+    fn set_cursor(&mut self, at: usize) {
+        self.cursor = (at < self.input.len()).then_some(at);
+    }
+
+    fn insert(&mut self, ch: char) {
+        let at = self.cursor_at();
+        self.input.insert(at, ch);
+        if self.cursor.is_some() {
+            self.set_cursor(at + ch.len_utf8());
+        }
+    }
+
+    fn backspace(&mut self) {
+        let at = self.cursor_at();
+        if at == 0 {
+            return;
+        }
+        let start = previous_char(&self.input, at);
+        self.input.replace_range(start..at, "");
+        self.set_cursor(start);
+    }
+
+    fn delete(&mut self) {
+        let at = self.cursor_at();
+        if at == self.input.len() {
+            return;
+        }
+        let end = next_char(&self.input, at);
+        self.input.replace_range(at..end, "");
+        self.set_cursor(at);
+    }
+
+    fn move_cursor(&mut self, by: i32, words: bool) {
+        let mut at = self.cursor_at();
+        if by < 0 {
+            if words {
+                while at > 0
+                    && self.input[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_whitespace)
+                {
+                    at = previous_char(&self.input, at);
+                }
+                while at > 0
+                    && self.input[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| !c.is_whitespace())
+                {
+                    at = previous_char(&self.input, at);
+                }
+            } else if at > 0 {
+                at = previous_char(&self.input, at);
+            }
+        } else if words {
+            while at < self.input.len()
+                && self.input[at..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_whitespace())
+            {
+                at = next_char(&self.input, at);
+            }
+            while at < self.input.len()
+                && self.input[at..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+            {
+                at = next_char(&self.input, at);
+            }
+        } else if at < self.input.len() {
+            at = next_char(&self.input, at);
+        }
+        self.set_cursor(at);
+    }
+
+    fn move_to_line_edge(&mut self, end: bool) {
+        let at = self.cursor_at();
+        let line_start = self.input[..at].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = self.input[at..]
+            .find('\n')
+            .map_or(self.input.len(), |i| at + i);
+        self.set_cursor(if end { line_end } else { line_start });
+    }
+
+    fn move_line(&mut self, by: i32) {
+        let at = self.cursor_at();
+        let start = self.input[..at].rfind('\n').map_or(0, |i| i + 1);
+        let column = self.input[start..at].chars().count();
+        let (next_start, next_end) = if by < 0 {
+            if start == 0 {
+                return;
+            }
+            let end = start - 1;
+            let start = self.input[..end].rfind('\n').map_or(0, |i| i + 1);
+            (start, end)
+        } else {
+            let end = self.input[at..]
+                .find('\n')
+                .map_or(self.input.len(), |i| at + i);
+            if end == self.input.len() {
+                return;
+            }
+            let start = end + 1;
+            let end = self.input[start..]
+                .find('\n')
+                .map_or(self.input.len(), |i| start + i);
+            (start, end)
+        };
+        let offset = self.input[next_start..next_end]
+            .char_indices()
+            .nth(column)
+            .map_or(next_end - next_start, |(i, _)| i);
+        self.set_cursor(next_start + offset);
     }
 
     pub fn on_key(&mut self, k: crossterm::event::KeyEvent) {
@@ -1352,7 +1883,7 @@ impl Ask {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // Three things want the arrows, so the order is fixed here rather than
         // fought over further down: the palette while it is open, then the
-        // history, and the scrollback is on its own keys entirely.
+        // completed answers, and the scrollback is on its own keys entirely.
         match k.code {
             KeyCode::Up if self.picking() => {
                 self.pick = self.picked().saturating_sub(1);
@@ -1366,12 +1897,20 @@ impl Ask {
                 self.complete();
                 return;
             }
-            KeyCode::Up => {
-                self.walk_history(-1);
+            KeyCode::Up if self.input.is_empty() => {
+                self.walk_answers(-1);
                 return;
             }
-            KeyCode::Down => {
-                self.walk_history(1);
+            KeyCode::Down if self.input.is_empty() => {
+                self.walk_answers(1);
+                return;
+            }
+            KeyCode::Up if !self.input.is_empty() => {
+                self.move_line(-1);
+                return;
+            }
+            KeyCode::Down if !self.input.is_empty() => {
+                self.move_line(1);
                 return;
             }
             KeyCode::PageUp => {
@@ -1386,6 +1925,16 @@ impl Ask {
         }
 
         match k.code {
+            KeyCode::Enter
+                if k.modifiers.contains(KeyModifiers::SHIFT)
+                    && !k
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.return_live();
+                self.insert('\n');
+                self.pick = 0;
+            }
             // Enter takes the highlighted command rather than the half-typed
             // one: having arrowed to `/projects`, pressing enter should not run
             // `/pj`.
@@ -1397,16 +1946,44 @@ impl Ask {
                 }
             }
             KeyCode::Enter => self.submit(),
-            KeyCode::Backspace => {
-                self.input.pop();
+            KeyCode::Backspace
+                if k
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.return_live();
+                let at = self.cursor_at();
+                let start = delete_word_before(&mut self.input, at);
+                self.set_cursor(start);
                 self.pick = 0;
             }
+            KeyCode::Backspace => {
+                self.return_live();
+                self.backspace();
+                self.pick = 0;
+            }
+            KeyCode::Delete => {
+                self.return_live();
+                self.delete();
+                self.pick = 0;
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let words = k
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                self.move_cursor(if k.code == KeyCode::Left { -1 } else { 1 }, words);
+            }
+            KeyCode::Home => self.move_to_line_edge(false),
+            KeyCode::End => self.move_to_line_edge(true),
             // Escape does the most local thing available: close the palette,
             // else stop the answer, else clear the line. Cancelling is
             // cooperative -- the wait carries on until the agent answers.
             KeyCode::Esc => {
-                if self.picking() {
+                if self.viewed.is_some() {
+                    self.return_live();
+                } else if self.picking() {
                     self.input.clear();
+                    self.cursor = None;
                 } else if self.state == State::Thinking {
                     if let Some(c) = &self.client {
                         c.cancel();
@@ -1415,9 +1992,13 @@ impl Ask {
                     self.scroll = 0;
                 } else {
                     self.input.clear();
+                    self.cursor = None;
                 }
             }
-            KeyCode::Char('u') if ctrl => self.input.clear(),
+            KeyCode::Char('u') if ctrl => {
+                self.input.clear();
+                self.cursor = None;
+            }
             // Walking the route at the side. Ctrl rather than a bare key
             // because every bare key in this section is a letter somebody is
             // trying to type, and these have to work while a question is being
@@ -1428,9 +2009,9 @@ impl Ask {
             // instead of quitting.
             KeyCode::Char(c) if !ctrl && !k.modifiers.contains(KeyModifiers::ALT) => {
                 if words(&self.input) < MAX_WORDS {
-                    self.input.push(c);
+                    self.return_live();
+                    self.insert(c);
                     self.pick = 0;
-                    self.hist_at = None;
                 }
             }
             _ => {}
@@ -1442,8 +2023,15 @@ impl Ask {
     /// The camera flies rather than cuts -- the shell reads the current stop
     /// each frame and moves to it, so this only has to say which one.
     pub fn walk(&mut self, by: i32) {
-        if let Some(Panel { what: Show::Place(tour), .. }) = &mut self.panel {
+        if let Some(Panel {
+            what: Show::Place(tour),
+            ..
+        }) = &mut self.panel
+        {
             tour.step(by);
+        }
+        if self.viewed.is_none() {
+            self.capture_panel();
         }
     }
 
@@ -1452,6 +2040,7 @@ impl Ask {
         let choices = self.choices();
         if let Some((name, _)) = choices.get(self.picked()) {
             self.input = name.to_string();
+            self.cursor = None;
             self.pick = 0;
         }
     }
@@ -1473,12 +2062,76 @@ fn panel_cols(area: Rect, a: &Ask) -> u16 {
         // a wide page. A place needs only somewhere to write its name: the map
         // itself is the page's ground now and takes whatever room there is, so
         // the column is for the caption and can be much narrower.
-        Some(p @ Panel { what: Show::Place(_), .. }) if area.width >= 60 => {
-            panel_width(p, area).min(area.width / 2)
-        }
+        Some(
+            p @ Panel {
+                what: Show::Place(_),
+                ..
+            },
+        ) if area.width >= 60 => panel_width(p, area).min(area.width / 2),
+        // Generated explainers are a reading surface of their own. Unlike a
+        // map, their labels and flow lines cannot sit behind prose and remain
+        // legible, so this column is the exact canvas the shell will draw.
+        Some(
+            p @ Panel {
+                what: Show::Diagram(_) | Show::Work(_),
+                ..
+            },
+        ) if area.width >= 96 => panel_width(p, area).min(area.width.saturating_sub(46)),
         Some(p) if area.width >= 96 => panel_width(p, area).min(area.width / 2),
         _ => 0,
     }
+}
+
+const MAX_QUESTION_LINES: usize = 5;
+const CURSOR_MARK: char = '\0';
+
+fn page_cols(area: Rect, a: &Ask) -> u16 {
+    area.width.saturating_sub(6 + panel_cols(area, a))
+}
+
+fn push_edit(lines: &mut Vec<String>, column: &mut usize, cols: usize, ch: char) {
+    if *column == cols {
+        lines.push(String::new());
+        *column = 0;
+    }
+    lines.last_mut().unwrap().push(ch);
+    *column += 1;
+}
+
+fn editable_lines(input: &str, width: u16, cursor: Option<usize>) -> Vec<String> {
+    let cols = width.saturating_sub(2).max(1) as usize;
+    let mut lines = vec![String::new()];
+    let mut column = 0;
+    for (at, ch) in input.char_indices() {
+        if cursor == Some(at) {
+            push_edit(&mut lines, &mut column, cols, CURSOR_MARK);
+        }
+        if ch == '\n' {
+            lines.push(String::new());
+            column = 0;
+            continue;
+        }
+        push_edit(&mut lines, &mut column, cols, ch);
+    }
+    if cursor == Some(input.len()) {
+        push_edit(&mut lines, &mut column, cols, CURSOR_MARK);
+    }
+    lines
+}
+
+fn question_height(area: Rect, a: &Ask) -> u16 {
+    let rows = if a.driving || a.input.is_empty() {
+        1
+    } else {
+        editable_lines(
+            &a.input,
+            page_cols(area, a),
+            (!a.busy()).then(|| a.cursor_at()),
+        )
+            .len()
+            .min(MAX_QUESTION_LINES) as u16
+    };
+    rows + 1
 }
 
 /// Where the panel sits on the page, if there is one.
@@ -1487,8 +2140,12 @@ fn panel_rect(area: Rect, a: &Ask) -> Option<Rect> {
     if w == 0 {
         return None;
     }
-    let picks = if a.picking() { a.choices().len().min(7) as u16 } else { 0 };
-    let body = area.height.saturating_sub(2 + picks);
+    let picks = if a.picking() {
+        a.choices().len().min(7) as u16
+    } else {
+        0
+    };
+    let body = area.height.saturating_sub(question_height(area, a) + picks);
     Some(Rect {
         x: area.x + area.width - w - 1,
         y: area.y + 1,
@@ -1496,7 +2153,6 @@ fn panel_rect(area: Rect, a: &Ask) -> Option<Rect> {
         height: body.saturating_sub(1),
     })
 }
-
 
 /// The map a place panel wants drawn, and where.
 ///
@@ -1513,7 +2169,10 @@ fn panel_rect(area: Rect, a: &Ask) -> Option<Rect> {
 /// panel silently reset the camera, and a resize mid-flight restarted it.
 pub fn showing_place(a: &Ask) -> Option<&Spot> {
     match &a.panel {
-        Some(Panel { what: Show::Place(tour), .. }) => Some(tour.here()),
+        Some(Panel {
+            what: Show::Place(tour),
+            ..
+        }) => Some(tour.here()),
         _ => None,
     }
 }
@@ -1525,25 +2184,37 @@ pub fn showing_place(a: &Ask) -> Option<&Spot> {
 /// full body, behind everything, with the words written over the top. A
 /// `Paragraph` writes only the cells its text covers, so the map shows through
 /// around every line, and the shell knocks it back under the reading column so
-/// Where a project goes, and which one.
-///
-/// The same shape as `map_panel` and deliberately so: a picture beside the
-/// answer, on the right, ending where it ends. A visitor should not have to
-/// learn a second layout because the subject changed from a place to a project.
-pub fn work_panel(area: Rect, a: &Ask) -> Option<(Rect, Work, f32)> {
+/// Where a project goes, and which one. Project art is a canvas view, unlike the
+/// map underneath the page, so it uses the same reserved column as explainers.
+pub fn work_panel(area: Rect, a: &Ask) -> Option<(Rect, Work, f32, f64)> {
     if area.width < 30 || area.height < 8 {
         return None;
     }
     let p = a.panel.as_ref()?;
-    let Show::Work(work) = &p.what else { return None };
-    let w = (area.width * 3 / 5).max(40).min(area.width);
-    let at = Rect {
-        x: area.x + area.width - w,
-        width: w,
-        height: area.height.saturating_sub(2),
-        ..area
+    let Show::Work(work) = &p.what else {
+        return None;
     };
-    (at.height >= 8 && at.width >= 30).then_some((at, work.clone(), p.fade()))
+    let at = panel_rect(area, a)?;
+    (at.height >= 8 && at.width >= 30).then_some((at, work.clone(), p.fade(), p.story))
+}
+
+/// Where a generated explainer goes, and whether its story is still live.
+///
+/// This is deliberately the reserved panel rect, not the map's wider overlay.
+/// Flow labels need a clean canvas; terrain can dissolve behind prose.
+pub fn diagram_panel(
+    area: Rect,
+    a: &Ask,
+) -> Option<(Rect, &skysheet::diagram::Spec, f32, f64, bool)> {
+    if area.width < 30 || area.height < 8 {
+        return None;
+    }
+    let p = a.panel.as_ref()?;
+    let Show::Diagram(spec) = &p.what else {
+        return None;
+    };
+    let at = panel_rect(area, a)?;
+    (at.height >= 8 && at.width >= 30).then_some((at, spec, p.fade(), p.story, p.live))
 }
 
 /// the prose still reads. Overlap is the point rather than a thing to avoid.
@@ -1552,7 +2223,9 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
         return None;
     }
     let p = a.panel.as_ref()?;
-    let Show::Place(tour) = &p.what else { return None };
+    let Show::Place(tour) = &p.what else {
+        return None;
+    };
     let spot = tour.here().clone();
     // The right of the page, and all of its height above the question line.
     //
@@ -1566,7 +2239,7 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
     let at = Rect {
         x: area.x + area.width - w,
         width: w,
-        height: area.height.saturating_sub(2),
+        height: area.height.saturating_sub(question_height(area, a)),
         ..area
     };
     (at.height >= 8 && at.width >= 30).then_some((at, spot, p.fade()))
@@ -1588,7 +2261,12 @@ pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32) {
             text,
             Style::default().fg(crate::paint::dim_to(crate::paint::lead(), alpha)),
         )),
-        Rect { x: area.x + area.width - w, y: area.y, width: w, height: 1 },
+        Rect {
+            x: area.x + area.width - w,
+            y: area.y,
+            width: w,
+            height: 1,
+        },
     );
 }
 
@@ -1599,8 +2277,15 @@ pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32) {
 /// suggestion exactly where the words are, and leave it alone everywhere else.
 pub fn prose_rect(area: Rect, a: &Ask) -> Rect {
     let gutter = 3u16;
-    let w = area.width.saturating_sub(gutter * 2 + panel_cols(area, a)).min(104);
-    Rect { x: area.x + gutter.saturating_sub(1), width: w + 2, ..area }
+    let w = area
+        .width
+        .saturating_sub(gutter * 2 + panel_cols(area, a))
+        .min(104);
+    Rect {
+        x: area.x + gutter.saturating_sub(1),
+        width: w + 2,
+        ..area
+    }
 }
 
 /// Where the map's own rect sits, for the shell's pointer test. Separate from
@@ -1619,15 +2304,20 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     // the words keep their own column and the picture arrives beside them.
     let panel_w = panel_cols(area, a);
     let gutter = 3u16;
-    let w = area.width.saturating_sub(gutter * 2 + panel_w);
+    let w = page_cols(area, a);
     let x = area.x + gutter;
 
-    // Two rows at the bottom for the question line and its rule, plus whatever
-    // the palette is showing above them.
+    // The question grows upward to five rows, plus its rule and whatever the
+    // palette is showing above it.
     let picks = if a.picking() { a.choices() } else { Vec::new() };
     let pick_rows = picks.len().min(7) as u16;
-    let foot = 2 + pick_rows;
-    let body = Rect { y: area.y, height: area.height.saturating_sub(foot), ..area };
+    let question_rows = question_height(area, a);
+    let foot = question_rows + pick_rows;
+    let body = Rect {
+        y: area.y,
+        height: area.height.saturating_sub(foot),
+        ..area
+    };
 
     // The page is as wide as the terminal; the prose inside it is not. A line
     // of a hundred and forty columns is a line the eye loses its place on, and
@@ -1638,7 +2328,8 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     if a.turns.is_empty() {
         opening(&mut lines, prose, a);
     }
-    for (i, t) in a.turns.iter().enumerate() {
+    let visible = a.viewed.unwrap_or_else(|| a.turns.len().saturating_sub(1));
+    for (i, t) in a.turns.iter().enumerate().take(visible + 1) {
         let live = i + 1 == a.turns.len() && a.busy();
         transcript(&mut lines, prose, t, a, live, panel_w == 0);
     }
@@ -1666,10 +2357,20 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         over.saturating_sub(a.scrolled().min(over))
     };
 
-    for (row, spans) in lines.into_iter().skip(top).take(body.height as usize).enumerate() {
+    for (row, spans) in lines
+        .into_iter()
+        .skip(top)
+        .take(body.height as usize)
+        .enumerate()
+    {
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { x, y: body.y + row as u16, width: w, height: 1 },
+            Rect {
+                x,
+                y: body.y + row as u16,
+                width: w,
+                height: 1,
+            },
         );
     }
 
@@ -1682,16 +2383,41 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
                 Style::default().fg(FAINT),
             ))
             .right_aligned(),
-            Rect { x, y: body.y, width: w, height: 1 },
+            Rect {
+                x,
+                y: body.y,
+                width: w,
+                height: 1,
+            },
         );
     }
 
     if let (Some(at), Some(p)) = (panel_rect(area, a), &a.panel) {
+        canvas_chrome(f, at, p);
         side(f, at, p);
     }
 
-    palette(f, Rect { x, y: area.y + area.height - foot, width: w, height: pick_rows }, &picks, a.picked());
-    question(f, Rect { x, y: area.y + area.height - 2, width: w, height: 2 }, a);
+    palette(
+        f,
+        Rect {
+            x,
+            y: area.y + area.height - foot,
+            width: w,
+            height: pick_rows,
+        },
+        &picks,
+        a.picked(),
+    );
+    question(
+        f,
+        Rect {
+            x,
+            y: area.y + area.height - question_rows,
+            width: w,
+            height: question_rows,
+        },
+        a,
+    );
 }
 
 /// The invitation, before anybody has asked anything.
@@ -1703,8 +2429,161 @@ fn opening(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
     }
     lines.push(vec![]);
     for s in SUGGESTIONS {
-        lines.push(vec![Span::styled(format!("  {s}"), Style::default().fg(FAINT))]);
+        lines.push(vec![Span::styled(
+            format!("  {s}"),
+            Style::default().fg(FAINT),
+        )]);
     }
+}
+
+const TOOL_SETTLED: Color = Color::Rgb(84, 214, 189);
+const TOOL_MOVING: Color = Color::Rgb(217, 164, 65);
+const TOOL_BROKEN: Color = Color::Rgb(201, 96, 74);
+const TOOL_LABEL: Color = Color::Rgb(125, 141, 143);
+const TOOL_RULE: Color = Color::Rgb(38, 49, 52);
+const TOOL_HI: Color = Color::Rgb(234, 242, 239);
+
+struct ToolWords {
+    running: &'static str,
+    done: &'static str,
+    failed: &'static str,
+    refused: &'static str,
+}
+
+fn tool_words(title: &str, count: usize) -> ToolWords {
+    let name: String = title
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if name.contains("searchweb") || name.contains("websearch") {
+        ToolWords {
+            running: "searching the web",
+            done: "searched the web",
+            failed: "web search failed",
+            refused: "web search refused",
+        }
+    } else if name.contains("fetchpage") || name.contains("webfetch") {
+        ToolWords {
+            running: "reading a page",
+            done: "read the page",
+            failed: "page read failed",
+            refused: "page read refused",
+        }
+    } else if name.contains("locateplace") {
+        match count > 1 {
+            true => ToolWords {
+                running: "finding places",
+                done: "found places",
+                failed: "place lookup failed",
+                refused: "place lookup refused",
+            },
+            false => ToolWords {
+                running: "finding a place",
+                done: "found a place",
+                failed: "place lookup failed",
+                refused: "place lookup refused",
+            },
+        }
+    } else if name.contains("locatevisitor") {
+        ToolWords {
+            running: "locating your connection",
+            done: "located your connection",
+            failed: "location lookup failed",
+            refused: "location lookup refused",
+        }
+    } else if name.contains("showmap") {
+        ToolWords {
+            running: "drawing the map",
+            done: "drew the map",
+            failed: "map didn't render",
+            refused: "map drawing refused",
+        }
+    } else if name.contains("previewdiagram") {
+        ToolWords {
+            running: "previewing the diagram",
+            done: "previewed the diagram",
+            failed: "diagram preview failed",
+            refused: "diagram preview refused",
+        }
+    } else if name.contains("showdiagram") {
+        ToolWords {
+            running: "drawing the diagram",
+            done: "drew the diagram",
+            failed: "diagram didn't render",
+            refused: "diagram drawing refused",
+        }
+    } else if name.contains("showproject") {
+        ToolWords {
+            running: "opening the project",
+            done: "opened the project",
+            failed: "project didn't open",
+            refused: "project view refused",
+        }
+    } else if name.contains("terminal") || name.contains("bash") || name == "shell" {
+        ToolWords {
+            running: "running a command",
+            done: "ran a command",
+            failed: "command failed",
+            refused: "command refused",
+        }
+    } else if name.contains("write") || name.contains("edit") || name.contains("patch") {
+        ToolWords {
+            running: "changing a file",
+            done: "changed a file",
+            failed: "file change failed",
+            refused: "file change refused",
+        }
+    } else {
+        ToolWords {
+            running: "using a tool",
+            done: "used a tool",
+            failed: "tool failed",
+            refused: "tool refused",
+        }
+    }
+}
+
+fn tool_label(title: &str, status: Status, count: usize) -> &'static str {
+    let words = tool_words(title, count);
+    match status {
+        Status::Running => words.running,
+        Status::Done => words.done,
+        Status::Failed => words.failed,
+        Status::Refused => words.refused,
+    }
+}
+
+fn mark_rendered(turns: &mut [Turn]) -> Option<String> {
+    let call = turns.last_mut()?.calls.last_mut()?;
+    call.rendered = true;
+    Some(tool_label(&call.title, call.status, 1).to_string())
+}
+
+fn tool_head(
+    rail: &str,
+    glyph: &str,
+    label: &str,
+    meta: &str,
+    w: u16,
+    glyph_colour: Color,
+    label_colour: Color,
+) -> Vec<Span<'static>> {
+    let fixed = rail.chars().count() + glyph.chars().count() + 2;
+    let meta_width = meta.chars().count();
+    let label_room =
+        (w as usize).saturating_sub(fixed + meta_width + usize::from(!meta.is_empty()));
+    let label = ellipsis(label, label_room);
+    let gap = (w as usize)
+        .saturating_sub(fixed + label.chars().count() + meta_width)
+        .max(usize::from(!meta.is_empty()));
+    vec![
+        Span::styled(format!("{rail} "), Style::default().fg(TOOL_RULE)),
+        Span::styled(format!("{glyph} "), Style::default().fg(glyph_colour)),
+        Span::styled(label, Style::default().fg(label_colour)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(meta.to_string(), Style::default().fg(TOOL_RULE)),
+    ]
 }
 
 /// One exchange, question then tools then answer then whatever it drew.
@@ -1720,20 +2599,22 @@ fn transcript(
     inline_code: bool,
 ) {
     let lead = crate::paint::lead();
-    for (i, l) in wrap(&t.q, w.saturating_sub(2) as usize).into_iter().enumerate() {
+    for (i, l) in wrap(&t.q, w.saturating_sub(2) as usize)
+        .into_iter()
+        .enumerate()
+    {
         lines.push(vec![
-            Span::styled(if i == 0 { "\u{203a} " } else { "  " }, Style::default().fg(lead)),
+            Span::styled(
+                if i == 0 { "\u{203a} " } else { "  " },
+                Style::default().fg(lead),
+            ),
             Span::styled(l, Style::default().fg(lead).add_modifier(Modifier::BOLD)),
         ]);
     }
     lines.push(vec![]);
 
-    // Grouped by tool, not one flat row per call. An answer that walks a
-    // visitor through eight places calls the same tool eight times, and eight
-    // rows repeating the same name is a wall with the interesting part -- which
-    // places -- hidden in the right-hand column. The name is said once and its
-    // arguments listed under it.
-    const NAME_COL: usize = 15;
+    // One rail ties every call in the turn together. Repeated calls still group
+    // under one human label; their targets hang from the same rail below it.
     let mut at = 0;
     while at < t.calls.len() {
         let title = t.calls[at].title.as_str();
@@ -1750,45 +2631,78 @@ fn transcript(
             .iter()
             .map(|c| c.status)
             .max_by_key(|s| match s {
-                Status::Running => 3,
+                Status::Failed => 3,
                 Status::Refused => 2,
-                Status::Failed => 1,
+                Status::Running => 1,
                 Status::Done => 0,
             })
             .unwrap_or(Status::Done);
-        let (glyph, colour) = match status {
+        let rendered = group.iter().any(|call| call.rendered);
+        let (glyph, glyph_colour, label_colour) = match status {
             Status::Running => (
                 ["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"][((a.t * 6.0) as usize) % 4],
-                lead,
+                TOOL_MOVING,
+                TOOL_HI,
             ),
-            Status::Done => ("\u{2713}", DIM),
-            Status::Failed => ("\u{00d7}", ACCENT),
-            Status::Refused => ("\u{2300}", ACCENT),
+            Status::Done if rendered => ("\u{25a3}", TOOL_SETTLED, FG),
+            Status::Done => ("\u{2713}", DIM, TOOL_LABEL),
+            Status::Failed => ("\u{2717}", TOOL_BROKEN, TOOL_BROKEN),
+            Status::Refused => ("\u{2298}", TOOL_BROKEN, TOOL_BROKEN),
         };
-        let label = if title.is_empty() { "tool" } else { title };
-        // A count only when there is one, and only when the arguments do not
-        // already say it: `locate_place x8` above eight named places is telling
-        // the reader something they can see.
-        let named: Vec<&Call> = group.iter().filter(|c| !c.detail.trim().is_empty()).collect();
-        let head = if named.is_empty() && group.len() > 1 {
-            format!("{label}  \u{00d7}{}", group.len())
+        let named: Vec<&Call> = group
+            .iter()
+            .filter(|c| !c.detail.trim().is_empty())
+            .collect();
+        let last_group = at == t.calls.len();
+        let closes_below = last_group && (!named.is_empty() || rendered);
+        let rail = if at == group.len() {
+            "\u{256d}"
+        } else if last_group && !closes_below {
+            "\u{2570}"
         } else {
-            label.to_string()
+            "\u{251c}"
         };
-        let room = (w as usize).saturating_sub(NAME_COL + 4);
+        let meta = if group.len() > 1 {
+            format!("{} calls", group.len())
+        } else {
+            String::new()
+        };
+        let label = tool_label(&group[0].title, status, group.len());
+        lines.push(tool_head(
+            rail,
+            glyph,
+            label,
+            &meta,
+            w,
+            glyph_colour,
+            label_colour,
+        ));
 
-        let first = named.first().map(|c| ellipsis(&c.detail, room)).unwrap_or_default();
-        lines.push(vec![
-            Span::styled(format!("{glyph} "), Style::default().fg(colour)),
-            Span::styled(format!("{head:<NAME_COL$}"), Style::default().fg(DIM)),
-            Span::styled(first, Style::default().fg(FAINT)),
-        ]);
-        // The rest sit under the first, in the argument column, so the eye reads
-        // a list of places rather than a list of calls.
-        for c in named.iter().skip(1) {
+        for (index, c) in named.iter().enumerate() {
+            let closes = last_group && !rendered && index + 1 == named.len();
             lines.push(vec![
-                Span::raw(" ".repeat(NAME_COL + 2)),
-                Span::styled(ellipsis(&c.detail, room), Style::default().fg(FAINT)),
+                Span::styled(
+                    format!("{}   ", if closes { "\u{2570}" } else { "\u{2502}" }),
+                    Style::default().fg(TOOL_RULE),
+                ),
+                Span::styled(
+                    ellipsis(&c.detail, w.saturating_sub(4) as usize),
+                    Style::default().fg(DIM),
+                ),
+            ]);
+        }
+        if rendered && last_group {
+            let room = w.saturating_sub(15) as usize;
+            lines.push(vec![
+                Span::styled(
+                    "\u{2570}   \u{2514}".to_string(),
+                    Style::default().fg(TOOL_RULE),
+                ),
+                Span::styled("\u{2500}".repeat(room), Style::default().fg(TOOL_RULE)),
+                Span::styled(
+                    " \u{2192} canvas".to_string(),
+                    Style::default().fg(TOOL_SETTLED),
+                ),
             ]);
         }
     }
@@ -1846,7 +2760,8 @@ fn transcript(
 /// churning as the token behind it lands. Nothing else on the page moves, and
 /// when the answer is done this row is simply not drawn -- so the motion is
 /// bounded by the reply and not by a timer.
-const NOISE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789<>/\\|=+*#$%&@";
+const NOISE: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789<>/\\|=+*#$%&@";
 
 /// Churn rate. Slower than it was: at eighteen a second the noise reads as
 /// static, and static does not look like something resolving into a word.
@@ -1921,8 +2836,10 @@ fn settling(tip: &str, w: u16, t: f64) -> Vec<Span<'static>> {
     }
     if !ahead.is_empty() {
         let half = ahead.chars().count() / 2;
-        let (near, far): (String, String) =
-            (ahead.chars().take(half).collect(), ahead.chars().skip(half).collect());
+        let (near, far): (String, String) = (
+            ahead.chars().take(half).collect(),
+            ahead.chars().skip(half).collect(),
+        );
         spans.push(Span::styled(near, Style::default().fg(DIM)));
         spans.push(Span::styled(far, Style::default().fg(FAINT)));
     }
@@ -1951,10 +2868,75 @@ fn panel_width(p: &Panel, area: Rect) -> u16 {
                 false => (mw + 6).min(area.width),
             }
         }
+        Show::Diagram(_) => (area.width * 11 / 20).clamp(48, 120),
         // The badge and its code are the same width on purpose -- see the
         // generator. Whichever is wider decides, so neither is ever clipped by
         // a column the other one chose.
         Show::Cert => (crate::cert::BADGE.w as u16).max((crate::cert::QR.size + QUIET * 2) as u16),
+    }
+}
+
+fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel) {
+    if matches!(p.what, Show::Place(_)) {
+        return;
+    }
+    let fade = p.fade();
+    let title = match &p.what {
+        Show::Code(_) => "payment".to_string(),
+        Show::Cert => "credential".to_string(),
+        Show::Work(work) => crate::mcp::project(&work.id)
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| "project".to_string()),
+        Show::Diagram(spec) if !spec.title.trim().is_empty() => spec.title.clone(),
+        Show::Diagram(_) => "diagram".to_string(),
+        Show::Place(_) => unreachable!(),
+    };
+    let source = p
+        .source
+        .as_deref()
+        .map(|source| format!("from \u{201c}{source}\u{201d}"))
+        .unwrap_or_default();
+    let left = format!("\u{25cf} {title}");
+    let gap = (area.width as usize)
+        .saturating_sub(left.chars().count() + source.chars().count())
+        .max(1);
+    let header = Rect {
+        x: area.x,
+        y: area.y.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                left,
+                Style::default().fg(crate::paint::dim_to(TOOL_SETTLED, fade)),
+            ),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(
+                source,
+                Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade)),
+            ),
+        ])),
+        header,
+    );
+
+    if area.x > 0 {
+        let rail = Rect {
+            x: area.x - 1,
+            y: header.y,
+            width: 1,
+            height: area.height.saturating_add(1),
+        };
+        let lines = (0..rail.height)
+            .map(|_| {
+                Line::styled(
+                    "\u{2502}",
+                    Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade)),
+                )
+            })
+            .collect::<Vec<_>>();
+        f.render_widget(Paragraph::new(lines), rail);
     }
 }
 
@@ -1970,7 +2952,12 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 }
                 f.render_widget(
                     Paragraph::new(Line::from(spans)),
-                    Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 },
+                    Rect {
+                        x: area.x,
+                        y: area.y + i as u16,
+                        width: area.width,
+                        height: 1,
+                    },
                 );
             }
         }
@@ -1978,7 +2965,9 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
         // Only the caption, for the same reason as a place: the mark and the
         // diagram belong to `skysheet`, and the shell draws them there.
         Show::Work(w) => {
-            let Some(p) = crate::mcp::project(&w.id) else { return };
+            let Some(p) = crate::mcp::project(&w.id) else {
+                return;
+            };
             let lead = crate::paint::lead();
             let bottom = area.y + area.height;
             let tag = wrap(&p.tag, area.width as usize);
@@ -1988,7 +2977,12 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 if *y < bottom {
                     f.render_widget(
                         Paragraph::new(Line::from(spans)),
-                        Rect { x: area.x, y: *y, width: area.width, height: 1 },
+                        Rect {
+                            x: area.x,
+                            y: *y,
+                            width: area.width,
+                            height: 1,
+                        },
                     );
                     *y += 1;
                 }
@@ -2004,15 +2998,28 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 )],
             );
             for l in tag {
-                row(f, &mut y, vec![Span::styled(l, Style::default().fg(crate::paint::dim_to(DIM, fade)))]);
+                row(
+                    f,
+                    &mut y,
+                    vec![Span::styled(
+                        l,
+                        Style::default().fg(crate::paint::dim_to(DIM, fade)),
+                    )],
+                );
             }
             row(f, &mut y, vec![]);
             row(
                 f,
                 &mut y,
-                vec![Span::styled(foot, Style::default().fg(crate::paint::dim_to(FAINT, fade)))],
+                vec![Span::styled(
+                    foot,
+                    Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                )],
             );
         }
+        // The title and sequence captions are part of the generated scene, so
+        // this layer has no separate caption to add.
+        Show::Diagram(_) => {}
         // Only the caption. The picture above it belongs to the map renderer
         // and the shell draws it there -- see `map_panel`.
         Show::Place(tour) => {
@@ -2023,14 +3030,23 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
             // line or three.
             let name = wrap(&spot.name, area.width as usize).len() as u16;
             let note = wrap(&spot.note, area.width as usize).len() as u16;
-            let footer = if tour.stops.len() > 1 || spot.id.is_some() { 2 } else { 0 };
+            let footer = if tour.stops.len() > 1 || spot.id.is_some() {
+                2
+            } else {
+                0
+            };
             let bottom = area.y + area.height;
             let mut y = bottom.saturating_sub(name + note + footer);
             let row = |f: &mut Frame, y: &mut u16, spans: Vec<Span<'static>>| {
                 if *y < bottom {
                     f.render_widget(
                         Paragraph::new(Line::from(spans)),
-                        Rect { x: area.x, y: *y, width: area.width, height: 1 },
+                        Rect {
+                            x: area.x,
+                            y: *y,
+                            width: area.width,
+                            height: 1,
+                        },
                     );
                     *y += 1;
                 }
@@ -2052,7 +3068,10 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 row(
                     f,
                     &mut y,
-                    vec![Span::styled(l, Style::default().fg(crate::paint::dim_to(DIM, fade)))],
+                    vec![Span::styled(
+                        l,
+                        Style::default().fg(crate::paint::dim_to(DIM, fade)),
+                    )],
                 );
             }
             // Where you are in the route, and how to walk it. Only when there
@@ -2133,12 +3152,17 @@ fn palette(f: &mut Frame, area: Rect, picks: &[(&'static str, &'static str)], on
         ];
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { x: area.x, y: area.y + i as u16, width: area.width, height: 1 },
+            Rect {
+                x: area.x,
+                y: area.y + i as u16,
+                width: area.width,
+                height: 1,
+            },
         );
     }
 }
 
-/// The rule and the line being typed.
+/// The rule and the text being typed.
 fn question(f: &mut Frame, area: Rect, a: &Ask) {
     let lead = crate::paint::lead();
     f.render_widget(
@@ -2166,7 +3190,11 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
                     Style::default().fg(FAINT),
                 ),
             ])),
-            Rect { y: area.y + 1, height: 1, ..area },
+            Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
         );
         return;
     }
@@ -2176,23 +3204,65 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
         State::Thinking => ("\u{b7}", "", Style::default().fg(FAINT)),
         State::Failed(m) => ("\u{d7}", m.as_str(), Style::default().fg(ACCENT)),
     };
+    if !a.input.is_empty() {
+        let lines = editable_lines(
+            &a.input,
+            area.width,
+            (!a.busy()).then(|| a.cursor_at()),
+        );
+        let shown = (area.height.saturating_sub(1) as usize).min(lines.len());
+        let cursor_row = lines.iter().position(|line| line.contains(CURSOR_MARK));
+        let skip = if lines.len() > shown {
+            cursor_row
+                .map(|row| row.saturating_sub(shown - 1).min(lines.len() - shown))
+                .unwrap_or(lines.len() - shown)
+        } else {
+            0
+        };
+        for (row, line) in lines.into_iter().skip(skip).take(shown).enumerate() {
+            let prefix = if skip + row == 0 {
+                format!("{mark} ")
+            } else if row == 0 && skip > 0 {
+                "↑ ".to_string()
+            } else {
+                "  ".to_string()
+            };
+            let mut spans = vec![Span::styled(prefix, style)];
+            if let Some((before, after)) = line.split_once(CURSOR_MARK) {
+                spans.push(Span::styled(before.to_string(), Style::default().fg(FG)));
+                spans.push(Span::styled("\u{258c}", Style::default().fg(lead)));
+                spans.push(Span::styled(after.to_string(), Style::default().fg(FG)));
+            } else {
+                spans.push(Span::styled(line, Style::default().fg(FG)));
+            }
+            f.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect {
+                    y: area.y + 1 + row as u16,
+                    height: 1,
+                    ..area
+                },
+            );
+        }
+        return;
+    }
+
     let mut spans = vec![Span::styled(format!("{mark} "), style)];
-    if a.input.is_empty() && !hint.is_empty() {
+    if !hint.is_empty() {
         spans.push(Span::styled(hint.to_string(), Style::default().fg(FAINT)));
-    } else if a.input.is_empty() && a.state == State::Ready {
+    } else if a.state == State::Ready {
         spans.push(Span::styled(
             "ask, or / for commands".to_string(),
             Style::default().fg(FAINT),
         ));
-    } else {
-        spans.push(Span::styled(a.input.clone(), Style::default().fg(FG)));
-        if !a.busy() {
-            spans.push(Span::styled("\u{258c}", Style::default().fg(lead)));
-        }
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)),
-        Rect { y: area.y + 1, height: 1, ..area },
+        Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        },
     );
 }
 
@@ -2266,7 +3336,10 @@ fn badge(f: &mut Frame, area: Rect, fade: f32) {
         for (ch, fg, bg) in cells {
             let want = Style::default().fg(fg).bg(bg);
             if style != Some(want) && !run.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut run), style.unwrap_or_default()));
+                spans.push(Span::styled(
+                    std::mem::take(&mut run),
+                    style.unwrap_or_default(),
+                ));
             }
             style = Some(want);
             run.push(ch);
@@ -2276,7 +3349,12 @@ fn badge(f: &mut Frame, area: Rect, fade: f32) {
         }
         f.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect { x: left, y: area.y + row, width: area.width, height: 1 },
+            Rect {
+                x: left,
+                y: area.y + row,
+                width: area.width,
+                height: 1,
+            },
         );
         row += 1;
     }
@@ -2294,7 +3372,12 @@ fn badge(f: &mut Frame, area: Rect, fade: f32) {
     for line in qr {
         f.render_widget(
             Paragraph::new(Line::from(line)),
-            Rect { x: at, y: area.y + row, width: span.min(area.width), height: 1 },
+            Rect {
+                x: at,
+                y: area.y + row,
+                width: span.min(area.width),
+                height: 1,
+            },
         );
         row += 1;
     }
@@ -2439,8 +3522,11 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
     // does not need a paragraph per thing that cannot happen, but the names
     // have to be *there*, because a list of what is allowed proves nothing on
     // its own.
-    let shut: Vec<&str> =
-        crate::gates::TOOLS.iter().filter(|t| !t.open).map(|t| t.name).collect();
+    let shut: Vec<&str> = crate::gates::TOOLS
+        .iter()
+        .filter(|t| !t.open)
+        .map(|t| t.name)
+        .collect();
     let off: Vec<&str> = crate::gates::capabilities()
         .into_iter()
         .filter(|(_, open)| !open)
@@ -2487,6 +3573,8 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
 /// would now contradict -- `reach_out` is shut and `/reach` is handled here.
 const OPENING: &str = "Ask about the work, the places, or anything else. There \
     is an agent on this box, and you will see it reach for the web as it goes. \
+    Its answers are AI-generated and may be wrong; questions and answers are logged. \
+    This is a portfolio, not real infrastructure. \
     To leave Prince a message type /reach, which is handled here rather than by \
     the agent -- so it arrives whether or not a model is up, and word for word.";
 
@@ -2525,6 +3613,7 @@ mod tests {
             title: "Fetch".into(),
             status,
             detail: "https://example.com".into(),
+            rendered: false,
         }
     }
 
@@ -2534,8 +3623,8 @@ mod tests {
     /// it has cannot both be reached from `--snapshot`: the collapsed one needs
     /// a conversation, and there is no flag that invents one.
     pub(super) fn drawn(a: &Ask, w: u16, h: u16) -> String {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| render(f, f.area(), a)).unwrap();
         termap::snapshot::plain(term.backend().buffer())
@@ -2613,11 +3702,23 @@ mod tests {
         let mut a = Ask::new();
         ready(&mut a);
         let empty = drawn(&a, 92, 30);
-        a.turns.push(Turn { q: "hi".into(), a: "Hello.".into(), ..Default::default() });
+        a.turns.push(Turn {
+            q: "hi".into(),
+            a: "Hello.".into(),
+            ..Default::default()
+        });
         let full = drawn(&a, 92, 30);
 
         for screen in [empty, full] {
-            for leak in ["opencode", "copilot", "github", "ollama", "plan mode", "acp v1", "v1 "] {
+            for leak in [
+                "opencode",
+                "copilot",
+                "github",
+                "ollama",
+                "plan mode",
+                "acp v1",
+                "v1 ",
+            ] {
                 assert!(
                     !screen.to_lowercase().contains(leak),
                     "`{leak}` reached the screen:\n{screen}"
@@ -2635,10 +3736,20 @@ mod tests {
         let empty = drawn(&a, 92, 30);
         assert!(empty.contains("what it may do"));
 
-        a.turns.push(Turn { q: "why braille?".into(), a: "Because dots.".into(), ..Default::default() });
+        a.turns.push(Turn {
+            q: "why braille?".into(),
+            a: "Because dots.".into(),
+            ..Default::default()
+        });
         let full = drawn(&a, 92, 30);
-        assert!(!full.contains("what it may do"), "the panel stayed:\n{full}");
-        assert!(full.contains("Because dots."), "the answer is missing:\n{full}");
+        assert!(
+            !full.contains("what it may do"),
+            "the panel stayed:\n{full}"
+        );
+        assert!(
+            full.contains("Because dots."),
+            "the answer is missing:\n{full}"
+        );
     }
 
     /// The codes are generated, so what is worth testing here is that what was
@@ -2649,8 +3760,16 @@ mod tests {
         for (name, code) in crate::coffee::ALL {
             assert_eq!(code.rows.len(), code.size, "{name}: wrong number of rows");
             for r in code.rows {
-                assert_eq!(r.len(), code.size, "{name}: a row is not {} wide", code.size);
-                assert!(r.bytes().all(|b| b == b'#' || b == b'.'), "{name}: stray byte");
+                assert_eq!(
+                    r.len(),
+                    code.size,
+                    "{name}: a row is not {} wide",
+                    code.size
+                );
+                assert!(
+                    r.bytes().all(|b| b == b'#' || b == b'.'),
+                    "{name}: stray byte"
+                );
             }
             // A finder is a 7x7 ring: dark border, light inside it, dark core.
             // Present at three corners of every QR code ever made.
@@ -2658,8 +3777,14 @@ mod tests {
             let n = code.size;
             for (ox, oy) in [(0, 0), (n - 7, 0), (0, n - 7)] {
                 for i in 0..7 {
-                    assert!(dark(ox + i, oy), "{name}: finder at {ox},{oy} has no top edge");
-                    assert!(dark(ox, oy + i), "{name}: finder at {ox},{oy} has no left edge");
+                    assert!(
+                        dark(ox + i, oy),
+                        "{name}: finder at {ox},{oy} has no top edge"
+                    );
+                    assert!(
+                        dark(ox, oy + i),
+                        "{name}: finder at {ox},{oy} has no left edge"
+                    );
                 }
                 assert!(!dark(ox + 1, oy + 1), "{name}: finder ring is filled in");
                 assert!(dark(ox + 3, oy + 3), "{name}: finder has no core");
@@ -2681,7 +3806,9 @@ mod tests {
         // The outermost rows and columns are quiet zone: light, both halves.
         let first = &rows[0];
         assert!(
-            first.iter().all(|s| s.style.fg == Some(ratatui::style::Color::Rgb(255, 255, 255))),
+            first
+                .iter()
+                .all(|s| s.style.fg == Some(ratatui::style::Color::Rgb(255, 255, 255))),
             "the top of the quiet zone is not light"
         );
     }
@@ -2707,7 +3834,11 @@ mod tests {
         let mut a = Ask::new();
         a.input = "/coffee card".into();
         a.submit();
-        assert!(a.turns[0].a.contains("buymeacoffee.com/snufkin24"), "{}", a.turns[0].a);
+        assert!(
+            a.turns[0].a.contains("buymeacoffee.com/snufkin24"),
+            "{}",
+            a.turns[0].a
+        );
     }
 
     /// Half a QR code is not a smaller QR code.
@@ -2724,9 +3855,8 @@ mod tests {
     /// something that is not a subsequence at all does not appear.
     #[test]
     fn the_palette_matches_loosely_and_ranks_tightly() {
-        let names = |typed: &str| -> Vec<&str> {
-            matches(typed).into_iter().map(|(n, _)| n).collect()
-        };
+        let names =
+            |typed: &str| -> Vec<&str> { matches(typed).into_iter().map(|(n, _)| n).collect() };
         assert_eq!(names("/pj").first(), Some(&"/projects"));
         assert_eq!(names("/cf").first(), Some(&"/coffee"));
         assert_eq!(names("/he").first(), Some(&"/help"));
@@ -2767,26 +3897,30 @@ mod tests {
         assert_eq!(a.input, second, "tab did not take the highlighted command");
     }
 
-    /// The up arrow is history, except while the palette has it.
+    /// The arrows revisit completed answers and restore the view each produced.
     #[test]
-    fn up_walks_the_history_it_has() {
+    fn arrows_walk_completed_answers_and_their_views() {
         use crossterm::event::{KeyCode, KeyEvent};
         let mut a = Ask::new();
-        // `/help` is answered here, so it lands in the history without an agent.
-        for q in ["/help", "/keys"] {
+        for q in ["/cert", "/help"] {
             a.input = q.into();
             a.submit();
         }
         assert!(a.input.is_empty());
         a.on_key(KeyEvent::from(KeyCode::Up));
-        assert_eq!(a.input, "/keys", "up did not bring back the last question");
+        assert_eq!(a.viewed, Some(1));
+        assert!(a.panel.is_none(), "help inherited the older badge");
         a.on_key(KeyEvent::from(KeyCode::Up));
-        assert_eq!(a.input, "/help");
+        assert_eq!(a.viewed, Some(0));
+        assert!(matches!(
+            a.panel.as_ref().map(|panel| &panel.what),
+            Some(Show::Cert)
+        ));
         a.on_key(KeyEvent::from(KeyCode::Down));
-        assert_eq!(a.input, "/keys");
-        // Forward past the end returns to an empty line.
+        assert_eq!(a.viewed, Some(1));
+        assert!(a.panel.is_none());
         a.on_key(KeyEvent::from(KeyCode::Down));
-        assert_eq!(a.input, "");
+        assert_eq!(a.viewed, None);
     }
 
     /// Scrolling is clamped to what there is, and submitting returns to the
@@ -2815,7 +3949,11 @@ mod tests {
 
         a.input = "/help".into();
         a.submit();
-        assert_eq!(a.scrolled(), 0, "asking did not return to the newest exchange");
+        assert_eq!(
+            a.scrolled(),
+            0,
+            "asking did not return to the newest exchange"
+        );
     }
 
     /// The commands answered here need no agent, and every one of them says
@@ -2827,9 +3965,21 @@ mod tests {
             a.input = cmd.into();
             a.submit();
             assert_eq!(a.turns.len(), 1, "{cmd} did not answer");
-            assert!(!a.turns[0].a.trim().is_empty(), "{cmd} answered with nothing");
+            assert!(
+                !a.turns[0].a.trim().is_empty(),
+                "{cmd} answered with nothing"
+            );
             assert!(a.turns[0].done, "{cmd} left the turn open");
         }
+    }
+
+    #[test]
+    fn a_question_is_available_to_log_before_its_answer() {
+        let mut a = Ask::new();
+        a.state = State::Ready;
+        a.input = "/keys".into();
+        a.submit();
+        assert_eq!(a.drain_submitted(), vec!["/keys"]);
     }
 
     /// Navigation commands are the shell's to carry out; the chat only asks.
@@ -2839,7 +3989,11 @@ mod tests {
             let mut a = Ask::new();
             a.input = (*cmd).into();
             a.submit();
-            assert_eq!(a.goto.as_deref(), Some(*section), "{cmd} did not ask to move");
+            assert_eq!(
+                a.goto.as_deref(),
+                Some(*section),
+                "{cmd} did not ask to move"
+            );
             assert!(a.turns.is_empty(), "{cmd} left a turn behind");
         }
     }
@@ -2854,7 +4008,9 @@ mod tests {
     fn every_navigation_command_names_a_real_section() {
         for (cmd, section) in NAV {
             assert!(
-                crate::shell::Section::ALL.iter().any(|s| s.label() == *section),
+                crate::shell::Section::ALL
+                    .iter()
+                    .any(|s| s.label() == *section),
                 "{cmd} points at `{section}`, which is not a section"
             );
         }
@@ -2884,7 +4040,11 @@ mod tests {
     #[test]
     fn every_word_on_the_badge_sits_on_the_plate() {
         let b = &crate::cert::BADGE;
-        assert_eq!(b.pixels.len(), b.h * 2, "the grid is not two rows to a cell");
+        assert_eq!(
+            b.pixels.len(),
+            b.h * 2,
+            "the grid is not two rows to a cell"
+        );
         for (i, row) in b.pixels.iter().enumerate() {
             assert_eq!(row.len(), b.w, "row {i} is not {} wide", b.w);
             assert!(
@@ -2916,12 +4076,21 @@ mod tests {
     fn the_badge_code_points_at_the_badge() {
         let payload = crate::cert::QR.payload;
         assert!(payload.starts_with("https://"), "not a URL: {payload}");
-        assert!(payload.contains("credly.com/badges/"), "not a credly badge: {payload}");
+        assert!(
+            payload.contains("credly.com/badges/"),
+            "not a credly badge: {payload}"
+        );
         // `SHOWN` is what a visitor is invited to type. If it is not a prefix
         // of the real thing, one of the two is wrong and the scannable one is
         // the one that was verified.
-        let bare = payload.trim_start_matches("https://").trim_start_matches("www.");
-        assert!(bare.starts_with(crate::cert::SHOWN), "{} is not the start of {bare}", crate::cert::SHOWN);
+        let bare = payload
+            .trim_start_matches("https://")
+            .trim_start_matches("www.");
+        assert!(
+            bare.starts_with(crate::cert::SHOWN),
+            "{} is not the start of {bare}",
+            crate::cert::SHOWN
+        );
     }
 
     /// `/cert` answers, draws the badge, and never troubles the agent.
@@ -2930,14 +4099,32 @@ mod tests {
         let mut a = Ask::new();
         a.input = "/cert".into();
         a.submit();
-        assert!(matches!(&a.panel, Some(Panel { what: Show::Cert, .. })), "no badge");
+        assert!(
+            matches!(
+                &a.panel,
+                Some(Panel {
+                    what: Show::Cert,
+                    ..
+                })
+            ),
+            "no badge"
+        );
         assert_eq!(a.turns.len(), 1);
-        assert!(a.turns[0].a.contains(crate::cert::SHOWN), "the answer has no link in it");
+        assert!(
+            a.turns[0].a.contains(crate::cert::SHOWN),
+            "the answer has no link in it"
+        );
         assert!(a.turns[0].done);
 
         let drawn = drawn(&a, 130, 50);
-        assert!(drawn.contains("Claude Certified"), "the plate lost its type:\n{drawn}");
-        assert!(drawn.contains("F O U N D A T I O N S"), "the tier is missing:\n{drawn}");
+        assert!(
+            drawn.contains("Claude Certified"),
+            "the plate lost its type:\n{drawn}"
+        );
+        assert!(
+            drawn.contains("F O U N D A T I O N S"),
+            "the tier is missing:\n{drawn}"
+        );
     }
 
     /// Asking about it raises it too, and asking about anything else does not.
@@ -2952,7 +4139,13 @@ mod tests {
             a.input = q.into();
             a.submit();
             assert!(
-                matches!(&a.panel, Some(Panel { what: Show::Cert, .. })),
+                matches!(
+                    &a.panel,
+                    Some(Panel {
+                        what: Show::Cert,
+                        ..
+                    })
+                ),
                 "`{q}` did not raise the badge"
             );
         }
@@ -2965,7 +4158,13 @@ mod tests {
             a.input = q.into();
             a.submit();
             assert!(
-                !matches!(&a.panel, Some(Panel { what: Show::Cert, .. })),
+                !matches!(
+                    &a.panel,
+                    Some(Panel {
+                        what: Show::Cert,
+                        ..
+                    })
+                ),
                 "`{q}` raised the badge for no reason"
             );
         }
@@ -2997,7 +4196,11 @@ mod tests {
         let mut a = Ask::new();
         a.input = "where did he go to university?".into();
         a.submit();
-        let Some(Panel { what: Show::Place(tour), .. }) = &a.panel else {
+        let Some(Panel {
+            what: Show::Place(tour),
+            ..
+        }) = &a.panel
+        else {
             panic!("no map went up for a place question");
         };
         let spot = tour.here();
@@ -3007,7 +4210,11 @@ mod tests {
         a.input = "/map".into();
         a.submit();
         assert_eq!(a.goto.as_deref(), Some("experience"));
-        assert_eq!(a.goto_place.as_deref(), Some("silver-oak"), "the flight lost the place");
+        assert_eq!(
+            a.goto_place.as_deref(),
+            Some("silver-oak"),
+            "the flight lost the place"
+        );
     }
 
     /// `/map <somewhere>` opens the tour on that stop without one having been
@@ -3028,7 +4235,10 @@ mod tests {
     /// guess has to be a narrow one.
     #[test]
     fn the_map_panel_is_choosy() {
-        let atlas = Atlas { covers: None, ..Atlas::default() };
+        let atlas = Atlas {
+            covers: None,
+            ..Atlas::default()
+        };
         for q in [
             "where does he work now?",
             "Where is Prince based?",
@@ -3046,7 +4256,10 @@ mod tests {
             "where does this data come from?",
             "what languages does he write?",
         ] {
-            assert!(spot_for(q, &atlas).is_none(), "`{q}` drew a map for no reason");
+            assert!(
+                spot_for(q, &atlas).is_none(),
+                "`{q}` drew a map for no reason"
+            );
         }
     }
 
@@ -3054,7 +4267,10 @@ mod tests {
     /// is a question about now.
     #[test]
     fn a_bare_location_question_lands_on_the_current_place() {
-        let atlas = Atlas { covers: None, ..Atlas::default() };
+        let atlas = Atlas {
+            covers: None,
+            ..Atlas::default()
+        };
         let spot = spot_for("where is he these days", &atlas).expect("nothing drawn");
         assert_eq!(spot.id.as_deref(), Some("gateway"));
     }
@@ -3070,14 +4286,21 @@ mod tests {
         assert_eq!(a.panel.as_ref().map(|p| p.fade()), Some(1.0));
         a.input = "what does he do at gateway".into();
         a.submit();
-        assert_eq!(a.panel.as_ref().map(|p| p.fade()), Some(1.0), "it faded in a second time");
+        assert_eq!(
+            a.panel.as_ref().map(|p| p.fade()),
+            Some(1.0),
+            "it faded in a second time"
+        );
     }
 
     /// Somewhere the basemap has no tiles for gets no picture. Without this a
     /// visitor from outside the archive's extent is shown a black rectangle.
     #[test]
     fn a_place_off_the_basemap_is_not_drawn() {
-        let atlas = Atlas { places: termap::place::load(), covers: Some([0.0, 0.0, 0.01, 0.01]) };
+        let atlas = Atlas {
+            places: termap::place::load(),
+            covers: Some([0.0, 0.0, 0.01, 0.01]),
+        };
         // The tour stops are drawn regardless -- they are on the sheet, and the
         // sheet is the deployment saying these are the places. It is the visitor
         // lookup, which can land anywhere on earth, that is checked.
@@ -3112,6 +4335,130 @@ mod tests {
         assert!(!p.moving(), "the fade is still running after a second");
     }
 
+    #[test]
+    fn a_completed_animated_diagram_keeps_looping() {
+        let mut a = Ask::new();
+        a.turns.push(Turn {
+            q: "first".into(),
+            ..Default::default()
+        });
+        let mut spec = skysheet::diagram::Spec::default();
+        spec.beats.push(skysheet::diagram::Beat {
+            caption: "again".into(),
+            duration: 1.0,
+            actions: Vec::new(),
+        });
+        a.obey(crate::mcp::Directive::Diagram(spec));
+        a.finish_for_test();
+        let held = a.panel.as_ref().map(|panel| panel.story).unwrap();
+
+        a.state = State::Thinking;
+        a.tick(1.0);
+        let (_, _, _, story, running) = diagram_panel(Rect::new(0, 0, 120, 30), &a)
+            .expect("the completed diagram disappeared");
+        assert!(running, "the completed diagram stopped its loop");
+        assert!(story > held, "the completed diagram's clock stopped");
+    }
+
+    #[test]
+    fn restored_animated_views_restart_their_own_loop() {
+        let views = [
+            Show::Work(Work {
+                id: "netjail".into(),
+                mark: false,
+                diagram: true,
+            }),
+            Show::Diagram(skysheet::diagram::Spec {
+                elements: vec![skysheet::diagram::Element {
+                    id: "scene".into(),
+                    rect: skysheet::diagram::RectSpec {
+                        width: 100,
+                        height: 100,
+                        ..Default::default()
+                    },
+                    kind: skysheet::diagram::ElementKind::Group {
+                        title: "Scene".into(),
+                    },
+                    ..Default::default()
+                }],
+                beats: vec![skysheet::diagram::Beat {
+                    caption: "loop".into(),
+                    duration: 1.0,
+                    actions: Vec::new(),
+                }],
+                ..Default::default()
+            }),
+        ];
+        for show in views {
+            let saved = Panel::new(show).saved().expect("view was not persistable");
+            let mut restored = Panel::held(&saved).expect("view did not restore");
+            assert!(restored.looping());
+            restored.step(0.5);
+            assert_eq!(restored.story, 0.5);
+        }
+    }
+
+    #[test]
+    fn shift_enter_adds_lines_and_modified_backspace_deletes_words() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut a = Ask::new();
+        a.state = State::Ready;
+        a.input = "first line".into();
+        a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        for ch in "second word".chars() {
+            a.on_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        assert_eq!(a.input, "first line\nsecond word");
+
+        a.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+        assert_eq!(a.input, "first line\nsecond ");
+        a.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(a.input, "first line\n");
+    }
+
+    #[test]
+    fn arrows_move_the_insertion_point() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        let mut a = Ask::new();
+        a.state = State::Ready;
+        a.input = "ac".into();
+        a.on_key(key(KeyCode::Left, KeyModifiers::NONE));
+        a.on_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(a.input, "abc");
+        assert!(drawn(&a, 80, 24).contains("ab▌c"));
+        a.on_key(key(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(a.input, "ab");
+
+        a.input = "one two".into();
+        a.cursor = None;
+        a.on_key(key(KeyCode::Left, KeyModifiers::CONTROL));
+        a.on_key(key(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert_eq!(a.input, "one Xtwo");
+
+        a.input = "first\nsecond".into();
+        a.cursor = None;
+        a.on_key(key(KeyCode::Home, KeyModifiers::NONE));
+        a.on_key(key(KeyCode::Up, KeyModifiers::NONE));
+        a.on_key(key(KeyCode::Char('>'), KeyModifiers::NONE));
+        assert_eq!(a.input, ">first\nsecond");
+    }
+
+    #[test]
+    fn multiline_input_grows_upward_and_keeps_its_last_lines_visible() {
+        let mut a = Ask::new();
+        a.state = State::Ready;
+        a.input = "one\ntwo\nthree\nfour\nfive\nsix".into();
+        let page = drawn(&a, 80, 24);
+        assert!(page.contains("↑ two"), "old input rows were not clipped:\n{page}");
+        for line in ["three", "four", "five", "six"] {
+            assert!(page.contains(line), "the input lost {line:?}:\n{page}");
+        }
+        assert_eq!(question_height(Rect::new(0, 0, 80, 24), &a), 6);
+    }
+
     /// The wait is the answer arriving, so it exists only while one is -- and it
     /// is a gradient, not a wall.
     #[test]
@@ -3129,7 +4476,10 @@ mod tests {
         // be identical up to a boundary and then unrelated.
         let head = |s: &str| s.chars().take(30).collect::<String>();
         assert_eq!(head(&one), head(&two), "settled words are still flickering");
-        assert!(one.starts_with("the vertical resolution"), "the words were eaten: {one}");
+        assert!(
+            one.starts_with("the vertical resolution"),
+            "the words were eaten: {one}"
+        );
 
         // Somewhere in the middle, characters differ between frames but the line
         // is still mostly the real text.
@@ -3151,14 +4501,16 @@ mod tests {
         assert!(s.contains("done"));
     }
 
-
     /// Stopping is not failing: the section goes back to ready and the tier is
     /// left alone, because the visitor asked for it.
     #[test]
     fn cancelling_leaves_the_section_ready_rather_than_failed() {
         let mut a = Ask::new();
         ready(&mut a);
-        a.turns.push(Turn { q: "long one".into(), ..Default::default() });
+        a.turns.push(Turn {
+            q: "long one".into(),
+            ..Default::default()
+        });
         a.state = State::Thinking;
         a.apply(Event::Cancelled);
         assert_eq!(a.state, State::Ready);
@@ -3176,7 +4528,10 @@ mod tests {
         a.input = "half a question".into();
         a.state = State::Thinking;
         a.on_key(KeyEvent::from(KeyCode::Esc));
-        assert_eq!(a.input, "half a question", "the question was thrown away mid-answer");
+        assert_eq!(
+            a.input, "half a question",
+            "the question was thrown away mid-answer"
+        );
 
         a.state = State::Ready;
         a.on_key(KeyEvent::from(KeyCode::Esc));
@@ -3206,13 +4561,34 @@ mod tests {
         ready(&mut a);
         a.input = "where does he work".into();
         a.submit();
-        assert!(matches!(&a.panel, Some(Panel { what: Show::Place(_), .. })));
-        for (w, h) in [(20u16, 6u16), (30, 8), (95, 12), (96, 9), (100, 40), (240, 60)] {
+        assert!(matches!(
+            &a.panel,
+            Some(Panel {
+                what: Show::Place(_),
+                ..
+            })
+        ));
+        for (w, h) in [
+            (20u16, 6u16),
+            (30, 8),
+            (95, 12),
+            (96, 9),
+            (100, 40),
+            (240, 60),
+        ] {
             let drawn = drawn(&a, w, h);
             // Either the whole panel is off -- there is no room for one -- or
             // the caption is there. What must never happen is a picture with
             // nothing under it saying what it is.
-            if let Some((at, _, _)) = map_panel(Rect { x: 0, y: 0, width: w, height: h }, &a) {
+            if let Some((at, _, _)) = map_panel(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: w,
+                    height: h,
+                },
+                &a,
+            ) {
                 assert!(
                     drawn.contains("Gateway Corp"),
                     "a map at {at:?} with no caption, at {w}x{h}:\n{drawn}"
@@ -3221,11 +4597,16 @@ mod tests {
         }
     }
 
-    /// Eight lookups in one answer read as one block, not eight rows.
+    /// Repeated calls read as one human-labelled run with one connected rail.
     #[test]
-    fn calls_of_one_tool_are_grouped_under_its_name() {
+    fn calls_of_one_tool_share_a_rail_and_machine_names_stay_hidden() {
         let mut a = Ask::new();
-        let places = ["Ward's Lake", "Shillong Peak", "Elephant Falls", "Umiam Lake"];
+        let places = [
+            "Ward's Lake",
+            "Shillong Peak",
+            "Elephant Falls",
+            "Umiam Lake",
+        ];
         let mut calls: Vec<Call> = places
             .iter()
             .enumerate()
@@ -3234,6 +4615,7 @@ mod tests {
                 title: "locate_place".into(),
                 status: Status::Done,
                 detail: (*p).to_string(),
+                rendered: false,
             })
             .collect();
         calls.push(Call {
@@ -3241,17 +4623,129 @@ mod tests {
             title: "show_map".into(),
             status: Status::Done,
             detail: "Shillong  25.576, 91.883".into(),
+            rendered: true,
         });
-        a.turns.push(Turn { q: "tour me".into(), a: "Here.".into(), calls, done: true, ..Default::default() });
+        a.turns.push(Turn {
+            q: "tour me".into(),
+            a: "Here.".into(),
+            calls,
+            done: true,
+            ..Default::default()
+        });
         a.state = State::Ready;
 
         let out = drawn(&a, 110, 30);
-        // The tool's name once, its arguments each on their own line.
-        assert_eq!(out.matches("locate_place").count(), 1, "the name repeated:\n{out}");
+        assert!(
+            out.contains("\u{256d} \u{2713} found places"),
+            "the run did not open:\n{out}"
+        );
+        assert!(
+            out.contains("4 calls"),
+            "the grouped count is missing:\n{out}"
+        );
         for p in places {
             assert!(out.contains(p), "`{p}` is missing:\n{out}");
         }
-        assert!(out.contains("show_map"), "the second tool vanished:\n{out}");
+        assert!(
+            out.contains("\u{251c} \u{25a3} drew the map"),
+            "the render row vanished:\n{out}"
+        );
+        assert!(
+            out.contains("\u{2192} canvas"),
+            "the canvas handoff is missing:\n{out}"
+        );
+        assert!(
+            !out.contains("locate_place") && !out.contains("show_map"),
+            "machine names leaked:\n{out}"
+        );
+    }
+
+    #[test]
+    fn non_map_views_name_the_call_that_filled_the_canvas() {
+        let mut a = Ask::new();
+        a.turns.push(Turn {
+            q: "show me netjail".into(),
+            ..Default::default()
+        });
+        a.obey(crate::mcp::Directive::Called {
+            tool: "show_project".into(),
+            detail: "netjail".into(),
+        });
+        a.obey(crate::mcp::Directive::Work {
+            id: "netjail".into(),
+            mark: true,
+            diagram: false,
+        });
+        if let Some(panel) = &mut a.panel {
+            panel.life = Life::Held;
+        }
+
+        let out = drawn(&a, 140, 34);
+        assert!(
+            out.contains("\u{25cf} netjail"),
+            "the canvas has no title:\n{out}"
+        );
+        assert!(
+            out.contains("from \u{201c}opened the project\u{201d}"),
+            "the canvas has no source:\n{out}"
+        );
+        assert!(
+            a.turns[0].calls[0].rendered,
+            "the producing call was not linked to its view"
+        );
+    }
+
+    #[test]
+    fn project_canvas_never_sits_under_the_prose() {
+        let mut a = Ask::new();
+        a.show_work(0);
+        for width in [96, 110, 150, 240] {
+            let body = Rect::new(0, 0, width, 38);
+            let stage = work_panel(body, &a)
+                .map(|(at, ..)| at)
+                .expect("the project has no canvas");
+            let prose = prose_rect(body, &a);
+            assert!(
+                prose.right() <= stage.x,
+                "project canvas {stage:?} overlaps prose {prose:?} at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_map_keeps_its_borderless_treatment() {
+        let mut a = Ask::new();
+        a.turns.push(Turn {
+            q: "show me Ahmedabad".into(),
+            ..Default::default()
+        });
+        a.obey(crate::mcp::Directive::Called {
+            tool: "show_map".into(),
+            detail: "Ahmedabad".into(),
+        });
+        a.obey(crate::mcp::Directive::Map {
+            stops: vec![crate::mcp::Stop {
+                lat: 23.0225,
+                lon: 72.5714,
+                zoom: 10.0,
+                from: None,
+                label: "Ahmedabad".into(),
+                note: "the city in the answer".into(),
+            }],
+        });
+        if let Some(panel) = &mut a.panel {
+            panel.life = Life::Held;
+        }
+
+        let out = drawn(&a, 140, 34);
+        assert!(
+            out.contains("drew the map"),
+            "the render row is missing:\n{out}"
+        );
+        assert!(
+            !out.contains("from \u{201c}drew the map\u{201d}"),
+            "the map gained canvas chrome:\n{out}"
+        );
     }
 
     /// The agent's own row for a tool we serve is dropped: it is the same call,
@@ -3259,14 +4753,21 @@ mod tests {
     #[test]
     fn a_tool_we_serve_is_reported_once() {
         let mut a = Ask::new();
-        a.turns.push(Turn { q: "where".into(), ..Default::default() });
+        a.turns.push(Turn {
+            q: "where".into(),
+            ..Default::default()
+        });
         a.apply(Event::Tool(Call {
             id: "acp".into(),
             title: "portfolio-locate_place".into(),
             status: Status::Running,
             detail: String::new(),
+            rendered: false,
         }));
-        assert!(a.turns[0].calls.is_empty(), "the agent's duplicate was kept");
+        assert!(
+            a.turns[0].calls.is_empty(),
+            "the agent's duplicate was kept"
+        );
 
         // Something the agent really does own still shows.
         a.apply(Event::Tool(Call {
@@ -3274,6 +4775,7 @@ mod tests {
             title: "web_fetch".into(),
             status: Status::Done,
             detail: "https://example.com".into(),
+            rendered: false,
         }));
         assert_eq!(a.turns[0].calls.len(), 1, "a real tool call was dropped");
     }
@@ -3284,7 +4786,10 @@ mod tests {
     #[test]
     fn a_tool_call_updates_in_place_rather_than_stacking_up() {
         let mut a = Ask::new();
-        a.turns.push(Turn { q: "hi".into(), ..Default::default() });
+        a.turns.push(Turn {
+            q: "hi".into(),
+            ..Default::default()
+        });
 
         for e in [
             Event::Tool(call("t1", Status::Running)),
@@ -3307,7 +4812,9 @@ mod tests {
     /// a model in the middle would paraphrase it, or be down.
     #[test]
     fn a_reach_message_becomes_a_turn_without_asking_the_agent() {
-        let _guard = crate::reach::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::reach::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("askreach-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("PORTFOLIO_MESSAGES", dir.join("m.jsonl"));
@@ -3361,22 +4868,31 @@ mod look {
         a.input = "/coffee".into();
         a.submit();
         a.tick(1.0);
-        println!("\n=== coffee, panel faded in ===\n{}", super::tests::drawn(&a, 120, 30));
+        println!(
+            "\n=== coffee, panel faded in ===\n{}",
+            super::tests::drawn(&a, 120, 30)
+        );
 
         let mut a = Ask::new();
         a.state = State::Ready;
         a.input = "/cert".into();
         a.submit();
         a.tick(1.0);
-        println!("\n=== cert, badge only ===\n{}", super::tests::drawn(&a, 120, 28));
-        println!("\n=== cert, with the code ===\n{}", super::tests::drawn(&a, 130, 50));
+        println!(
+            "\n=== cert, badge only ===\n{}",
+            super::tests::drawn(&a, 120, 28)
+        );
+        println!(
+            "\n=== cert, with the code ===\n{}",
+            super::tests::drawn(&a, 130, 50)
+        );
         // `ASK_ANSI=/tmp/f.ans cargo test look` writes a real escape-sequence
         // frame, which `map/scripts/ansi2png.py` turns into something you can
         // look at. The plain dump above loses every colour, and the badge is
         // two colours and a shape.
         if let Ok(to) = std::env::var("ASK_ANSI") {
-            use ratatui::backend::TestBackend;
             use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
             let mut t = Terminal::new(TestBackend::new(130, 50)).unwrap();
             t.draw(|f| render(f, f.area(), &a)).unwrap();
             std::fs::write(to, termap::snapshot::ansi(t.backend().buffer())).unwrap();
@@ -3393,7 +4909,10 @@ mod look {
         // a settling animation says nothing about whether it settles.
         for step in 0..6 {
             a.t = 1.0 + step as f64 * 0.12;
-            println!("\n=== settling, frame {step} ===\n{}", super::tests::drawn(&a, 100, 10));
+            println!(
+                "\n=== settling, frame {step} ===\n{}",
+                super::tests::drawn(&a, 100, 10)
+            );
         }
     }
 }

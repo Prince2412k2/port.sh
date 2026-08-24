@@ -119,6 +119,8 @@ pub struct Call {
     pub status: Status,
     /// Whatever identifies the target -- a URL, a query. May be empty.
     pub detail: String,
+    /// This call put the active view on the canvas.
+    pub rendered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,7 +225,10 @@ impl Ask {
             }
         });
 
-        Ask { tx: tx_in, rx: rx_out }
+        Ask {
+            tx: tx_in,
+            rx: rx_out,
+        }
     }
 
     pub fn send(&self, question: &str) {
@@ -277,7 +282,14 @@ struct Session {
 
 impl Session {
     fn new(context: String, board: Option<String>) -> Session {
-        Session { context, first: true, turns: 0, tools: 0, pending: None, board }
+        Session {
+            context,
+            first: true,
+            turns: 0,
+            tools: 0,
+            pending: None,
+            board,
+        }
     }
 }
 
@@ -304,9 +316,9 @@ pub fn initialize_request(id: i64) -> String {
     )
 }
 
-/// `session/new`, rooted where the portfolio's own data lives.
+/// `session/new`, rooted in empty scratch rather than the application tree.
 pub fn session_new_request(id: i64, tools: Option<&str>) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = std::env::temp_dir().join("portfolio-agent");
     // Our own tools, or none. `None` is not a degraded mode to hide: an agent
     // that cannot reach an HTTP MCP server gets an empty list and answers in
     // words, which is what it did before any of this existed.
@@ -369,7 +381,11 @@ pub fn auth_methods(res: &Value) -> Vec<AuthMethod> {
             let id = m.get("id").and_then(|v| v.as_str())?.to_string();
             Some(AuthMethod {
                 id,
-                name: m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                name: m
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 description: m
                     .get("description")
                     .and_then(|v| v.as_str())
@@ -435,7 +451,10 @@ impl Restraint {
 /// talk to.
 pub fn restraint(res: &Value) -> Option<Restraint> {
     // ACP's own: modes.availableModes[].id
-    if let Some(list) = res.get("modes").and_then(|m| m.get("availableModes")).and_then(|a| a.as_array())
+    if let Some(list) = res
+        .get("modes")
+        .and_then(|m| m.get("availableModes"))
+        .and_then(|a| a.as_array())
     {
         let ids: Vec<String> = list
             .iter()
@@ -467,7 +486,10 @@ pub fn restraint(res: &Value) -> Option<Restraint> {
             })
             .unwrap_or_default();
         if let Some(pick) = prefer(&values) {
-            return Some(Restraint::Config { id: id.to_string(), value: pick });
+            return Some(Restraint::Config {
+                id: id.to_string(),
+                value: pick,
+            });
         }
     }
     None
@@ -476,7 +498,10 @@ pub fn restraint(res: &Value) -> Option<Restraint> {
 /// The first of `RESTRAINTS` that appears in `offered`, matched case-blind.
 fn prefer(offered: &[String]) -> Option<String> {
     RESTRAINTS.iter().find_map(|want| {
-        offered.iter().find(|got| got.eq_ignore_ascii_case(want)).cloned()
+        offered
+            .iter()
+            .find(|got| got.eq_ignore_ascii_case(want))
+            .cloned()
     })
 }
 
@@ -493,13 +518,14 @@ fn attempt(
     // before the spawn because some servers are told where it is in their
     // environment rather than in `session/new`.
     let ours = state.board.as_deref().and_then(crate::mcp::url_for);
-    let mut child = match shot.server.spawn_command(&shot.model, ours.as_deref()).spawn() {
+    let mut child = match shot
+        .server
+        .spawn_command(&shot.model, ours.as_deref())
+        .spawn()
+    {
         Ok(c) => c,
         Err(e) => {
-            return Outcome::Broken(format!(
-                "could not start `{}`: {e}",
-                shot.server.label()
-            ))
+            return Outcome::Broken(format!("could not start `{}`: {e}", shot.server.label()))
         }
     };
 
@@ -587,7 +613,11 @@ fn converse(
         true => ours.clone(),
         false => tools.clone(),
     };
-    match (&handed, by_env, hello.as_ref().is_some_and(takes_http_tools)) {
+    match (
+        &handed,
+        by_env,
+        hello.as_ref().is_some_and(takes_http_tools),
+    ) {
         (Some(_), true, _) => eprintln!(
             "portfolio: `{}` was handed our tools in its environment",
             shot.server.label()
@@ -635,9 +665,7 @@ fn converse(
             shot.server.label(),
             m.id
         );
-        if write_line(w, &authenticate_request(4, &m.id))
-            && wait_for(gen, rx, 4, state).is_ok()
-        {
+        if write_line(w, &authenticate_request(4, &m.id)) && wait_for(gen, rx, 4, state).is_ok() {
             opened = open_session(gen, w, rx, state, 5, offered.as_deref());
         }
         if let Err(why) = &opened {
@@ -651,7 +679,11 @@ fn converse(
             //
             // So: report what the agent said, offer what it offered, and do not
             // assert which of the two it is.
-            let hint = if m.description.is_empty() { &m.name } else { &m.description };
+            let hint = if m.description.is_empty() {
+                &m.name
+            } else {
+                &m.description
+            };
             eprintln!(
                 "portfolio: `{}` refused a session: {why}. It offers `{}`{}. \
                  If it is already logged in, check it can reach its own provider \
@@ -659,7 +691,11 @@ fn converse(
                  that could not be verified.",
                 shot.server.label(),
                 m.id,
-                if hint.is_empty() { String::new() } else { format!(" ({hint})") },
+                if hint.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({hint})")
+                },
             );
             return Outcome::Broken(format!("would not authenticate ({why})"));
         }
@@ -669,7 +705,11 @@ fn converse(
         Ok(None) => return Outcome::Broken("the agent opened no session".into()),
         Err(e) => return Outcome::Broken(e),
     };
-    let Some(sid) = res.get("sessionId").and_then(|v| v.as_str()).map(str::to_string) else {
+    let Some(sid) = res
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
         return Outcome::Broken("the agent opened no session".into());
     };
 
@@ -691,7 +731,10 @@ fn converse(
         tier: shot.tier.clone(),
         server: shot.server.label().to_string(),
         version,
-        mode: held.as_ref().map(|r| r.label().to_string()).unwrap_or_default(),
+        mode: held
+            .as_ref()
+            .map(|r| r.label().to_string())
+            .unwrap_or_default(),
         tools: offered.is_some(),
     }));
 
@@ -726,6 +769,11 @@ fn converse(
                  It runs on someone's account. Reconnect for a fresh session.",
                 GATES.turns
             )));
+            let _ = tx.send(Event::Done);
+            continue;
+        }
+        if let Err(why) = crate::budget::reserve_ai() {
+            let _ = tx.send(Event::Chunk(why));
             let _ = tx.send(Event::Done);
             continue;
         }
@@ -775,7 +823,9 @@ fn stream<W: Write>(
 ) -> Result<(), String> {
     let mut stopping = false;
     loop {
-        let Ok(msg) = rx.recv() else { return Err("the UI went away".into()) };
+        let Ok(msg) = rx.recv() else {
+            return Err("the UI went away".into());
+        };
         match msg {
             In::Eof(g) if g == gen => return Err("stopped mid-answer".into()),
             In::Eof(_) => {}
@@ -810,8 +860,11 @@ fn stream<W: Write>(
                 }
                 if v.get("id").and_then(|i| i.as_f64()) == Some(id as f64) {
                     if let Some(e) = v.get("error") {
-                        let code =
-                            e.get("code").and_then(|c| c.as_f64()).map(|c| c as i64).unwrap_or(0);
+                        let code = e
+                            .get("code")
+                            .and_then(|c| c.as_f64())
+                            .map(|c| c as i64)
+                            .unwrap_or(0);
                         // The peer agreeing to stop is not the peer failing.
                         // Counting it as a failure would drop a working tier
                         // every time somebody pressed escape.
@@ -819,13 +872,20 @@ fn stream<W: Write>(
                             let _ = tx.send(Event::Cancelled);
                             return Ok(());
                         }
-                        let m = e.get("message").and_then(|m| m.as_str()).unwrap_or("failed");
+                        let m = e
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("failed");
                         return Err(m.to_string());
                     }
                     // A cancelled turn that finished anyway is still cancelled
                     // as far as the screen is concerned -- the visitor asked
                     // for it to stop and should not be handed a wall of text.
-                    let _ = tx.send(if stopping { Event::Cancelled } else { Event::Done });
+                    let _ = tx.send(if stopping {
+                        Event::Cancelled
+                    } else {
+                        Event::Done
+                    });
                     return Ok(());
                 }
             }
@@ -834,7 +894,10 @@ fn stream<W: Write>(
 }
 
 fn forward(tx: &Sender<Event>, u: &Value) {
-    let kind = u.get("sessionUpdate").and_then(|k| k.as_str()).unwrap_or("");
+    let kind = u
+        .get("sessionUpdate")
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
     let text = u
         .get("content")
         .and_then(|c| c.get("text"))
@@ -879,7 +942,11 @@ fn forward(tx: &Sender<Event>, u: &Value) {
 
 /// Read a tool call out of a session update.
 fn call_of(u: &Value) -> Option<Call> {
-    let id = u.get("toolCallId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = u
+        .get("toolCallId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if id.is_empty() {
         return None;
     }
@@ -898,7 +965,11 @@ fn call_of(u: &Value) -> Option<Call> {
         .or_else(|| u.get("title").and_then(|v| v.as_str()))
         .unwrap_or("")
         .to_string();
-    let status = match u.get("status").and_then(|v| v.as_str()).unwrap_or("pending") {
+    let status = match u
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending")
+    {
         "completed" => Status::Done,
         "failed" => Status::Failed,
         _ => Status::Running,
@@ -916,7 +987,13 @@ fn call_of(u: &Value) -> Option<Call> {
             None
         })
         .unwrap_or_default();
-    Some(Call { id, title, status, detail })
+    Some(Call {
+        id,
+        title,
+        status,
+        detail,
+        rendered: false,
+    })
 }
 
 /// Answer a request the agent makes of the client. Returns true if `v` was one.
@@ -939,25 +1016,36 @@ fn call_of(u: &Value) -> Option<Call> {
 /// - A notification -- no `id`, including everything `$/`-prefixed -- is
 ///   dropped in silence, which is what the protocol asks for. Answering an
 ///   optional notification with method-not-found is itself a protocol error.
-fn answer_request<W: Write>(
-    w: &mut W,
-    v: &Value,
-    tx: &Sender<Event>,
-    state: &mut Session,
-) -> bool {
-    let Some(method) = v.get("method").and_then(|m| m.as_str()) else { return false };
+fn answer_request<W: Write>(w: &mut W, v: &Value, tx: &Sender<Event>, state: &mut Session) -> bool {
+    let Some(method) = v.get("method").and_then(|m| m.as_str()) else {
+        return false;
+    };
     // No id: a notification. Nothing to answer, and saying so would be wrong.
-    let Some(id) = v.get("id").and_then(|i| i.as_f64()) else { return false };
+    let Some(id) = v.get("id").and_then(|i| i.as_f64()) else {
+        return false;
+    };
     let id = id as i64;
 
     match gates::verdict(method) {
         Verdict::Open => {}
         Verdict::Shut(gate) => {
-            refuse(w, tx, id, method, &format!("{method} is not available here ({gate} is off)"));
+            refuse(
+                w,
+                tx,
+                id,
+                method,
+                &format!("{method} is not available here ({gate} is off)"),
+            );
             return true;
         }
         Verdict::Unimplemented => {
-            refuse(w, tx, id, method, &format!("{method} is not implemented by this client"));
+            refuse(
+                w,
+                tx,
+                id,
+                method,
+                &format!("{method} is not implemented by this client"),
+            );
             return true;
         }
     }
@@ -997,7 +1085,10 @@ fn answer_request<W: Write>(
     // The category, used only to refuse. A tool that says it edits, deletes,
     // moves or executes is refused whatever it calls itself -- this is the one
     // thing `kind` is good for, and it is a veto rather than a permit.
-    let kind = call.and_then(|t| t.get("kind")).and_then(|k| k.as_str()).unwrap_or("");
+    let kind = call
+        .and_then(|t| t.get("kind"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
     let dangerous = matches!(kind, "edit" | "delete" | "move" | "execute");
     let named = !dangerous && gates::tool_open(tool);
     if !named {
@@ -1028,20 +1119,31 @@ fn answer_request<W: Write>(
             .and_then(|c| c.get("optionId").and_then(|i| i.as_str()))
             .unwrap_or("allow")
             .to_string();
-        format!(r#"{{"outcome":{{"outcome":"selected","optionId":{}}}}}"#, json::quote(&opt))
+        format!(
+            r#"{{"outcome":{{"outcome":"selected","optionId":{}}}}}"#,
+            json::quote(&opt)
+        )
     } else {
         if !tool.is_empty() {
-            let why = if named { "out of tool budget" } else { "not allowed here" };
+            let why = if named {
+                "out of tool budget"
+            } else {
+                "not allowed here"
+            };
             let _ = tx.send(Event::Tool(Call {
                 id: format!("refused-{id}"),
                 title: tool.to_string(),
                 status: Status::Refused,
                 detail: why.into(),
+                rendered: false,
             }));
         }
         r#"{"outcome":{"outcome":"cancelled"}}"#.to_string()
     };
-    write_line(w, &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{body}}}"#));
+    write_line(
+        w,
+        &format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{body}}}"#),
+    );
     true
 }
 
@@ -1056,6 +1158,7 @@ fn refuse<W: Write>(w: &mut W, tx: &Sender<Event>, id: i64, method: &str, why: &
         title: method.to_string(),
         status: Status::Refused,
         detail: why.to_string(),
+        rendered: false,
     }));
     write_line(
         w,
@@ -1092,7 +1195,10 @@ fn wait_for(
             Ok(In::Msg(_, v)) => {
                 if v.get("id").and_then(|i| i.as_f64()) == Some(id as f64) {
                     if let Some(e) = v.get("error") {
-                        let m = e.get("message").and_then(|m| m.as_str()).unwrap_or("failed");
+                        let m = e
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("failed");
                         return Err(m.to_string());
                     }
                     return Ok(v.get("result").cloned());
@@ -1164,7 +1270,13 @@ mod tests {
     fn the_real_reply_is_restrained_through_its_config_option() {
         let v = json::parse(REAL_SESSION_NEW).unwrap();
         let r = restraint(v.get("result").unwrap()).expect("nothing to restrain with");
-        assert_eq!(r, Restraint::Config { id: "mode".into(), value: "plan".into() });
+        assert_eq!(
+            r,
+            Restraint::Config {
+                id: "mode".into(),
+                value: "plan".into()
+            }
+        );
         assert_eq!(r.label(), "plan");
         let req = r.request(3, "ses_1");
         let sent = json::parse(&req).expect("valid JSON");
@@ -1176,14 +1288,15 @@ mod tests {
 
     #[test]
     fn acps_own_modes_are_preferred_and_used_as_a_mode() {
-        let v = upd(
-            r#"{"sessionId":"s","modes":{"currentModeId":"build",
-               "availableModes":[{"id":"build"},{"id":"plan"}]}}"#,
-        );
+        let v = upd(r#"{"sessionId":"s","modes":{"currentModeId":"build",
+               "availableModes":[{"id":"build"},{"id":"plan"}]}}"#);
         let r = restraint(&v).expect("nothing to restrain with");
         assert_eq!(r, Restraint::Mode("plan".into()));
         let sent = json::parse(&r.request(3, "s")).expect("valid JSON");
-        assert_eq!(sent.get("method").and_then(|m| m.as_str()), Some("session/set_mode"));
+        assert_eq!(
+            sent.get("method").and_then(|m| m.as_str()),
+            Some("session/set_mode")
+        );
     }
 
     /// A server that offers nothing recognisable is still used. The gates are
@@ -1192,7 +1305,9 @@ mod tests {
     fn a_server_offering_no_modes_is_not_refused() {
         assert_eq!(restraint(&upd(r#"{"sessionId":"s"}"#)), None);
         assert_eq!(
-            restraint(&upd(r#"{"sessionId":"s","modes":{"availableModes":[{"id":"build"}]}}"#)),
+            restraint(&upd(
+                r#"{"sessionId":"s","modes":{"availableModes":[{"id":"build"}]}}"#
+            )),
             None
         );
     }
@@ -1213,11 +1328,22 @@ mod tests {
         let v = json::parse(&initialize_request(1)).expect("valid JSON");
         let p = v.get("params").expect("no params");
         assert_eq!(p.get("protocolVersion").and_then(|x| x.as_f64()), Some(1.0));
-        let fs = p.get("clientCapabilities").and_then(|c| c.get("fs")).expect("no fs");
-        assert_eq!(fs.get("readTextFile").and_then(|x| x.as_bool()), Some(GATES.fs_read));
-        assert_eq!(fs.get("writeTextFile").and_then(|x| x.as_bool()), Some(GATES.fs_write));
+        let fs = p
+            .get("clientCapabilities")
+            .and_then(|c| c.get("fs"))
+            .expect("no fs");
         assert_eq!(
-            p.get("clientCapabilities").and_then(|c| c.get("terminal")).and_then(|x| x.as_bool()),
+            fs.get("readTextFile").and_then(|x| x.as_bool()),
+            Some(GATES.fs_read)
+        );
+        assert_eq!(
+            fs.get("writeTextFile").and_then(|x| x.as_bool()),
+            Some(GATES.fs_write)
+        );
+        assert_eq!(
+            p.get("clientCapabilities")
+                .and_then(|c| c.get("terminal"))
+                .and_then(|x| x.as_bool()),
             Some(GATES.terminal)
         );
     }
@@ -1244,11 +1370,20 @@ mod tests {
         // Straight from schema/v1: required = ["name", "url", "headers"], plus
         // the `type` that selects the http variant at all.
         for key in ["type", "name", "url", "headers"] {
-            assert!(one.get(key).is_some(), "`{key}` is required and missing:\n{req}");
+            assert!(
+                one.get(key).is_some(),
+                "`{key}` is required and missing:\n{req}"
+            );
         }
         assert_eq!(one.get("type").and_then(|t| t.as_str()), Some("http"));
-        assert_eq!(one.get("url").and_then(|u| u.as_str()), Some("http://127.0.0.1:9/mcp/abc"));
-        assert!(one.get("headers").and_then(|h| h.as_array()).is_some(), "headers is not a list");
+        assert_eq!(
+            one.get("url").and_then(|u| u.as_str()),
+            Some("http://127.0.0.1:9/mcp/abc")
+        );
+        assert!(
+            one.get("headers").and_then(|h| h.as_array()).is_some(),
+            "headers is not a list"
+        );
 
         // And with no tools it is an empty list, which is what it always was.
         let bare = session_new_request(2, None);
@@ -1258,16 +1393,18 @@ mod tests {
             .and_then(|p| p.get("mcpServers"))
             .and_then(|m| m.as_array())
             .expect("no mcpServers");
-        assert!(servers.is_empty(), "a session with no tools named one anyway:\n{bare}");
+        assert!(
+            servers.is_empty(),
+            "a session with no tools named one anyway:\n{bare}"
+        );
     }
 
     /// Only an agent that says it can take an http server is offered one.
     #[test]
     fn http_tools_are_offered_only_where_they_are_advertised() {
-        let yes = json::parse(
-            r#"{"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}}"#,
-        )
-        .unwrap();
+        let yes =
+            json::parse(r#"{"agentCapabilities":{"mcpCapabilities":{"http":true,"sse":false}}}"#)
+                .unwrap();
         assert!(takes_http_tools(&yes));
         for no in [
             r#"{"agentCapabilities":{"mcpCapabilities":{"http":false}}}"#,
@@ -1293,19 +1430,28 @@ mod tests {
     /// A title is still used when that is all there is.
     fn a_tool_call_is_named_from_meta_and_falls_back_to_the_title() {
         let (tx, rx) = channel();
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Looking up Jaipur",
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Looking up Jaipur",
                "_meta":{"name":"locate_place"},"rawInput":{"name":"Jaipur"}}"#,
-        ));
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"t2","title":"Fetch docs",
+            ),
+        );
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"tool_call","toolCallId":"t2","title":"Fetch docs",
                "rawInput":{"url":"https://example.com/a"}}"#,
-        ));
+            ),
+        );
         // An empty name in `_meta` is not a name.
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"t3","title":"Fetch docs",
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"tool_call","toolCallId":"t3","title":"Fetch docs",
                "_meta":{"name":"  "},"rawInput":{"url":"https://example.com/b"}}"#,
-        ));
+            ),
+        );
         drop(tx);
 
         let got: Vec<Event> = rx.iter().collect();
@@ -1325,16 +1471,23 @@ mod tests {
     #[test]
     fn usage_becomes_a_spend_and_an_unpriced_model_is_not_a_free_one() {
         let (tx, rx) = channel();
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"usage_update","used":1256,"size":128000,
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"usage_update","used":1256,"size":128000,
                "cost":{"amount":0.00074,"currency":"USD"}}"#,
-        ));
-        forward(&tx, &upd(r#"{"sessionUpdate":"usage_update","used":1391,"size":128000}"#));
+            ),
+        );
+        forward(
+            &tx,
+            &upd(r#"{"sessionUpdate":"usage_update","used":1391,"size":128000}"#),
+        );
         // Zero is what an agent sends when it has no price at all. It is not a
         // price, and reading it as one makes a paid session look free.
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0}}"#,
-        ));
+        forward(
+            &tx,
+            &upd(r#"{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0}}"#),
+        );
         // Nothing to report is not an event.
         forward(&tx, &upd(r#"{"sessionUpdate":"usage_update"}"#));
         drop(tx);
@@ -1357,23 +1510,33 @@ mod tests {
     #[test]
     fn a_tool_call_carries_its_url_to_the_screen() {
         let (tx, rx) = channel();
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Fetch docs",
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Fetch docs",
                "status":"pending","rawInput":{"url":"https://example.com/a"}}"#,
-        ));
-        forward(&tx, &upd(
-            r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"Fetch docs",
+            ),
+        );
+        forward(
+            &tx,
+            &upd(
+                r#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","title":"Fetch docs",
                "status":"completed","rawInput":{"url":"https://example.com/a"}}"#,
-        ));
+            ),
+        );
         drop(tx);
 
         let got: Vec<Event> = rx.iter().collect();
         assert_eq!(got.len(), 2);
-        let Event::Tool(a) = &got[0] else { panic!("{got:?}") };
+        let Event::Tool(a) = &got[0] else {
+            panic!("{got:?}")
+        };
         assert_eq!(a.id, "t1");
         assert_eq!(a.detail, "https://example.com/a");
         assert_eq!(a.status, Status::Running);
-        let Event::Tool(b) = &got[1] else { panic!("{got:?}") };
+        let Event::Tool(b) = &got[1] else {
+            panic!("{got:?}")
+        };
         assert_eq!(b.status, Status::Done);
     }
 
@@ -1382,7 +1545,10 @@ mod tests {
     #[test]
     fn an_update_without_a_tool_id_is_ignored() {
         let (tx, rx) = channel();
-        forward(&tx, &upd(r#"{"sessionUpdate":"tool_call","title":"nameless"}"#));
+        forward(
+            &tx,
+            &upd(r#"{"sessionUpdate":"tool_call","title":"nameless"}"#),
+        );
         drop(tx);
         assert_eq!(rx.iter().count(), 0);
     }
@@ -1412,7 +1578,10 @@ mod tests {
     }
 
     fn error_code(v: &Value) -> Option<i64> {
-        v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_f64()).map(|c| c as i64)
+        v.get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_f64())
+            .map(|c| c as i64)
     }
 
     /// The bug this whole change exists to fix. A shut gate must answer with an
@@ -1474,9 +1643,18 @@ mod tests {
                "options":[{"optionId":"reject-once","kind":"reject_once"},
                           {"optionId":"allow-always","kind":"allow_always"}]}}"#,
         );
-        let outcome = replies[0].get("result").and_then(|r| r.get("outcome")).expect("no outcome");
-        assert_eq!(outcome.get("outcome").and_then(|o| o.as_str()), Some("selected"));
-        assert_eq!(outcome.get("optionId").and_then(|o| o.as_str()), Some("allow-always"));
+        let outcome = replies[0]
+            .get("result")
+            .and_then(|r| r.get("outcome"))
+            .expect("no outcome");
+        assert_eq!(
+            outcome.get("outcome").and_then(|o| o.as_str()),
+            Some("selected")
+        );
+        assert_eq!(
+            outcome.get("optionId").and_then(|o| o.as_str()),
+            Some("allow-always")
+        );
     }
 
     /// The one that matters. A shell is refused under either vocabulary, and a
@@ -1497,15 +1675,19 @@ mod tests {
                 r#"{{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{{"toolCall":{call},"options":[{{"optionId":"ok","kind":"allow_once"}}]}}}}"#
             );
             let (replies, events) = asked(&req);
-            let outcome =
-                replies[0].get("result").and_then(|r| r.get("outcome")).expect("no outcome");
+            let outcome = replies[0]
+                .get("result")
+                .and_then(|r| r.get("outcome"))
+                .expect("no outcome");
             assert_eq!(
                 outcome.get("outcome").and_then(|o| o.as_str()),
                 Some("cancelled"),
                 "granted a shell: {call}"
             );
             assert!(
-                events.iter().any(|e| matches!(e, Event::Tool(c) if c.status == Status::Refused)),
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Tool(c) if c.status == Status::Refused)),
                 "refused silently: {call}"
             );
         }
@@ -1518,8 +1700,14 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":2,"method":"session/request_permission","params":{
                "toolCall":{"toolCallId":"t"},"options":[{"optionId":"ok","kind":"allow_once"}]}}"#,
         );
-        let outcome = replies[0].get("result").and_then(|r| r.get("outcome")).expect("no outcome");
-        assert_eq!(outcome.get("outcome").and_then(|o| o.as_str()), Some("cancelled"));
+        let outcome = replies[0]
+            .get("result")
+            .and_then(|r| r.get("outcome"))
+            .expect("no outcome");
+        assert_eq!(
+            outcome.get("outcome").and_then(|o| o.as_str()),
+            Some("cancelled")
+        );
     }
 
     /// The budget is a total across the session, and it actually stops.
@@ -1566,7 +1754,10 @@ mod tests {
         // The description is the actionable half and must survive to the log.
         assert_eq!(m[0].description, "Run `copilot login` in the terminal");
         // And its version negotiation is the one we speak.
-        assert_eq!(res.get("protocolVersion").and_then(|v| v.as_f64()), Some(1.0));
+        assert_eq!(
+            res.get("protocolVersion").and_then(|v| v.as_f64()),
+            Some(1.0)
+        );
     }
 
     /// An agent that needs nothing yields no methods, so the authenticate step
@@ -1583,9 +1774,14 @@ mod tests {
     #[test]
     fn the_authenticate_request_names_the_method_it_was_offered() {
         let v = json::parse(&authenticate_request(4, "copilot-login")).expect("valid JSON");
-        assert_eq!(v.get("method").and_then(|m| m.as_str()), Some("authenticate"));
         assert_eq!(
-            v.get("params").and_then(|p| p.get("methodId")).and_then(|m| m.as_str()),
+            v.get("method").and_then(|m| m.as_str()),
+            Some("authenticate")
+        );
+        assert_eq!(
+            v.get("params")
+                .and_then(|p| p.get("methodId"))
+                .and_then(|m| m.as_str()),
             Some("copilot-login")
         );
     }
@@ -1598,7 +1794,16 @@ mod tests {
         for open in ["webfetch", "web_fetch", "websearch", "web_search"] {
             assert!(gates::tool_open(open), "{open} should be granted");
         }
-        for shut in ["bash", "shell", "view", "read", "glob", "grep", "task", "str_replace"] {
+        for shut in [
+            "bash",
+            "shell",
+            "view",
+            "read",
+            "glob",
+            "grep",
+            "task",
+            "str_replace",
+        ] {
             assert!(!gates::tool_open(shut), "{shut} should be refused");
             assert!(gates::tool_shut(shut), "{shut} should be named as shut");
         }
@@ -1625,10 +1830,16 @@ mod tests {
             .unwrap();
 
         let r = stream(0, &rx_in, &tx_out, &mut out, 11, &mut state);
-        assert!(r.is_ok(), "a cancellation was read as the model failing: {r:?}");
+        assert!(
+            r.is_ok(),
+            "a cancellation was read as the model failing: {r:?}"
+        );
         drop(tx_out);
         let events: Vec<Event> = rx_out.iter().collect();
-        assert!(matches!(events.first(), Some(Event::Cancelled)), "{events:?}");
+        assert!(
+            matches!(events.first(), Some(Event::Cancelled)),
+            "{events:?}"
+        );
     }
 
     /// Escape becomes a `$/cancel_request` naming the turn in flight, as a
@@ -1652,18 +1863,29 @@ mod tests {
         assert!(stream(0, &rx_in, &tx_out, &mut out, 11, &mut state).is_ok());
         let sent = String::from_utf8(out).unwrap();
         let note = json::parse(sent.trim()).unwrap_or_else(|| panic!("not JSON: {sent}"));
-        assert_eq!(note.get("method").and_then(|m| m.as_str()), Some("$/cancel_request"));
         assert_eq!(
-            note.get("params").and_then(|p| p.get("requestId")).and_then(|i| i.as_f64()),
+            note.get("method").and_then(|m| m.as_str()),
+            Some("$/cancel_request")
+        );
+        assert_eq!(
+            note.get("params")
+                .and_then(|p| p.get("requestId"))
+                .and_then(|i| i.as_f64()),
             Some(11.0)
         );
-        assert!(note.get("id").is_none(), "a notification must carry no id: {sent}");
+        assert!(
+            note.get("id").is_none(),
+            "a notification must carry no id: {sent}"
+        );
 
         // A turn the visitor stopped reads as stopped even if it completed, so
         // they are not handed a wall of text they asked not to receive.
         drop(tx_out);
         let events: Vec<Event> = rx_out.iter().collect();
-        assert!(matches!(events.first(), Some(Event::Cancelled)), "{events:?}");
+        assert!(
+            matches!(events.first(), Some(Event::Cancelled)),
+            "{events:?}"
+        );
     }
 
     /// An agent that refuses our tools still gets a session.
@@ -1680,7 +1902,7 @@ mod tests {
     /// anything else is concluded, and the visitor gets an agent that answers in
     /// words rather than a section that reports every model as down.
     #[test]
-fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
+    fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
         let mut server = crate::servers::Server::default();
         // The peer refuses any `session/new` that names an MCP server. So this
@@ -1691,7 +1913,11 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         server.command_line(&format!("python3 {script} --refuse-mcp"));
         server.tools_line("env FAKE_MCP_HTTP");
 
-        let shot = Shot { tier: "fake".into(), server, model: "fake/one".into() };
+        let shot = Shot {
+            tier: "fake".into(),
+            server,
+            model: "fake/one".into(),
+        };
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         tx_in.send(In::Prompt("hello".into())).unwrap();
@@ -1718,7 +1944,8 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
     }
 
     #[test]
-    fn tools_the_agent_will_not_take_do_not_cost_us_the_session() {        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
+    fn tools_the_agent_will_not_take_do_not_cost_us_the_session() {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
         let mut server = crate::servers::Server::default();
         // The peer rejects any `session/new` that names an MCP server, which is
         // exactly what the real agents did. As an argument rather than an
@@ -1727,7 +1954,11 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         // in this project.
         server.command_line(&format!("python3 {script} --refuse-mcp"));
 
-        let shot = Shot { tier: "fake".into(), server, model: "fake/one".into() };
+        let shot = Shot {
+            tier: "fake".into(),
+            server,
+            model: "fake/one".into(),
+        };
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         tx_in.send(In::Prompt("hello".into())).unwrap();
@@ -1767,9 +1998,17 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/fake_agent.py");
         let mut server = crate::servers::Server::default();
         server.command_line(&format!("python3 {script}"));
-        assert_eq!(server.pin, crate::servers::Pin::None, "not the generic path");
+        assert_eq!(
+            server.pin,
+            crate::servers::Pin::None,
+            "not the generic path"
+        );
 
-        let shot = Shot { tier: "fake".into(), server, model: "fake/one".into() };
+        let shot = Shot {
+            tier: "fake".into(),
+            server,
+            model: "fake/one".into(),
+        };
         let (tx_in, rx_in) = channel::<In>();
         let (tx_out, rx_out) = channel::<Event>();
         tx_in.send(In::Prompt("what may you do?".into())).unwrap();
@@ -1840,7 +2079,10 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
                 "{expect} was refused invisibly -- shown: {refused:?}"
             );
         }
-        assert!(events.iter().any(|e| matches!(e, Event::Done)), "the turn never finished");
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Done)),
+            "the turn never finished"
+        );
     }
 
     #[test]
@@ -1850,7 +2092,10 @@ fn tools_in_the_environment_are_not_named_in_the_request_and_still_count() {
         for s in &list {
             assert!(!s.model.starts_with('#'), "{} is a comment", s.model);
             assert!(!s.model.is_empty(), "a blank model in tier {}", s.tier);
-            assert!(!s.server.label().is_empty(), "a tier with no server command");
+            assert!(
+                !s.server.label().is_empty(),
+                "a tier with no server command"
+            );
         }
         // The plan follows the file's order, whatever that order currently is.
         // It used to assert that Copilot came first, which is a fact about

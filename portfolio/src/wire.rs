@@ -17,14 +17,29 @@ use crossterm::event::{
 #[derive(Default)]
 pub struct Decoder {
     buf: Vec<u8>,
+    da1: bool,
+    keyboard: bool,
 }
 
 impl Decoder {
+    pub fn take_da1(&mut self) -> bool {
+        std::mem::take(&mut self.da1)
+    }
+
+    pub fn take_keyboard(&mut self) -> bool {
+        std::mem::take(&mut self.keyboard)
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
-        while let Some(ev) = self.next_event() {
-            out.push(ev);
+        loop {
+            let before = self.buf.len();
+            if let Some(event) = self.next_event() {
+                out.push(event);
+            } else if self.buf.len() == before {
+                break;
+            }
         }
         out
     }
@@ -90,6 +105,10 @@ impl Decoder {
         match self.buf[1] {
             b'[' => self.decode_csi(),
             b'O' => self.decode_ss3(),
+            0x7f | 0x08 => {
+                self.buf.drain(..2);
+                Some(key(KeyCode::Backspace, KeyModifiers::ALT))
+            }
             // Alt+<char>: folded to the bare char. Nothing in this app binds
             // an Alt chord, and losing the modifier is better than losing the
             // keystroke.
@@ -137,33 +156,43 @@ impl Decoder {
         let final_byte = self.buf[2 + end];
         let params: String = String::from_utf8_lossy(&self.buf[2..2 + end]).into_owned();
         let consumed = 3 + end;
+        let modified = decode_modifiers(params.split(';').nth(1));
 
-        let code = match final_byte {
-            b'A' => Some(KeyCode::Up),
-            b'B' => Some(KeyCode::Down),
-            b'C' => Some(KeyCode::Right),
-            b'D' => Some(KeyCode::Left),
-            b'H' => Some(KeyCode::Home),
-            b'F' => Some(KeyCode::End),
-            b'Z' => Some(KeyCode::BackTab),
+        let (code, modifiers) = match final_byte {
+            b'A' => (Some(KeyCode::Up), modified),
+            b'B' => (Some(KeyCode::Down), modified),
+            b'C' => (Some(KeyCode::Right), modified),
+            b'D' => (Some(KeyCode::Left), modified),
+            b'H' => (Some(KeyCode::Home), modified),
+            b'F' => (Some(KeyCode::End), modified),
+            b'Z' => (Some(KeyCode::BackTab), KeyModifiers::SHIFT),
             b'~' => match params.split(';').next().unwrap_or("") {
-                "1" | "7" => Some(KeyCode::Home),
-                "2" => Some(KeyCode::Insert),
-                "3" => Some(KeyCode::Delete),
-                "4" | "8" => Some(KeyCode::End),
-                "5" => Some(KeyCode::PageUp),
-                "6" => Some(KeyCode::PageDown),
-                "11" => Some(KeyCode::F(1)),
-                "12" => Some(KeyCode::F(2)),
-                "13" => Some(KeyCode::F(3)),
-                "14" => Some(KeyCode::F(4)),
-                "15" => Some(KeyCode::F(5)),
-                _ => None,
+                "1" | "7" => (Some(KeyCode::Home), KeyModifiers::NONE),
+                "2" => (Some(KeyCode::Insert), KeyModifiers::NONE),
+                "3" => (Some(KeyCode::Delete), KeyModifiers::NONE),
+                "4" | "8" => (Some(KeyCode::End), KeyModifiers::NONE),
+                "5" => (Some(KeyCode::PageUp), KeyModifiers::NONE),
+                "6" => (Some(KeyCode::PageDown), KeyModifiers::NONE),
+                "11" => (Some(KeyCode::F(1)), KeyModifiers::NONE),
+                "12" => (Some(KeyCode::F(2)), KeyModifiers::NONE),
+                "13" => (Some(KeyCode::F(3)), KeyModifiers::NONE),
+                "14" => (Some(KeyCode::F(4)), KeyModifiers::NONE),
+                "15" => (Some(KeyCode::F(5)), KeyModifiers::NONE),
+                _ => (None, KeyModifiers::NONE),
             },
-            _ => None,
+            b'u' if params.starts_with('?') => {
+                self.keyboard = true;
+                (None, KeyModifiers::NONE)
+            }
+            b'u' => decode_csi_u(&params),
+            b'c' if params.starts_with('?') => {
+                self.da1 = true;
+                (None, KeyModifiers::NONE)
+            }
+            _ => (None, KeyModifiers::NONE),
         };
         self.buf.drain(..consumed);
-        code.map(|c| key(c, if final_byte == b'Z' { KeyModifiers::SHIFT } else { KeyModifiers::NONE }))
+        code.map(|c| key(c, modifiers))
     }
 
     /// `ESC [ < Cb ; Cx ; Cy (M|m)`. `Cb` packs the button and the modifiers;
@@ -221,6 +250,40 @@ impl Decoder {
     }
 }
 
+fn decode_csi_u(params: &str) -> (Option<KeyCode>, KeyModifiers) {
+    let mut parts = params.split(';');
+    let code = parts.next().and_then(|part| part.parse::<u32>().ok());
+    let modifiers = decode_modifiers(parts.next());
+    let key = match code {
+        Some(13) => Some(KeyCode::Enter),
+        Some(8 | 127) => Some(KeyCode::Backspace),
+        Some(9) => Some(KeyCode::Tab),
+        Some(27) => Some(KeyCode::Esc),
+        Some(code) => char::from_u32(code).map(KeyCode::Char),
+        None => None,
+    };
+    (key, modifiers)
+}
+
+fn decode_modifiers(encoded: Option<&str>) -> KeyModifiers {
+    let encoded = encoded
+        .and_then(|part| part.split(':').next())
+        .and_then(|part| part.parse::<u8>().ok())
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let mut modifiers = KeyModifiers::NONE;
+    if encoded & 1 != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if encoded & 2 != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if encoded & 4 != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    modifiers
+}
+
 fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
@@ -239,6 +302,8 @@ fn utf8_len(byte: u8) -> usize {
 /// and SGR extended coordinates (1006, so columns past 223 do not wrap).
 pub const ENABLE_MOUSE: &[u8] = b"\x1b[?1003h\x1b[?1006h";
 pub const DISABLE_MOUSE: &[u8] = b"\x1b[?1003l\x1b[?1006l";
+pub const ENABLE_KEYS: &[u8] = b"\x1b[>1u";
+pub const DISABLE_KEYS: &[u8] = b"\x1b[<u";
 
 #[cfg(test)]
 mod tests {
@@ -291,6 +356,42 @@ mod tests {
         assert_eq!(keys(&mut d, b"\x1b[A"), vec![Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))]);
         assert_eq!(keys(&mut d, b"\x1b[6~"), vec![Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))]);
         assert_eq!(keys(&mut d, b"\r"), vec![Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))]);
+    }
+
+    #[test]
+    fn modified_editing_keys_keep_their_modifiers() {
+        let mut d = Decoder::default();
+        assert_eq!(
+            keys(&mut d, b"\x1b[13;2u\x1b[127;5u\x1b[127;3u"),
+            vec![
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
+            ]
+        );
+        assert_eq!(
+            keys(&mut d, b"\x1b\x7f"),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::ALT
+            ))]
+        );
+        assert_eq!(
+            keys(&mut d, b"\x1b[117;5u\x1b[1;5D"),
+            vec![
+                Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+                Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_primary_device_reply_is_capability_data_not_input() {
+        let mut d = Decoder::default();
+        assert!(d.feed(b"\x1b[?1;2c\x1b[?5u").is_empty());
+        assert!(d.take_da1());
+        assert!(!d.take_da1());
+        assert!(d.take_keyboard());
     }
 
     /// The one thing `Shell::on_key` actually branches on for this byte: a

@@ -17,13 +17,15 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, Pty};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Pty};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::Duration;
 
@@ -33,6 +35,8 @@ use crate::session;
 /// to grow the process without bound -- each session is a `Shell`, a decoder
 /// and a couple of channels, not large, but not nothing at a thousand of them.
 const MAX_SESSIONS: usize = 128;
+const MAX_CONNECTIONS: usize = 192;
+const PER_ADDRESS_CONNECTIONS: usize = 4;
 
 /// Sessions one address may hold at once.
 ///
@@ -62,10 +66,10 @@ struct Crowd {
 
 impl Crowd {
     /// Take a seat for this address, or say no.
-    fn take(&self, key: &str) -> bool {
+    fn take(&self, key: &str, limit: usize) -> bool {
         let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
         let n = held.entry(key.to_string()).or_insert(0);
-        if *n >= PER_ADDRESS {
+        if *n >= limit {
             return false;
         }
         *n += 1;
@@ -99,6 +103,21 @@ struct Seat {
     total: Arc<AtomicUsize>,
     crowd: Arc<Crowd>,
     key: Option<String>,
+}
+
+struct Connection {
+    total: Arc<AtomicUsize>,
+    crowd: Arc<Crowd>,
+    key: Option<String>,
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.total.fetch_sub(1, Ordering::SeqCst);
+        if let Some(key) = &self.key {
+            self.crowd.give_back(key);
+        }
+    }
 }
 
 impl Drop for Seat {
@@ -143,25 +162,63 @@ pub async fn serve(addr: &str, port: u16, host_key: &Path) -> anyhow::Result<()>
     // ssh-keygen in this image to compute it after the fact -- no OpenSSH
     // here at all any more -- so the binary is the only thing that can say
     // this to anyone, including you.
-    eprintln!("portfolio: host key fingerprint {}", key.fingerprint(HashAlg::Sha256));
+    crate::visits::operational(
+        "info",
+        "ssh_host_key",
+        &key.fingerprint(HashAlg::Sha256).to_string(),
+    );
+    let digest = Sha256::digest(key.public_key().to_bytes()?);
+    let sshfp = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    crate::visits::operational("info", "sshfp", &format!("SSHFP 4 2 {sshfp}"));
     let config = Arc::new(Config {
         // Only what this actually offers. Password and keyboard-interactive
         // are never implemented below, so leaving them out of `methods`
         // rather than just declining every attempt is what stops a client
         // from being invited to try them.
-        methods: [russh::MethodKind::PublicKey].as_slice().into(),
-        inactivity_timeout: Some(Duration::from_secs(120)),
+        methods: [russh::MethodKind::None, russh::MethodKind::PublicKey].as_slice().into(),
+        inactivity_timeout: Some(Duration::from_secs(1_200)),
         auth_rejection_time: Duration::from_secs(1),
         keys: vec![key],
         nodelay: true,
         ..Default::default()
     });
 
-    eprintln!("portfolio: listening on {addr}:{port}");
+    crate::visits::operational("info", "ssh_listen", &format!("{addr}:{port}"));
+    let socket = tokio::net::TcpListener::bind((addr, port)).await?;
     let mut server =
-        Listener { sessions: Arc::new(AtomicUsize::new(0)), crowd: Arc::new(Crowd::default()) };
-    server.run_on_address(config, (addr, port)).await?;
+        Listener {
+            connections: Arc::new(AtomicUsize::new(0)),
+            connection_crowd: Arc::new(Crowd::default()),
+            sessions: Arc::new(AtomicUsize::new(0)),
+            crowd: Arc::new(Crowd::default()),
+        };
+    let running = server.run_on_socket(config, &socket);
+    let handle = running.handle();
+    tokio::pin!(running);
+    tokio::select! {
+        result = &mut running => result?,
+        _ = shutdown_signal() => {
+            handle.shutdown("server shutting down".into());
+            let _ = tokio::time::timeout(Duration::from_secs(10), &mut running).await;
+        }
+    }
     Ok(())
+}
+
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn load_or_create_host_key(path: &Path) -> anyhow::Result<PrivateKey> {
@@ -173,17 +230,42 @@ fn load_or_create_host_key(path: &Path) -> anyhow::Result<PrivateKey> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, key.to_openssh(russh::keys::ssh_key::LineEnding::LF)?.as_bytes())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = path.with_extension(format!("new-{}-{nonce}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    eprintln!("portfolio: generated a new host key at {}", path.display());
+    let mut file = options.open(&temporary)?;
+    file.write_all(key.to_openssh(russh::keys::ssh_key::LineEnding::LF)?.as_bytes())?;
+    file.sync_all()?;
+    match std::fs::hard_link(&temporary, path) {
+        Ok(()) => {
+            std::fs::remove_file(&temporary)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&temporary)?;
+            let raw = std::fs::read_to_string(path)?;
+            return Ok(PrivateKey::from_openssh(&raw)?);
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    }
+    crate::visits::operational("info", "ssh_host_key_created", &path.display().to_string());
     Ok(key)
 }
 
 struct Listener {
+    connections: Arc<AtomicUsize>,
+    connection_crowd: Arc<Crowd>,
     sessions: Arc<AtomicUsize>,
     crowd: Arc<Crowd>,
 }
@@ -193,8 +275,26 @@ impl russh::server::Server for Listener {
 
     fn new_client(&mut self, peer: Option<std::net::SocketAddr>) -> Self::Handler {
         let ip = peer.map(|p| p.ip());
+        let connection_key = ip.and_then(crowd_key);
+        let below_global = self.connections.fetch_add(1, Ordering::SeqCst) < MAX_CONNECTIONS;
+        let mut connection = Connection {
+            total: Arc::clone(&self.connections),
+            crowd: Arc::clone(&self.connection_crowd),
+            key: None,
+        };
+        let below_address = connection_key.as_ref().is_none_or(|key| {
+            if self.connection_crowd.take(key, PER_ADDRESS_CONNECTIONS) {
+                connection.key = Some(key.clone());
+                true
+            } else {
+                false
+            }
+        });
         let peer = peer.map(|p| p.to_string()).unwrap_or_default();
         SessionHandler {
+            admitted: below_global && below_address,
+            rate_checked: false,
+            _connection: connection,
             sessions: Arc::clone(&self.sessions),
             crowd: Arc::clone(&self.crowd),
             // Kept parsed rather than re-split out of the string below: the
@@ -208,26 +308,58 @@ impl russh::server::Server for Listener {
                 ..Default::default()
             },
             peer,
+            channel: None,
             pty: None,
+            started: false,
             tx: None,
         }
     }
 }
 
 struct SessionHandler {
+    admitted: bool,
+    rate_checked: bool,
+    _connection: Connection,
     sessions: Arc<AtomicUsize>,
     crowd: Arc<Crowd>,
     /// Where this connection came from, if the transport said. `None` is
     /// treated as unlimited rather than refused -- see `shell_request`.
     ip: Option<IpAddr>,
     peer: String,
+    channel: Option<ChannelId>,
     pty: Option<(u16, u16)>,
+    started: bool,
     tx: Option<UnboundedSender<Wire>>,
     /// Who is at the other end, as far as the handshake said. Both halves are
     /// offered by the client rather than taken from it: the username is what
     /// they typed in front of the `@`, and the key is the one they chose to
     /// authenticate with.
     who: crate::visits::Who,
+}
+
+impl SessionHandler {
+    fn admit_identity(&mut self) -> bool {
+        if !self.admitted {
+            return false;
+        }
+        if self.rate_checked {
+            return true;
+        }
+        let mut keys = Vec::new();
+        match self.ip {
+            Some(ip) => {
+                if let Some(key) = crowd_key(ip) {
+                    keys.push(format!("ip:{key}"));
+                }
+            }
+            None => keys.push("ip:unknown".into()),
+        }
+        if !self.who.id.is_empty() {
+            keys.push(format!("ssh-key:{}", self.who.id));
+        }
+        self.rate_checked = crate::budget::admit_visit(&keys);
+        self.rate_checked
+    }
 }
 
 /// Say one line to a visitor who is not getting a session, and hang up.
@@ -257,6 +389,17 @@ enum Wire {
 impl Handler for SessionHandler {
     type Error = anyhow::Error;
 
+    async fn auth_none(&mut self, user: &str) -> Result<Auth, Self::Error> {
+        self.who.user = user.to_string();
+        if !self.admit_identity() {
+            return Ok(Auth::Reject {
+                proceed_with_methods: Some([russh::MethodKind::PublicKey].as_slice().into()),
+                partial_success: false,
+            });
+        }
+        Ok(Auth::Accept)
+    }
+
     /// The whole point. No account, no key list, no state to consult --
     /// anyone who shows up gets a session. There is nothing behind this
     /// login worth protecting with a gate, and gating a public CV would only
@@ -269,6 +412,12 @@ impl Handler for SessionHandler {
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         self.who.user = user.to_string();
         self.who.id = key.fingerprint(HashAlg::Sha256).to_string();
+        if !self.admit_identity() {
+            return Ok(Auth::Reject {
+                proceed_with_methods: None,
+                partial_success: false,
+            });
+        }
         Ok(Auth::Accept)
     }
 
@@ -278,8 +427,63 @@ impl Handler for SessionHandler {
         reply: ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let _ = channel.id();
+        if self.channel.is_some() {
+            reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        }
+        self.channel = Some(channel.id());
         reply.accept().await;
+        Ok(())
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn channel_open_x11(
+        &mut self,
+        _channel: Channel<Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn channel_open_forwarded_tcpip(
+        &mut self,
+        _channel: Channel<Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+        Ok(())
+    }
+
+    async fn channel_open_direct_streamlocal(
+        &mut self,
+        _channel: Channel<Msg>,
+        _socket_path: &str,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
         Ok(())
     }
 
@@ -294,9 +498,14 @@ impl Handler for SessionHandler {
         _modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.pty = Some((col_width as u16, row_height as u16));
+        if self.channel != Some(channel) || self.started {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        let size = (col_width.min(u16::MAX as u32) as u16, row_height.min(u16::MAX as u32) as u16);
+        self.pty = Some(size);
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Wire::Resize(col_width as u16, row_height as u16));
+            let _ = tx.send(Wire::Resize(size.0, size.1));
         }
         session.channel_success(channel)?;
         Ok(())
@@ -307,6 +516,10 @@ impl Handler for SessionHandler {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.channel != Some(channel) || self.started {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         let Some((cols, rows)) = self.pty else {
             let handle = session.handle();
             let _ = handle
@@ -342,13 +555,13 @@ impl Handler for SessionHandler {
             key: None,
         };
         if let Some(key) = &key {
-            if !self.crowd.take(key) {
+            if !self.crowd.take(key, PER_ADDRESS) {
                 // Said plainly, because the visitor can fix it and a silent
                 // drop looks like the box being broken. Logged with the
                 // address, because a great many of these from one place is the
                 // symptom of everything arriving through one gateway rather
                 // than of anybody misbehaving.
-                eprintln!("portfolio: refused a second session from {key}");
+                crate::visits::operational("warn", "ssh_session_refused", key);
                 session.channel_success(channel)?;
                 turn_away(
                     &session.handle(),
@@ -366,6 +579,7 @@ impl Handler for SessionHandler {
 
         let (tx, rx) = unbounded_channel();
         self.tx = Some(tx);
+        self.started = true;
         session.channel_success(channel)?;
 
         let handle = session.handle();
@@ -391,7 +605,11 @@ impl Handler for SessionHandler {
             let _seat = seat;
             rt.block_on(async move {
                 if let Err(e) = run_session(handle.clone(), channel, cols, rows, rx, who).await {
-                    eprintln!("portfolio: session from {peer} ended: {e:#}");
+                    crate::visits::operational(
+                        "warn",
+                        "ssh_session_error",
+                        &format!("{peer}: {e:#}"),
+                    );
                 }
                 let _ = handle.close(channel).await;
             });
@@ -402,41 +620,140 @@ impl Handler for SessionHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // This is a TUI, not a command surface -- say so rather than hang.
+        if self.channel != Some(channel) || self.started {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        let command = std::str::from_utf8(data).unwrap_or_default().trim();
+        if !matches!(command, "portfolio" | "help" | "") {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        self.started = true;
+        session.channel_success(channel)?;
         let handle = session.handle();
         let _ = handle
-            .data(channel, bytes::Bytes::from_static(b"this has no command interface; connect with -t\r\n"))
+            .data(
+                channel,
+                bytes::Bytes::from_static(
+                    b"Prince Patel's portfolio. This endpoint executes no system commands.\nConnect with `ssh -t <host>` for the interactive version.\n",
+                ),
+            )
             .await;
+        let _ = handle.exit_status_request(channel, 0).await;
+        let _ = handle.eof(channel).await;
+        let _ = handle.close(channel).await;
+        Ok(())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        _name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         session.channel_failure(channel)?;
         Ok(())
     }
 
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        _variable_name: &str,
+        _variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn x11_request(
+        &mut self,
+        channel: ChannelId,
+        _single_connection: bool,
+        _x11_auth_protocol: &str,
+        _x11_auth_cookie: &str,
+        _x11_screen_number: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn agent_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        session.channel_failure(channel)?;
+        Ok(false)
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        _address: &str,
+        _port: &mut u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        _address: &str,
+        _port: u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn streamlocal_forward(
+        &mut self,
+        _socket_path: &str,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
+    async fn cancel_streamlocal_forward(
+        &mut self,
+        _socket_path: &str,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
+
     async fn window_change_request(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         col_width: u32,
         row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.pty = Some((col_width as u16, row_height as u16));
+        if self.channel != Some(channel) || !self.started {
+            return Ok(());
+        }
+        let size = (col_width.min(u16::MAX as u32) as u16, row_height.min(u16::MAX as u32) as u16);
+        self.pty = Some(size);
         if let Some(tx) = &self.tx {
-            let _ = tx.send(Wire::Resize(col_width as u16, row_height as u16));
+            let _ = tx.send(Wire::Resize(size.0, size.1));
         }
         Ok(())
     }
 
     async fn data(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tx) = &self.tx {
+        if self.channel == Some(channel) && self.started {
+            let Some(tx) = &self.tx else { return Ok(()) };
             let _ = tx.send(Wire::Bytes(data.to_vec()));
         }
         Ok(())
@@ -444,10 +761,11 @@ impl Handler for SessionHandler {
 
     async fn channel_close(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tx) = &self.tx {
+        if self.channel == Some(channel) {
+            let Some(tx) = &self.tx else { return Ok(()) };
             let _ = tx.send(Wire::Hangup);
         }
         Ok(())
@@ -455,10 +773,11 @@ impl Handler for SessionHandler {
 
     async fn channel_eof(
         &mut self,
-        _channel: ChannelId,
+        channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tx) = &self.tx {
+        if self.channel == Some(channel) {
+            let Some(tx) = &self.tx else { return Ok(()) };
             let _ = tx.send(Wire::Hangup);
         }
         Ok(())
@@ -515,6 +834,57 @@ async fn run_session(
 mod tests {
     use super::*;
 
+    fn handler() -> SessionHandler {
+        SessionHandler {
+            admitted: true,
+            rate_checked: true,
+            _connection: Connection {
+                total: Arc::new(AtomicUsize::new(1)),
+                crowd: Arc::new(Crowd::default()),
+                key: None,
+            },
+            sessions: Arc::new(AtomicUsize::new(0)),
+            crowd: Arc::new(Crowd::default()),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            peer: "127.0.0.1:22".into(),
+            channel: None,
+            pty: None,
+            started: false,
+            tx: None,
+            who: crate::visits::Who::default(),
+        }
+    }
+
+    #[test]
+    fn anonymous_authentication_is_accepted_without_a_password_prompt() {
+        let mut handler = handler();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(runtime.block_on(handler.auth_none("visitor")).unwrap(), Auth::Accept);
+        assert_eq!(handler.who.user, "visitor");
+    }
+
+    #[test]
+    fn an_unknown_public_key_is_accepted() {
+        let mut handler = handler();
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        assert_eq!(
+            runtime.block_on(handler.auth_publickey("visitor", key.public_key())).unwrap(),
+            Auth::Accept
+        );
+        assert!(!handler.who.id.is_empty());
+    }
+
+    #[test]
+    fn a_generated_host_key_is_reused() {
+        let path = std::env::temp_dir().join(format!("portfolio-host-key-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let first = load_or_create_host_key(&path).unwrap();
+        let second = load_or_create_host_key(&path).unwrap();
+        assert_eq!(first.fingerprint(HashAlg::Sha256), second.fingerprint(HashAlg::Sha256));
+        let _ = std::fs::remove_file(path);
+    }
+
     fn seat(total: &Arc<AtomicUsize>, crowd: &Arc<Crowd>, ip: &str) -> Option<Seat> {
         // The same order as `shell_request`, deliberately: a helper that takes
         // its seat differently from the code under test is a helper that tests
@@ -524,7 +894,7 @@ mod tests {
         let mut seat =
             Seat { total: Arc::clone(total), crowd: Arc::clone(crowd), key: None };
         if let Some(key) = key {
-            if !crowd.take(&key) {
+            if !crowd.take(&key, PER_ADDRESS) {
                 return None;
             }
             seat.key = Some(key);

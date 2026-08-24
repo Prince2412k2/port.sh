@@ -52,8 +52,10 @@ pub struct Museum {
     works: Vec<Entry>,
     /// Which work is chosen. Always a valid index.
     pub sel: usize,
-    /// Where the wall actually is, in works — eases toward `sel`, so a jump
-    /// of three slides through the two in between rather than cutting.
+    /// The chosen work on an unbounded wall. Its modulo is `sel`; keeping the
+    /// unbounded coordinate makes the last and first works true neighbours.
+    target: i64,
+    /// Where the wall actually is, in works.
     pos: f64,
     /// Seconds since the selection last changed.
     fresh: f64,
@@ -65,7 +67,14 @@ impl Museum {
         // Figures and works hang on the same wall. The sheet keeps them apart
         // because it is a document; a room does not have two halves.
         let works: Vec<Entry> = s.figures.iter().chain(&s.works).cloned().collect();
-        Museum { works, sel: 0, pos: 0.0, fresh: 0.0, t: 0.0 }
+        Museum {
+            works,
+            sel: 0,
+            target: 0,
+            pos: 0.0,
+            fresh: 0.0,
+            t: 0.0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -78,6 +87,15 @@ impl Museum {
         }
         let i = i.min(self.works.len() - 1);
         if i != self.sel {
+            let n = self.works.len() as i64;
+            let here = self.target.rem_euclid(n);
+            let forward = (i as i64 - here).rem_euclid(n);
+            let backward = forward - n;
+            self.target += if forward <= -backward {
+                forward
+            } else {
+                backward
+            };
             self.sel = i;
             self.fresh = 0.0;
         }
@@ -89,19 +107,23 @@ impl Museum {
     /// still shows whatever was on screen before.
     pub fn jump(&mut self, i: usize) {
         self.go(i);
-        self.pos = self.sel as f64;
+        self.target = self.sel as i64;
+        self.pos = self.target as f64;
     }
 
     pub fn next(&mut self) {
         if !self.works.is_empty() {
-            self.go((self.sel + 1) % self.works.len());
+            self.target += 1;
+            self.sel = self.target.rem_euclid(self.works.len() as i64) as usize;
+            self.fresh = 0.0;
         }
     }
 
     pub fn prev(&mut self) {
         if !self.works.is_empty() {
-            let n = self.works.len();
-            self.go((self.sel + n - 1) % n);
+            self.target -= 1;
+            self.sel = self.target.rem_euclid(self.works.len() as i64) as usize;
+            self.fresh = 0.0;
         }
     }
 
@@ -114,7 +136,7 @@ impl Museum {
     }
 
     pub fn sliding(&self) -> bool {
-        (self.pos - self.sel as f64).abs() > 0.001
+        (self.pos - self.target as f64).abs() > 0.001
     }
 
     /// How long this work's plate should keep looping, at the size it is drawn.
@@ -146,7 +168,7 @@ impl Museum {
     pub fn tick(&mut self, dt: f64) {
         self.t += dt;
         self.fresh += dt;
-        let target = self.sel as f64;
+        let target = self.target as f64;
         let d = target - self.pos;
         if d.abs() <= 0.001 {
             self.pos = target;
@@ -161,13 +183,29 @@ impl Museum {
     /// The colour of the wall right now, blended across a slide so the room
     /// changes with the work rather than after it.
     fn wall(&self) -> (u8, u8, u8) {
-        let lo = self.pos.floor().max(0.0) as usize;
-        let hi = (lo + 1).min(self.works.len().saturating_sub(1));
-        let k = (self.pos - lo as f64).clamp(0.0, 1.0) as f32;
+        let n = self.works.len() as i64;
+        let floor = self.pos.floor() as i64;
+        let lo = floor.rem_euclid(n) as usize;
+        let hi = (floor + 1).rem_euclid(n) as usize;
+        let k = (self.pos - floor as f64).clamp(0.0, 1.0) as f32;
         let a = self.plate(lo).map_or((128, 128, 128), |p| p.tint);
         let b = self.plate(hi).map_or(a, |p| p.tint);
         let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k) as u8;
         (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
+    }
+
+    pub fn pick_index(&mut self, area: Rect, column: u16, row: u16) -> bool {
+        let n = self.works.len();
+        let width = (n * 2) as u16;
+        if width + 2 > area.width || row != area.bottom().saturating_sub(1) {
+            return false;
+        }
+        let x = area.x + (area.width - width) / 2;
+        if column < x || column >= x + width {
+            return false;
+        }
+        self.go(((column - x) / 2) as usize);
+        true
     }
 }
 
@@ -238,17 +276,15 @@ pub fn render(f: &mut Frame, area: Rect, m: &Museum) {
     let stride = area.width as f64;
     // Only the works that can actually reach the screen. At a stride of one
     // full width that is the one either side, mid-slide.
-    let first = m.pos.floor() as isize - 1;
+    let first = m.pos.floor() as i64 - 1;
     for k in 0..3 {
-        let i = first + k;
-        if i < 0 || i as usize >= m.works.len() {
-            continue;
-        }
-        let dx = (i as f64 - m.pos) * stride;
+        let virtual_index = first + k;
+        let i = virtual_index.rem_euclid(m.works.len() as i64) as usize;
+        let dx = (virtual_index as f64 - m.pos) * stride;
         if dx.abs() >= area.width as f64 {
             continue;
         }
-        work(f, area, m, i as usize, dx);
+        work(f, area, m, i, dx);
     }
 
     index(f, area, m);
@@ -445,6 +481,24 @@ mod tests {
         m.fresh = 99.0;
         m.next();
         assert_eq!(m.fresh, 0.0);
+    }
+
+    #[test]
+    fn the_end_and_start_are_one_slide_apart() {
+        let s = sheet();
+        let mut m = Museum::new(&s);
+        let last = m.len() - 1;
+        m.jump(last);
+        m.next();
+
+        assert_eq!(m.sel, 0);
+        assert_eq!(m.target, m.len() as i64);
+        assert_eq!(m.target as f64 - m.pos, 1.0);
+
+        for _ in 0..60 {
+            m.tick(1.0 / 60.0);
+        }
+        assert_eq!(m.pos, m.len() as f64);
     }
 
     /// The slide has to actually finish. An eased approach that only ever

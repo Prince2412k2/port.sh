@@ -120,8 +120,20 @@ pub const TOOLS: &[Tool] = &[
     // deliberately *not* here -- it is an ordinary English word, and matching it
     // by containment would let a tool called anything at all be granted by a
     // label that merely mentions fetching.
-    Tool { name: "webfetch", aka: &["web_fetch"], open: true, ours: false, blurb: "read a page" },
-    Tool { name: "websearch", aka: &["web_search"], open: true, ours: false, blurb: "search the web" },
+    Tool {
+        name: "webfetch",
+        aka: &["web_fetch"],
+        open: true,
+        ours: false,
+        blurb: "read a page",
+    },
+    Tool {
+        name: "websearch",
+        aka: &["web_search"],
+        open: true,
+        ours: false,
+        blurb: "search the web",
+    },
     // Ours, served from this process -- see `mcp.rs`. Open because the whole
     // point of them is that the agent decides when a map belongs on screen, and
     // neither one can do anything but draw: `locate_place` reads an index built
@@ -131,14 +143,58 @@ pub const TOOLS: &[Tool] = &[
     // Named exactly, with no aliases. The rule on the open side is stinginess,
     // and these are names we chose ourselves -- there is no upstream that might
     // rename them and no prose that should ever match one.
-    Tool { name: "locate_place", aka: &[], open: true, ours: true, blurb: "find a place" },
-    Tool { name: "show_map", aka: &[], open: true, ours: true, blurb: "draw a map" },
-    Tool { name: "locate_visitor", aka: &[], open: true, ours: true, blurb: "where you are" },
-    Tool { name: "hide_map", aka: &[], open: true, ours: true, blurb: "put the map away" },
+    Tool {
+        name: "locate_place",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "find a place",
+    },
+    Tool {
+        name: "show_map",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "draw a map",
+    },
+    Tool {
+        name: "locate_visitor",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "where you are",
+    },
+    Tool {
+        name: "hide_map",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "put the map away",
+    },
     // The projects, from the same file the projects section reads. Open for the
     // same reason as the map tools: it draws and it looks things up, and both
     // of those are what this section is for.
-    Tool { name: "show_project", aka: &[], open: true, ours: true, blurb: "a project, drawn" },
+    Tool {
+        name: "show_project",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "a project, drawn",
+    },
+    Tool {
+        name: "preview_diagram",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "preview an explanation",
+    },
+    Tool {
+        name: "show_diagram",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "publish an explanation",
+    },
     // Also ours, and the only two that leave this box. They are here because
     // "can look something up" used to arrive and leave with whichever server was
     // answering: Copilot's seat brings its own web tools, most of the free models
@@ -150,30 +206,96 @@ pub const TOOLS: &[Tool] = &[
     // `web_search`, which is already Copilot's spelling of its own; `fetch_page`
     // rather than `read_page`, because `read` is a shut tool and containment
     // would have refused ours under the name of that one.
-    Tool { name: "search_web", aka: &[], open: true, ours: true, blurb: "find pages about a thing" },
-    Tool { name: "fetch_page", aka: &[], open: true, ours: true, blurb: "read a page as text" },
+    Tool {
+        name: "search_web",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "find pages about a thing",
+    },
+    Tool {
+        name: "fetch_page",
+        aka: &[],
+        open: true,
+        ours: true,
+        blurb: "read a page as text",
+    },
     // Nothing provides this one. `/reach` is handled in ask.rs before the
     // agent ever sees the line, deliberately: a message meant for a person
     // should arrive whether or not a model is up, and word for word rather
     // than as something's summary of it. Off, so that if a tool by this name
     // ever does appear it arrives shut and somebody decides on purpose.
-    Tool { name: "reach_out", aka: &[], open: false, ours: false, blurb: "leave Prince a message" },
+    Tool {
+        name: "reach_out",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "leave Prince a message",
+    },
     // Named and shut so the refusal is visible rather than implied. This is
     // the one that matters: a shell on a box that accepts any username is
     // arbitrary code execution for anyone who can type, and it answers to at
     // least two names depending on who is asking.
-    Tool { name: "bash", aka: &["shell"], open: false, ours: false, blurb: "run a command" },
-    Tool { name: "edit", aka: &["str_replace"], open: false, ours: false, blurb: "change a file" },
-    Tool { name: "write", aka: &[], open: false, ours: false, blurb: "create a file" },
-    Tool { name: "patch", aka: &[], open: false, ours: false, blurb: "apply a diff" },
+    Tool {
+        name: "bash",
+        aka: &["shell"],
+        open: false,
+        ours: false,
+        blurb: "run a command",
+    },
+    Tool {
+        name: "edit",
+        aka: &["str_replace"],
+        open: false,
+        ours: false,
+        blurb: "change a file",
+    },
+    Tool {
+        name: "write",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "create a file",
+    },
+    Tool {
+        name: "patch",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "apply a diff",
+    },
     // Reading the filesystem is not the same risk as writing it, and it is
     // still not this agent's business: the context it needs is pushed into the
     // first prompt, and everything else on this disk is either source control
     // or somebody's messages.
-    Tool { name: "view", aka: &["read"], open: false, ours: false, blurb: "read a file" },
-    Tool { name: "glob", aka: &[], open: false, ours: false, blurb: "find files by name" },
-    Tool { name: "grep", aka: &[], open: false, ours: false, blurb: "search the files" },
-    Tool { name: "task", aka: &[], open: false, ours: false, blurb: "spawn a sub-agent" },
+    Tool {
+        name: "view",
+        aka: &["read"],
+        open: false,
+        ours: false,
+        blurb: "read a file",
+    },
+    Tool {
+        name: "glob",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "find files by name",
+    },
+    Tool {
+        name: "grep",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "search the files",
+    },
+    Tool {
+        name: "task",
+        aka: &[],
+        open: false,
+        ours: false,
+        blurb: "spawn a sub-agent",
+    },
 ];
 
 /// Every spelling of every tool that is open, for a server that takes its
@@ -197,7 +319,10 @@ pub const TOOLS: &[Tool] = &[
 /// for. Both are the same call and only one of them is worth reading.
 pub fn ours(name: &str) -> bool {
     let t = flatten(name);
-    TOOLS.iter().filter(|x| x.ours).any(|x| x.names().any(|n| t.contains(&flatten(n))))
+    TOOLS
+        .iter()
+        .filter(|x| x.ours)
+        .any(|x| x.names().any(|n| t.contains(&flatten(n))))
 }
 
 pub fn open_tool_names() -> Vec<String> {
@@ -241,7 +366,10 @@ pub fn capabilities() -> [(&'static str, bool); 5] {
 /// a refused fetch is a worse answer, an unrecognised shell is a broken box.
 pub fn tool_open(name: &str) -> bool {
     let t = flatten(name);
-    !tool_shut(name) && TOOLS.iter().any(|x| x.open && x.names().any(|n| t.contains(&flatten(n))))
+    !tool_shut(name)
+        && TOOLS
+            .iter()
+            .any(|x| x.open && x.names().any(|n| t.contains(&flatten(n))))
 }
 
 /// Whether a string names a tool that is shut.
@@ -252,7 +380,9 @@ pub fn tool_open(name: &str) -> bool {
 /// be granted on the strength of its first word.
 pub fn tool_shut(name: &str) -> bool {
     let t = flatten(name);
-    TOOLS.iter().any(|x| !x.open && x.names().any(|n| t.contains(&flatten(n))))
+    TOOLS
+        .iter()
+        .any(|x| !x.open && x.names().any(|n| t.contains(&flatten(n))))
 }
 
 /// Lower case, and with the separators taken out.
@@ -297,7 +427,10 @@ pub fn verdict(method: &str) -> Verdict {
         "session/request_permission" => Verdict::Open,
         "fs/read_text_file" => gate(GATES.fs_read, "fs.read"),
         "fs/write_text_file" => gate(GATES.fs_write, "fs.write"),
-        "terminal/create" | "terminal/output" | "terminal/release" | "terminal/wait_for_exit"
+        "terminal/create"
+        | "terminal/output"
+        | "terminal/release"
+        | "terminal/wait_for_exit"
         | "terminal/kill" => gate(GATES.terminal, "terminal"),
         "elicitation/create" => gate(GATES.elicitation, "elicitation"),
         _ => Verdict::Unimplemented,
@@ -419,18 +552,26 @@ mod tests {
             let bare = t.name.to_string();
             let owned = format!("{}-{}", crate::mcp::SERVER_NAME, t.name);
             assert!(names.contains(&bare), "`{bare}` missing from {names:?}");
-            assert!(names.contains(&owned), "`{owned}` missing -- Copilot will not see it");
+            assert!(
+                names.contains(&owned),
+                "`{owned}` missing -- Copilot will not see it"
+            );
         }
         // The agent's own tools are not ours to rename.
         assert!(names.contains(&"web_fetch".to_string()));
         assert!(
-            !names.iter().any(|n| n == &format!("{}-web_fetch", crate::mcp::SERVER_NAME)),
+            !names
+                .iter()
+                .any(|n| n == &format!("{}-web_fetch", crate::mcp::SERVER_NAME)),
             "namespaced a tool we do not serve: {names:?}"
         );
         // And nothing shut leaked in under either spelling.
         for t in TOOLS.iter().filter(|t| !t.open) {
             for n in t.names() {
-                assert!(!names.contains(&n.to_string()), "`{n}` is shut and on the allow-list");
+                assert!(
+                    !names.contains(&n.to_string()),
+                    "`{n}` is shut and on the allow-list"
+                );
             }
         }
     }
@@ -447,9 +588,16 @@ mod tests {
             (GATES.fs_write, "\"writeTextFile\":true"),
             (GATES.terminal, "\"terminal\":true"),
         ] {
-            assert_eq!(open, wire.contains(needle), "{needle} disagrees with the table");
+            assert_eq!(
+                open,
+                wire.contains(needle),
+                "{needle} disagrees with the table"
+            );
         }
-        assert!(crate::json::parse(&wire).is_some(), "not valid JSON: {wire}");
+        assert!(
+            crate::json::parse(&wire).is_some(),
+            "not valid JSON: {wire}"
+        );
     }
 
     #[test]
@@ -465,7 +613,10 @@ mod tests {
             "elicitation/create",
         ] {
             let open = matches!(verdict(m), Verdict::Open);
-            assert!(!open, "{m} is open; the shipped policy grants none of these");
+            assert!(
+                !open,
+                "{m} is open; the shipped policy grants none of these"
+            );
         }
     }
 
@@ -521,7 +672,10 @@ mod tests {
             assert!(tool_open(&owned), "`{owned}` was refused");
         }
         // The name that was not chosen, and why.
-        assert!(tool_shut("read_page"), "`read` no longer guards reading files");
+        assert!(
+            tool_shut("read_page"),
+            "`read` no longer guards reading files"
+        );
         // Reading a file is still refused, under every spelling it has.
         for n in ["view", "read", "Read a file"] {
             assert!(!tool_open(n), "`{n}` was granted");
@@ -545,9 +699,20 @@ mod tests {
         let doc = format!("{{{}}}", tool_policy());
         let v = crate::json::parse(&doc).expect("valid JSON");
         for t in TOOLS {
-            let told = v.get("tools").and_then(|x| x.get(t.name)).and_then(|x| x.as_bool());
-            let asked = v.get("permission").and_then(|x| x.get(t.name)).and_then(|x| x.as_str());
-            assert_eq!(told, Some(t.open), "tools.{} disagrees with the table", t.name);
+            let told = v
+                .get("tools")
+                .and_then(|x| x.get(t.name))
+                .and_then(|x| x.as_bool());
+            let asked = v
+                .get("permission")
+                .and_then(|x| x.get(t.name))
+                .and_then(|x| x.as_str());
+            assert_eq!(
+                told,
+                Some(t.open),
+                "tools.{} disagrees with the table",
+                t.name
+            );
             assert_eq!(
                 asked,
                 Some(if t.open { "allow" } else { "deny" }),

@@ -18,16 +18,19 @@ use ratatui::crossterm::terminal::{Clear, ClearType, EnterAlternateScreen, Leave
 use ratatui::layout::{Position, Rect, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{interval, Duration, Instant};
 
 use crate::shell::Shell;
-use crate::wire::{Decoder, DISABLE_MOUSE, ENABLE_MOUSE};
+use crate::wire::{Decoder, DISABLE_KEYS, DISABLE_MOUSE, ENABLE_KEYS, ENABLE_MOUSE};
 
 /// What a transport sends *to* a session.
 pub enum In {
     Bytes(Vec<u8>),
     Resize(u16, u16),
+    ReducedMotion(bool),
     Hangup,
 }
 
@@ -44,6 +47,14 @@ pub fn idle_limit() -> Duration {
     Duration::from_secs(secs)
 }
 
+pub fn max_limit() -> Duration {
+    let secs = std::env::var("PORTFOLIO_MAX_SESSION_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3_600);
+    Duration::from_secs(secs)
+}
+
 /// A sink that hands finished frames back to whichever transport is driving.
 ///
 /// ratatui's crossterm backend wants an `io::Write`; a WebSocket and an SSH
@@ -53,12 +64,47 @@ pub fn idle_limit() -> Duration {
 pub struct FrameSink {
     tx: UnboundedSender<Vec<u8>>,
     buf: Vec<u8>,
+    ascii: Option<Arc<AtomicBool>>,
 }
 
 impl FrameSink {
     pub fn new(tx: UnboundedSender<Vec<u8>>) -> Self {
-        Self { tx, buf: Vec::new() }
+        Self {
+            tx,
+            buf: Vec::new(),
+            ascii: None,
+        }
     }
+
+    fn negotiating(tx: UnboundedSender<Vec<u8>>, ascii: Arc<AtomicBool>) -> Self {
+        let mut sink = Self::new(tx);
+        sink.ascii = Some(ascii);
+        sink
+    }
+}
+
+fn ascii_frame(bytes: Vec<u8>) -> Vec<u8> {
+    String::from_utf8_lossy(&bytes)
+        .chars()
+        .map(|ch| match ch {
+            '\u{2500}'..='\u{257f}' => match ch {
+                '│' | '┃' | '║' => '|',
+                '─' | '━' | '═' => '-',
+                _ => '+',
+            },
+            '\u{2580}'..='\u{259f}' => '#',
+            '\u{2800}'..='\u{28ff}' => '.',
+            '→' | '›' | '»' => '>',
+            '←' | '‹' | '«' => '<',
+            '↑' => '^',
+            '↓' => 'v',
+            '•' | '·' | '◆' | '◇' => '*',
+            '…' => '.',
+            ch if ch.is_ascii() => ch,
+            _ => '?',
+        })
+        .collect::<String>()
+        .into_bytes()
 }
 
 impl std::io::Write for FrameSink {
@@ -70,7 +116,10 @@ impl std::io::Write for FrameSink {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let payload = std::mem::take(&mut self.buf);
+        let mut payload = std::mem::take(&mut self.buf);
+        if self.ascii.as_ref().is_some_and(|ascii| ascii.load(Ordering::Relaxed)) {
+            payload = ascii_frame(payload);
+        }
         self.tx
             .send(payload)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
@@ -99,7 +148,10 @@ pub struct SessionBackend {
 
 impl SessionBackend {
     fn new(sink: FrameSink, cols: u16, rows: u16) -> Self {
-        Self { inner: CrosstermBackend::new(sink), size: Size::new(cols, rows) }
+        Self {
+            inner: CrosstermBackend::new(sink),
+            size: Size::new(cols, rows),
+        }
     }
 
     /// Tell the backend what the far end is now. Must happen before
@@ -172,7 +224,10 @@ impl Backend for SessionBackend {
     fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
         // Pixels are documented as commonly unreported, and nothing here reads
         // them; the cell grid is the part that has to be right.
-        Ok(WindowSize { columns_rows: self.size, pixels: Size::new(0, 0) })
+        Ok(WindowSize {
+            columns_rows: self.size,
+            pixels: Size::new(0, 0),
+        })
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
@@ -194,24 +249,35 @@ pub async fn run(
     let options = TerminalOptions {
         viewport: Viewport::Fixed(Rect::new(0, 0, cols.max(20), rows.max(6))),
     };
+    let ascii = Arc::new(AtomicBool::new(true));
     let mut terminal: Term = Terminal::with_options(
-        SessionBackend::new(FrameSink::new(out), cols.max(20), rows.max(6)),
+        SessionBackend::new(
+            FrameSink::negotiating(out, Arc::clone(&ascii)),
+            cols.max(20),
+            rows.max(6),
+        ),
         options,
     )?;
 
-    execute!(terminal.backend_mut(), EnterAlternateScreen, Hide, Clear(ClearType::All))?;
-    terminal.backend_mut().write_all(ENABLE_MOUSE)?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        Hide,
+        Clear(ClearType::All),
+    )?;
+    terminal.backend_mut().write_all(b"\x1b[c\x1b[?u")?;
     // Both traits the backend implements have a `flush`; this one is pushing
     // the bytes just written, so it is the writer's.
     std::io::Write::flush(terminal.backend_mut())?;
 
-    let mut shell = Shell::new();
     // Opened here rather than in either transport, so SSH and the web record
     // the same things in the same order. What differs between them -- a key
     // fingerprint versus a browser id -- has already been resolved into `who`
     // by the time it arrives.
     let mut visit = crate::visits::Visit::open(who);
-    let outcome = pump(&mut terminal, &mut shell, &mut input, &mut visit).await;
+    let mut shell = Shell::new();
+    shell.ask.restore(visit.take_saved());
+    let outcome = pump(&mut terminal, &mut shell, &mut input, &mut visit, &ascii).await;
     visit.close();
 
     // Whatever happened up there, the visitor's terminal gets put back. This
@@ -233,6 +299,7 @@ pub async fn run(
 /// and leaves anything hand-written sitting in the sink.
 fn restore(terminal: &mut Term) -> anyhow::Result<()> {
     let w = terminal.backend_mut();
+    w.write_all(DISABLE_KEYS)?;
     w.write_all(DISABLE_MOUSE)?;
     // `Show` pairs with the `Hide` on the way in. Cursor visibility is not part
     // of what the alternate screen puts back, so without it a visitor leaves
@@ -248,9 +315,13 @@ async fn pump(
     shell: &mut Shell,
     input: &mut UnboundedReceiver<In>,
     visit: &mut crate::visits::Visit,
+    ascii: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let mut decoder = Decoder::default();
+    let probe_until = Instant::now() + Duration::from_millis(250);
     let idle_after = idle_limit();
+    let max_after = max_limit();
+    let started = Instant::now();
     let mut last_input = Instant::now();
 
     terminal.draw(|f| shell.render(f))?;
@@ -273,6 +344,18 @@ async fn pump(
                             _ => {}
                         }
                     }
+                    if decoder.take_da1()
+                        && Instant::now() <= probe_until
+                        && ascii.swap(false, Ordering::Relaxed)
+                    {
+                        terminal.backend_mut().write_all(ENABLE_MOUSE)?;
+                        std::io::Write::flush(terminal.backend_mut())?;
+                        terminal.clear()?;
+                    }
+                    if decoder.take_keyboard() && Instant::now() <= probe_until {
+                        terminal.backend_mut().write_all(ENABLE_KEYS)?;
+                        std::io::Write::flush(terminal.backend_mut())?;
+                    }
                 }
                 Some(In::Resize(c, r)) => {
                     let (c, r) = (c.max(20), r.max(6));
@@ -290,19 +373,29 @@ async fn pump(
                     // `clear` forces the next draw to be a full repaint.
                     terminal.clear()?;
                 }
+                Some(In::ReducedMotion(reduced)) => shell.set_reduced_motion(reduced),
                 Some(In::Hangup) | None => break,
             },
             _ = ticker.tick() => {}
         }
 
-        if shell.quit || (!idle_after.is_zero() && last_input.elapsed() > idle_after) {
+        for question in shell.drain_submitted() {
+            visit.question(&question);
+        }
+        for (question, status) in shell.drain_statuses() {
+            visit.question_status(&question, status);
+        }
+        if shell.quit
+            || (!idle_after.is_zero() && last_input.elapsed() > idle_after)
+            || (!max_after.is_zero() && started.elapsed() > max_after)
+        {
             break;
         }
         shell.tick(wait.as_secs_f64());
         // Written as they finish rather than all at once at the end: a session
         // that is killed mid-conversation should still have the conversation.
         for turn in shell.drain_logged() {
-            visit.asked(&turn.q, &turn.a, turn.spent);
+            visit.asked_with_panel(&turn.q, &turn.a, turn.spent, turn.panel.as_ref());
         }
         terminal.draw(|f| shell.render(f))?;
     }
@@ -323,11 +416,16 @@ mod tests {
         // real log unless it is told otherwise -- these tests were writing
         // anonymous arrivals into `portfolio/data/visits.jsonl` and burying the
         // actual visitors under them.
-        let _guard = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::visits::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let log = std::env::temp_dir().join("portfolio-session-test-visits.jsonl");
         std::env::set_var("PORTFOLIO_VISITS", &log);
         let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
         let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
+        in_tx
+            .send(In::Bytes(b"\x1b[?1;2c".to_vec()))
+            .expect("session not started yet");
         for m in msgs {
             in_tx.send(m).expect("session not started yet");
         }
@@ -338,7 +436,13 @@ mod tests {
                 .enable_all()
                 .build()
                 .expect("runtime");
-            rt.block_on(run(out_tx, in_rx, cols, rows, crate::visits::Who::default()))
+            rt.block_on(run(
+                out_tx,
+                in_rx,
+                cols,
+                rows,
+                crate::visits::Who::default(),
+            ))
         });
         worker.join().expect("session thread panicked")?;
 
@@ -354,6 +458,11 @@ mod tests {
 
     fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    #[test]
+    fn an_unidentified_terminal_gets_ascii_art() {
+        assert_eq!(String::from_utf8(ascii_frame("╭─◆→⣿".as_bytes().to_vec())).unwrap(), "+-*>.");
     }
 
     /// The regression this file earned the hard way.
@@ -390,7 +499,10 @@ mod tests {
         let off = find(&out, DISABLE_MOUSE).expect("mouse was never turned back off");
         assert!(off > on, "the mouse was disabled before it was enabled");
         // And the cursor comes back, which `LeaveAlternateScreen` does not do.
-        assert!(find(&out, b"\x1b[?25h").is_some(), "the cursor was left hidden");
+        assert!(
+            find(&out, b"\x1b[?25h").is_some(),
+            "the cursor was left hidden"
+        );
     }
 
     /// Restoration is a separate step precisely so that it cannot be skipped by
@@ -412,8 +524,14 @@ mod tests {
         while let Ok(frame) = rx.try_recv() {
             out.extend_from_slice(&frame);
         }
-        assert!(find(&out, DISABLE_MOUSE).is_some(), "no mouse reset: {out:?}");
-        assert!(find(&out, b"\x1b[?25h").is_some(), "no cursor restore: {out:?}");
+        assert!(
+            find(&out, DISABLE_MOUSE).is_some(),
+            "no mouse reset: {out:?}"
+        );
+        assert!(
+            find(&out, b"\x1b[?25h").is_some(),
+            "no cursor restore: {out:?}"
+        );
     }
 
     /// Every direction, and repeatedly: the size is held on the backend now, so
@@ -427,7 +545,10 @@ mod tests {
             In::Resize(60, 20),
             In::Resize(120, 40),
         ];
-        assert!(drive(100, 30, sizes).is_ok(), "a sequence of resizes ended the session");
+        assert!(
+            drive(100, 30, sizes).is_ok(),
+            "a sequence of resizes ended the session"
+        );
     }
 
     /// The floor still applies. A one-column terminal is not a terminal, and
@@ -447,7 +568,10 @@ mod tests {
         assert_eq!(b.size().expect("size"), Size::new(133, 47));
         b.set_size(90, 25);
         assert_eq!(b.size().expect("size"), Size::new(90, 25));
-        assert_eq!(b.window_size().expect("window size").columns_rows, Size::new(90, 25));
+        assert_eq!(
+            b.window_size().expect("window size").columns_rows,
+            Size::new(90, 25)
+        );
         // Answered from here rather than by asking the terminal where the
         // cursor is, which would query a device that is not there.
         assert_eq!(b.get_cursor_position().expect("cursor"), Position::ORIGIN);

@@ -235,32 +235,28 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     }
 }
 
-/// Every key in the app, in one place, because three embedded renderers means
-/// three key maps and no single screen that admits it.
+/// The practical key map, grouped by where each key works.
 pub fn help(f: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 22] = [
-        ("tab / shift-tab", "move between sections"),
-        ("1 – 5", "jump straight to one"),
-        ("/", "this list, from anywhere"),
-        ("q", "quit"),
+    let rows: [(&str, &str); 19] = [
+        ("navigation", ""),
+        ("0 / 1 – 5", "home / open a section"),
+        ("click / esc", "open rail / local back, then home"),
+        ("/", "this list outside Ask"),
         ("", ""),
         ("experience", "a map you can actually drive"),
-        ("n / b", "next / previous place"),
-        ("?", "find a state, town or landmark"),
-        ("drag, wheel", "pan and zoom"),
-        ("u / o, m", "tilt the camera, or level it"),
-        ("", ""),
-        ("projects / skills", ""),
-        ("← →", "browse the project cards"),
-        ("drag, wheel, ↑ ↓", "slide the sheet"),
+        ("n b / ?", "previous-next place / find one"),
+        ("drag / wheel", "pan / zoom; p opens layers"),
+        ("projects", ""),
+        ("← → / h l", "browse; ↑ ↓ / j k read"),
+        ("space / m", "motion / monochrome"),
+        ("skills", ""),
+        ("drag / wheel", "move; hover inspects a tile"),
         ("", ""),
         ("taste", ""),
-        ("← →, wheel", "walk the room"),
-        ("home / end", "first and last"),
-        ("", ""),
+        ("← → / wheel", "browse the seamless loop"),
         ("ask", ""),
-        ("enter", "ask it"),
-        ("/reach <message>", "leave Prince a note instead"),
+        ("enter / shift-enter", "send / new line"),
+        ("tab / ctrl-alt-⌫", "complete / delete word / menu"),
     ];
     let w = 52.min(area.width.saturating_sub(4));
     let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
@@ -352,5 +348,22 @@ mod tests {
         let a = shipped();
         let c = columns(Rect { x: 0, y: 0, width: 240, height: 14 }, &a);
         assert_eq!(c.art, 0, "hung a portrait in 14 rows");
+    }
+
+    #[test]
+    fn the_key_map_fits_a_standard_terminal() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                help(frame, area);
+            })
+            .unwrap();
+        let plain = termap::snapshot::plain(terminal.backend().buffer());
+        assert!(plain.contains("0 / 1 – 5"));
+        assert!(plain.contains("complete / delete word / menu"));
     }
 }

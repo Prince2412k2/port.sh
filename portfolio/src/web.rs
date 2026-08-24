@@ -44,11 +44,13 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
 
     let bind: SocketAddr = format!("{addr}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    eprintln!("portfolio: web terminal on http://{bind}");
+    crate::visits::operational("info", "web_listen", &bind.to_string());
     // `into_make_service_with_connect_info` rather than `into_make_service`:
     // without it there is no peer address to record, and behind a proxy there
     // is none worth recording either -- see `client_ip`.
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(crate::net::shutdown_signal())
+        .await?;
     Ok(())
 }
 
@@ -63,12 +65,18 @@ async fn page() -> impl IntoResponse {
 /// first hop and is what the proxy was asked to pass along; it is trusted here
 /// because the only thing in front of this is one we put there.
 fn client_ip(headers: &HeaderMap, socket: SocketAddr) -> String {
-    for h in ["x-forwarded-for", "x-real-ip"] {
-        if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
-            if let Some(first) = v.split(',').next() {
-                let first = first.trim();
-                if !first.is_empty() {
-                    return first.to_string();
+    let trusted_proxy = match socket.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
+        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+    };
+    if trusted_proxy {
+        for h in ["x-forwarded-for", "x-real-ip"] {
+            if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
+                if let Some(first) = v.split(',').next() {
+                    let first = first.trim();
+                    if !first.is_empty() {
+                        return first.to_string();
+                    }
                 }
             }
         }
@@ -135,23 +143,40 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
     // messages are text: an optional `i<id>` naming the visitor, then the size,
     // and the session does not start until the size arrives.
     let mut who = who;
-    let (cols, rows) = loop {
-        match stream.next().await {
-            Some(Ok(Message::Text(t))) => {
-                if let Some(id) = t.strip_prefix('i') {
-                    who.id = sanitise_id(id);
-                    continue;
+    let mut reduced_motion = false;
+    let (cols, rows) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match stream.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    if let Some(id) = t.strip_prefix('i') {
+                        who.id = sanitise_id(id);
+                        continue;
+                    }
+                    if t == "m1" {
+                        reduced_motion = true;
+                        continue;
+                    }
+                    if let Some(size) = parse_resize(&t) {
+                        break size;
+                    }
                 }
-                if let Some(size) = parse_resize(&t) {
-                    break size;
-                }
+                Some(Ok(_)) => continue,
+                _ => break (100, 30),
             }
-            // Binary before a size is input for a session that does not exist
-            // yet. Dropped rather than buffered.
-            Some(Ok(_)) => continue,
-            _ => break (100, 30),
         }
-    };
+    })
+    .await
+    .unwrap_or((100, 30));
+    let mut rate_keys = vec![format!("ip:{}", who.ip)];
+    if !who.id.is_empty() {
+        rate_keys.push(format!("web-id:{}", who.id));
+    }
+    if !crate::budget::admit_visit(&rate_keys) {
+        return;
+    }
+    if reduced_motion {
+        let _ = in_tx.send(session::In::ReducedMotion(true));
+    }
 
     let reader_tx = in_tx.clone();
     let reader = tokio::spawn(async move {
@@ -191,7 +216,7 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
             match session::run(out_tx, in_rx, cols, rows, who).await {
                 Ok(()) => Some(()),
                 Err(e) => {
-                    eprintln!("portfolio: web session ended early: {e:#}");
+                    crate::visits::operational("warn", "web_session_error", &format!("{e:#}"));
                     None
                 }
             }
@@ -209,7 +234,7 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
     // reading must not hold the task open.
     let drained = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
     if drained.is_err() {
-        eprintln!("portfolio: web client did not take the closing frame");
+        crate::visits::operational("warn", "web_close_frame_dropped", "client disconnected");
     }
 }
 
@@ -314,6 +339,9 @@ const INDEX: &str = r##"<!doctype html>
   #chrome button:hover { color: #60666f; border-color: #33373f; }
   #chrome button[aria-pressed="true"] { color: #ffb040; border-color: #6b4d1c; }
   #chrome button[disabled] { opacity: .35; cursor: default; }
+  @media (prefers-reduced-motion: reduce) {
+    #hint, #chrome button { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -371,6 +399,7 @@ useRenderer('webgl');
 fit.fit();
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ws = new WebSocket(`${proto}://${location.host}/ws`);
 ws.binaryType = 'arraybuffer';
 
@@ -393,6 +422,7 @@ try {
 
 ws.onopen = () => {
   if (visitorId) ws.send('i' + visitorId);
+  if (reducedMotion) ws.send('m1');
   sendSize();                       // the session waits for this one
   term.focus();
 };
@@ -412,6 +442,26 @@ term.onBinary((d) => {
   const buf = new Uint8Array(d.length);
   for (let i = 0; i < d.length; i++) buf[i] = d.charCodeAt(i) & 255;
   ws.send(buf);
+});
+
+// Modified Enter and Backspace have no reliable legacy terminal encoding.
+// Send CSI-u explicitly so the browser and a modern SSH terminal produce the
+// same KeyEvent instead of collapsing these chords to their plain keys.
+term.attachCustomKeyEventHandler((e) => {
+  if (e.type !== 'keydown') return true;
+  let sequence = null;
+  if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey) {
+    sequence = '\x1b[13;2u';
+  } else if (e.key === 'Backspace' && e.ctrlKey && !e.altKey) {
+    sequence = '\x1b[127;5u';
+  } else if (e.key === 'Backspace' && e.altKey && !e.ctrlKey) {
+    sequence = '\x1b[127;3u';
+  }
+  if (!sequence) return true;
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(new TextEncoder().encode(sequence));
+  }
+  return false;
 });
 
 let resizeTimer;
@@ -763,7 +813,7 @@ if (window.CanvasAddon) {
   });
   let want = null;
   try { want = localStorage.getItem('crt'); } catch (e) { /* private mode */ }
-  if (want === '1') setCrt(true);
+  if (want === '1' && !reducedMotion) setCrt(true);
 } else {
   button.disabled = true;
   button.title = 'the canvas renderer this needs did not load';
@@ -793,5 +843,22 @@ mod tests {
         assert_eq!(parse_resize(""), None);
         // Not a resize, and must not be mistaken for one.
         assert_eq!(parse_resize("rm -rf /"), None);
+    }
+
+    #[test]
+    fn browser_preserves_modified_editing_keys() {
+        for sequence in [r"\x1b[13;2u", r"\x1b[127;5u", r"\x1b[127;3u"] {
+            assert!(INDEX.contains(sequence), "browser does not send {sequence}");
+        }
+    }
+
+    #[test]
+    fn public_clients_cannot_spoof_forwarded_addresses() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.8".parse().unwrap());
+        let public = "203.0.113.7:1234".parse().unwrap();
+        let proxy = "127.0.0.1:1234".parse().unwrap();
+        assert_eq!(client_ip(&headers, public), "203.0.113.7");
+        assert_eq!(client_ip(&headers, proxy), "198.51.100.8");
     }
 }

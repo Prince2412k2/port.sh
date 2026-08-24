@@ -8,15 +8,15 @@
 //! slides, without either of them knowing it has been embedded.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget};
-use ratatui::Frame;
 
 use crate::about::{self, About};
-use crate::boot;
 use crate::ask::{self, Ask};
+use crate::boot;
 use crate::context;
 use crate::home;
 use crate::museum::Museum;
@@ -56,18 +56,31 @@ impl Section {
 
     /// What the footer offers here. Every section has different verbs and a
     /// single global hint line would be wrong in three places out of four.
-    fn hints(self) -> &'static str {
+    fn hints(self) -> (&'static str, &'static str) {
         match self {
-            Section::Home => "tab  move between sections    /  help",
+            Section::Home => ("1-5  open a section    /  all keys", "1-5 open    / keys"),
             // `p` rather than the layer keys themselves: the panel is where they
             // are written down, next to what each one draws.
-            Section::Experience => {
-                "n b  places    ?  find    drag  pan    wheel  zoom    p  layers    /  help"
-            }
-            Section::Projects => "← →  browse projects    /  help",
-            Section::Skills => "drag / wheel  slide    hover  raise a tile    space  drift",
-            Section::Taste => "← →  walk the room    home / end    /  help",
-            Section::Ask => "type a question    enter  send    esc  stop    tab  leave",
+            Section::Experience => (
+                "n b  places    ?  find    drag  pan    wheel  zoom    esc  home    /  all keys",
+                "n/b places   ? find   esc home   / keys",
+            ),
+            Section::Projects => (
+                "← →  projects    ↑ ↓  read    esc  home    /  all keys",
+                "←/→ projects   ↑/↓ read   esc home   / keys",
+            ),
+            Section::Skills => (
+                "drag / wheel  move    hover  inspect    space  drift    esc  home    /  all keys",
+                "drag/wheel move   space drift   esc home",
+            ),
+            Section::Taste => (
+                "← → / wheel  browse the loop    esc  home    /  all keys",
+                "←/→ browse   esc home   / keys",
+            ),
+            Section::Ask => (
+                "enter  send    shift-enter  new line    ctrl/alt-backspace  delete word    /  commands",
+                "enter send   shift-enter newline   / commands",
+            ),
         }
     }
 }
@@ -136,6 +149,7 @@ pub struct Shell {
     /// invisible, so "ctrl-o does nothing" and "ctrl-o never arrived" looked
     /// exactly alike. Now one of them says what it did.
     chord: Option<(String, f64)>,
+    reduced_motion: bool,
 }
 
 /// How long a chord's report stays up.
@@ -250,7 +264,14 @@ impl Locator {
     fn journey(from: (f64, f64), from_zoom: f64, to: (f64, f64), zoom: f64, sw: f64) -> Locator {
         let path = Self::path(from, from_zoom, to, zoom, sw);
         let span = path.duration();
-        Locator { to, to_zoom: zoom, path, t: 0.0, span, sw }
+        Locator {
+            to,
+            to_zoom: zoom,
+            path,
+            t: 0.0,
+            span,
+            sw,
+        }
     }
 
     fn flying(&self) -> bool {
@@ -266,7 +287,14 @@ impl Locator {
         let (at, at_zoom, _, _) = self.now();
         let path = Self::path(at, at_zoom, to, zoom, self.sw);
         let span = path.duration();
-        *self = Locator { to, to_zoom: zoom, path, t: 0.0, span, sw: self.sw };
+        *self = Locator {
+            to,
+            to_zoom: zoom,
+            path,
+            t: 0.0,
+            span,
+            sw: self.sw,
+        };
     }
 
     /// Where the camera is, how far it has tilted, and where the pin is.
@@ -327,19 +355,32 @@ impl Shell {
             manual: None,
             chord: None,
             driving: false,
+            reduced_motion: false,
         };
         shell.context = context::build(&shell.about, &sheet_taste, &shell.sheet.projects);
         // The chat turns a question into a point on its own -- but only the map
         // knows how much of the world this deployment has tiles for, and a
         // thumbnail of somewhere the archive does not cover is a black
         // rectangle with a caption under it.
-        shell.ask.atlas.covers = shell.map.source.has_basemap().then(|| shell.map.source.bounds());
+        shell.ask.atlas.covers = shell
+            .map
+            .source
+            .has_basemap()
+            .then(|| shell.map.source.bounds());
         shell
     }
 
     /// Exchanges finished since the last call, for the visit log.
     pub fn drain_logged(&mut self) -> Vec<crate::ask::Logged> {
         self.ask.drain_logged()
+    }
+
+    pub fn drain_submitted(&mut self) -> Vec<String> {
+        self.ask.drain_submitted()
+    }
+
+    pub fn drain_statuses(&mut self) -> Vec<(String, &'static str)> {
+        self.ask.drain_statuses()
     }
 
     pub fn go(&mut self, s: Section) {
@@ -365,13 +406,7 @@ impl Shell {
             self.ask.wake(&self.context);
         }
         self.section = s;
-        self.switch = SWITCH;
-    }
-
-    fn step(&mut self, by: i32) {
-        let n = Section::ALL.len() as i32;
-        let i = Section::ALL.iter().position(|s| *s == self.section).unwrap_or(0) as i32;
-        self.go(Section::ALL[(i + by).rem_euclid(n) as usize]);
+        self.switch = if self.reduced_motion { 0.0 } else { SWITCH };
     }
 
     /// Milliseconds to wait for input before drawing again.
@@ -382,6 +417,9 @@ impl Shell {
     /// order of magnitude more bandwidth. Over SSH that is the difference
     /// between fluid and unusable, and half the frames are not worth it.
     pub fn frame_ms(&self) -> u64 {
+        if self.reduced_motion {
+            return 120;
+        }
         if self.booting() {
             // The opening is a full screen of braille that changes everywhere
             // at once, so every frame is close to a full repaint -- measured
@@ -413,6 +451,9 @@ impl Shell {
 
     /// True while anything is animating and the loop must keep drawing.
     pub fn animating(&self) -> bool {
+        if self.reduced_motion {
+            return self.section == Section::Ask && self.ask.busy();
+        }
         self.booting()
             || self.switch > 0.0
             || match self.section {
@@ -426,6 +467,9 @@ impl Shell {
                 Section::Ask => {
                     self.ask.busy()
                         || self.ask.panel.as_ref().is_some_and(|p| p.moving())
+                        || (self.ask.panel.as_ref().is_some_and(|p| p.looping())
+                            && (ask::diagram_panel(self.body, &self.ask).is_some()
+                                || ask::work_panel(self.body, &self.ask).is_some()))
                         || self.locator.is_some_and(|l| l.flying())
                         || self.chord.is_some()
                 }
@@ -448,6 +492,15 @@ impl Shell {
         self.boot = boot::SECS;
     }
 
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+        if reduced {
+            self.skip_boot();
+            self.switch = 0.0;
+            self.since = 1_000.0;
+        }
+    }
+
     /// Whether the keyboard is currently the map's.
     ///
     /// For the tests. The page learns it from the mirrored flag on `Ask`, set in
@@ -458,24 +511,27 @@ impl Shell {
     }
 
     pub fn tick(&mut self, dt: f64) {
-        self.clock += dt;
-        self.since += dt;
+        let motion_dt = if self.reduced_motion { 10.0 } else { dt };
+        if !self.reduced_motion {
+            self.clock += dt;
+        }
+        self.since += motion_dt;
         if self.booting() {
-            self.boot += dt;
+            self.boot += motion_dt;
             return;
         }
         if self.switch > 0.0 {
-            self.switch = (self.switch - dt).max(0.0);
+            self.switch = (self.switch - motion_dt).max(0.0);
         }
         // Only the visible section advances. A map flying in the background
         // burns frames nobody is watching, and over SSH that is bandwidth.
         match self.section {
-            Section::Experience => self.map.tick(dt),
-            Section::Projects | Section::Skills => self.sheet.tick(dt),
-            Section::Taste => self.museum.tick(dt),
+            Section::Experience => self.map.tick(motion_dt),
+            Section::Projects | Section::Skills => self.sheet.tick(motion_dt),
+            Section::Taste => self.museum.tick(motion_dt),
             Section::Ask => {
-                self.ask.tick(dt);
-                self.aim(dt);
+                self.ask.tick(motion_dt);
+                self.aim(motion_dt);
                 if std::mem::take(&mut self.ask.drive) {
                     self.driving = crate::ask::showing_place(&self.ask).is_some();
                     let said = match self.driving {
@@ -494,7 +550,11 @@ impl Shell {
                 if let Some((_, age)) = &mut self.chord {
                     *age += dt;
                 }
-                if self.chord.as_ref().is_some_and(|(_, age)| *age > CHORD_SECS) {
+                if self
+                    .chord
+                    .as_ref()
+                    .is_some_and(|(_, age)| *age > CHORD_SECS)
+                {
                     self.chord = None;
                 }
                 // The map goes on ticking while the chat has the screen, but
@@ -593,13 +653,12 @@ impl Shell {
                 self.quit = true;
             }
             self.skip_boot();
-            return;
         }
         if self.show_help {
             self.show_help = false;
             return;
         }
-        // Ctrl-C and the section keys are the shell's wherever you are. `q` is
+        // Ctrl-C is the shell's wherever you are. `q` is
         // not: in the chat it is a letter, and a portfolio that quits when you
         // type "what does netjail do" is a portfolio nobody uses twice.
         match k.code {
@@ -607,15 +666,13 @@ impl Shell {
                 self.quit = true;
                 return;
             }
-            KeyCode::Tab => {
-                self.step(1);
-                return;
-            }
-            KeyCode::BackTab => {
-                self.step(-1);
-                return;
-            }
             _ => {}
+        }
+
+        // Tab belongs to completion, not navigation. Ask has a command line;
+        // the visual sections do not, so there it is deliberately inert.
+        if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && self.section != Section::Ask {
+            return;
         }
 
         // Text input owns the keyboard. Everywhere else, navigation is the
@@ -632,9 +689,7 @@ impl Shell {
         // straight through this to the section below.
         if self.section == Section::Ask && self.driving {
             match k.code {
-                // Out. Also on `tab`, which everywhere else in this app means
-                // "leave", so it would be strange for it to type into a map.
-                KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                KeyCode::Esc => {
                     self.driving = false;
                     self.chord = Some(("the keyboard is yours".into(), 0.0));
                     return;
@@ -683,11 +738,16 @@ impl Shell {
                     _ => {}
                 }
             }
+            if k.code == KeyCode::Esc && self.ask.can_leave() {
+                self.go(Section::Home);
+                return;
+            }
             self.ask.on_key(k);
             return;
         }
         match k.code {
             KeyCode::Char('/') => self.show_help = true,
+            KeyCode::Char('0') => self.go(Section::Home),
             KeyCode::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
                 if let Some(s) = Section::ALL.get(i + 1) {
@@ -697,11 +757,22 @@ impl Shell {
             KeyCode::Char('q') => self.quit = true,
             _ => match self.section {
                 Section::Home => self.home_key(k),
-                Section::Experience => self.map.on_key(k),
+                Section::Experience => {
+                    self.map.on_key(k);
+                    if self.map.quit {
+                        self.map.quit = false;
+                        self.go(Section::Home);
+                    }
+                }
                 Section::Taste => self.museum_key(k),
                 Section::Ask => {}
                 Section::Projects | Section::Skills => {
                     self.sheet.on_key(k);
+                    if self.sheet.quit {
+                        self.sheet.quit = false;
+                        self.go(Section::Home);
+                        return;
+                    }
                     // The sheet owns its own tab switching; if it changed tabs
                     // under us, the rail has to follow or the two disagree.
                     self.section = match self.sheet.tab {
@@ -717,12 +788,11 @@ impl Shell {
     /// and arrow-up on a wall of pictures does not mean anything.
     fn museum_key(&mut self, k: KeyEvent) {
         match k.code {
-            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char(' ') => {
-                self.museum.next()
-            }
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') => self.museum.prev(),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => self.museum.next(),
+            KeyCode::Left | KeyCode::Char('h') => self.museum.prev(),
             KeyCode::Home => self.museum.go(0),
             KeyCode::End => self.museum.go(self.museum.len().saturating_sub(1)),
+            KeyCode::Esc => self.go(Section::Home),
             _ => {}
         }
     }
@@ -779,7 +849,9 @@ impl Shell {
     /// not the viewport -- a layer toggled, terrain switched off -- is shared on
     /// purpose. It is one map.
     fn map_key(&mut self, k: KeyEvent) {
-        let Some(cam) = self.chat_camera() else { return };
+        let Some(cam) = self.chat_camera() else {
+            return;
+        };
         let mut vp = termap::geo::Viewport::new(
             termap::geo::lonlat_to_world(cam.lonlat.0, cam.lonlat.1),
             cam.zoom,
@@ -798,11 +870,32 @@ impl Shell {
         // A chord that reports nothing is indistinguishable from one that never
         // arrived, and that ambiguity has already cost a round of "it is not
         // working" against code that was working.
-        self.chord = Some((said.unwrap_or_else(|| format!("^{}", key_name(k.code))), 0.0));
+        self.chord = Some((
+            said.unwrap_or_else(|| format!("^{}", key_name(k.code))),
+            0.0,
+        ));
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
         use crossterm::event::MouseEventKind;
+        if self.show_help {
+            return;
+        }
+        if m.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
+            && m.row == self.body.y.saturating_sub(1)
+        {
+            if let Some(section) = self.rail_at(m.column) {
+                self.go(section);
+            }
+            return;
+        }
+        if m.column < self.body.x
+            || m.column >= self.body.right()
+            || m.row < self.body.y
+            || m.row >= self.body.bottom()
+        {
+            return;
+        }
         match self.section {
             Section::Experience => self.map.on_mouse(m),
             Section::Projects | Section::Skills => self.sheet.on_mouse(m),
@@ -812,6 +905,9 @@ impl Shell {
             Section::Taste => match m.kind {
                 MouseEventKind::ScrollDown => self.museum.next(),
                 MouseEventKind::ScrollUp => self.museum.prev(),
+                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    self.museum.pick_index(self.body, m.column, m.row);
+                }
                 _ => {}
             },
             Section::Ask => match m.kind {
@@ -847,37 +943,28 @@ impl Shell {
 
     pub fn render(&mut self, f: &mut Frame) {
         let area = f.area();
-        Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+        Block::default()
+            .style(Style::default().bg(BG))
+            .render(area, f.buffer_mut());
 
         if self.booting() {
             boot::render(f, area, self.boot);
             return;
         }
 
-        // The ask page pulls in once a conversation has started: the rail
-        // goes, and the reading column gets the rows the chrome was using.
-        // Everywhere else the tabs are how you know what else exists, but a
-        // page you are reading an answer on is not a page you are navigating,
-        // and five section names above somebody's reply is furniture.
-        let zoomed = self.section == Section::Ask && !self.ask.turns.is_empty();
-
         let [head, body, foot] = Layout::vertical([
-            Constraint::Length(if zoomed { 0 } else { 1 }),
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
         .areas(area);
         self.body = body;
 
-        if !zoomed {
-            self.rail(f, head);
-        }
+        self.rail(f, head);
 
         match self.section {
             Section::Home => home::render(f, body, &self.about, self.since),
-            Section::Taste => {
-                crate::museum::render(f, body, &self.museum)
-            }
+            Section::Taste => crate::museum::render(f, body, &self.museum),
             Section::Ask => {
                 // The map goes down first and the words go on top of it. It
                 // cannot draw itself from in there -- the renderer wants an
@@ -925,14 +1012,16 @@ impl Shell {
                         ask::chord_note(f, at, &said, (1.0 - age / CHORD_SECS) as f32);
                     }
                 }
-                // A project, the same way and in the same place as a map: the
-                // art and the scenes live in `skysheet`, which this shell
-                // already holds a sheet of, and `ask.rs` holds neither.
-                if let Some((at, work, fade)) = ask::work_panel(body, &self.ask) {
+                // Project art lives on the sourced canvas beside the answer.
+                // The map alone remains part of the page's fading ground.
+                if let Some((at, work, fade, story)) = ask::work_panel(body, &self.ask) {
                     if let Some(p) = crate::mcp::project(&work.id) {
                         // The caption sits at the foot of the column, so the
                         // picture gets everything above it.
-                        let stage = Rect { height: at.height.saturating_sub(6), ..at };
+                        let stage = Rect {
+                            height: at.height.saturating_sub(6),
+                            ..at
+                        };
                         let mark = work.mark.then(|| skysheet::marks::find(&p.mark)).flatten();
                         let (dw, dh) = skysheet::scene::footprint(&p.id);
                         // Scenes are laid out by hand at a fixed size, so a
@@ -963,17 +1052,21 @@ impl Shell {
                                     height: dh,
                                 },
                                 p,
-                                self.ask.t,
+                                story,
                             );
                         }
                         // The mark: asked for, or standing in for a diagram that
                         // had nowhere to go, because an empty column beside an
                         // answer about a project is worse than either.
-                        if let Some(m) = mark.or_else(|| (!drew).then(|| skysheet::marks::find(&p.mark)).flatten())
+                        if let Some(m) = mark
+                            .or_else(|| (!drew).then(|| skysheet::marks::find(&p.mark)).flatten())
                         {
                             let room = match (drew, both) {
                                 // Above the diagram, in the strip left for it.
-                                (true, true) => Rect { height: cap, ..stage },
+                                (true, true) => Rect {
+                                    height: cap,
+                                    ..stage
+                                },
                                 // The diagram took the room; the mark waits for
                                 // a wider window rather than sitting on top of
                                 // it.
@@ -985,12 +1078,11 @@ impl Shell {
                             }
                         }
                     }
-                    // The same dissolve and the same knock-back as the map. Two
-                    // pictures at the side of one page should not arrive by two
-                    // different rules.
-                    paint::feather(f, at, fade);
-                    let over = ask::prose_rect(body, &self.ask).intersection(at);
-                    paint::veil_ramp(f, over, 0.34, 1.0);
+                    paint::veil(f, at, fade);
+                }
+                if let Some((at, spec, fade, t, running)) = ask::diagram_panel(body, &self.ask) {
+                    skysheet::diagram::render(f.buffer_mut(), at, spec, t, running);
+                    paint::veil(f, at, fade);
                 }
                 ask::render(f, body, &self.ask);
             }
@@ -1031,35 +1123,43 @@ impl Shell {
         }
 
         let mut spans = Vec::new();
-        for s in Section::ALL {
+        for (index, s) in Section::ALL.into_iter().enumerate() {
             let on = s == self.section;
             spans.push(Span::styled(
                 if on { "● " } else { "· " },
                 Style::default().fg(if on { ACCENT } else { FAINT }),
             ));
             spans.push(Span::styled(
-                format!("{}   ", s.label()),
+                format!("{index} {}   ", s.label()),
                 Style::default().fg(if on { FG } else { FAINT }),
             ));
         }
         f.render_widget(Paragraph::new(Line::from(spans)).right_aligned(), area);
     }
 
-    fn footer(&self, f: &mut Frame, area: Rect) {
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    match self.driving && self.section == Section::Ask {
-                        true => "driving the map    n b  places    esc  give the keys back                                     everything else goes to the map",
-                        false => self.section.hints(),
-                    },
-                    Style::default().fg(if self.driving { ACCENT } else { FAINT }),
-                ),
-            ])),
-            area,
-        );
+    fn rail_at(&self, column: u16) -> Option<Section> {
+        let width: u16 = Section::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, section)| {
+                2 + format!("{index} {}   ", section.label()).chars().count() as u16
+            })
+            .sum();
+        if width > self.body.width {
+            return None;
+        }
+        let mut x = self.body.right().saturating_sub(width);
+        for (index, section) in Section::ALL.into_iter().enumerate() {
+            let span = 2 + format!("{index} {}   ", section.label()).chars().count() as u16;
+            if column >= x && column < x + span {
+                return Some(section);
+            }
+            x += span;
+        }
+        None
+    }
 
+    fn footer(&self, f: &mut Frame, area: Rect) {
         let mut right = Vec::new();
         // The map's instruments live here now that it no longer draws its own
         // status line. They are readings, not decoration: what scale you are
@@ -1092,6 +1192,31 @@ impl Shell {
         if self.section != Section::Ask {
             right.push(Span::styled("q  quit  ", Style::default().fg(DIM)));
         }
+        let right_width = right
+            .iter()
+            .map(|span| span.content.chars().count() as u16)
+            .sum::<u16>();
+        let available = area.width.saturating_sub(right_width + 3) as usize;
+        let (full, compact) = self.section.hints();
+        let hint = match self.driving && self.section == Section::Ask {
+            true => "driving map   n/b places   esc typing",
+            false if full.chars().count() <= available => full,
+            false => compact,
+        };
+        let hint: String = hint.chars().take(available).collect();
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    hint,
+                    Style::default().fg(if self.driving { ACCENT } else { FAINT }),
+                ),
+            ])),
+            Rect {
+                width: area.width.saturating_sub(right_width),
+                ..area
+            },
+        );
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), area);
     }
 }
@@ -1105,6 +1230,37 @@ impl Default for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mcp_handle(board: &str, request: &str) -> Option<String> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(request) {
+            if value.pointer("/params/name").and_then(|value| value.as_str()) == Some("show_map") {
+                let args = value.pointer("/params/arguments");
+                let points = args
+                    .and_then(|args| args.get("places"))
+                    .and_then(|places| places.as_array())
+                    .filter(|places| !places.is_empty())
+                    .map(|places| places.iter().collect::<Vec<_>>())
+                    .unwrap_or_else(|| args.into_iter().collect());
+                for point in points {
+                    if let (Some(lat), Some(lon)) = (
+                        point.get("lat").and_then(|value| value.as_f64()),
+                        point.get("lon").and_then(|value| value.as_f64()),
+                    ) {
+                        crate::mcp::trust_location(board, lat, lon);
+                    }
+                    if let Some(from) = point.get("from") {
+                        if let (Some(lat), Some(lon)) = (
+                            from.get("lat").and_then(|value| value.as_f64()),
+                            from.get("lon").and_then(|value| value.as_f64()),
+                        ) {
+                            crate::mcp::trust_location(board, lat, lon);
+                        }
+                    }
+                }
+            }
+        }
+        crate::mcp::handle(board, request)
+    }
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn press(c: char) -> KeyEvent {
@@ -1127,7 +1283,11 @@ mod tests {
         a.state = crate::ask::State::Thinking;
         a.input = "/map".into();
         a.submit();
-        assert_eq!(a.goto.as_deref(), Some("experience"), "`/map` was swallowed by the wait");
+        assert_eq!(
+            a.goto.as_deref(),
+            Some("experience"),
+            "`/map` was swallowed by the wait"
+        );
 
         // ...and asking a second question still is not.
         let mut a = crate::ask::Ask::new();
@@ -1141,8 +1301,8 @@ mod tests {
     /// --nocapture` and read down the page.
     #[test]
     fn look_at_the_arrival() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let mut s = Shell::new();
         if !s.map.source.has_basemap() {
             return;
@@ -1151,7 +1311,7 @@ mod tests {
         s.go(Section::Ask);
         s.ask.state = crate::ask::State::Ready;
         let board = s.ask.board_token().expect("no board").to_string();
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":23.0386,"lon":72.5129,"zoom":11.5,"label":"Ahmedabad"}}}"#,
@@ -1166,7 +1326,12 @@ mod tests {
             term.draw(|f| s.render(f)).unwrap();
             let l = s.locator.expect("no camera");
             let (_, zoom, lean, pin) = l.now();
-            let body = Rect { x: 0, y: 1, width: w, height: h - 2 };
+            let body = Rect {
+                x: 0,
+                y: 1,
+                width: w,
+                height: h - 2,
+            };
             let ink = crate::ask::map_panel(body, &s.ask)
                 .map(|(at, _, _)| {
                     let buf = term.backend().buffer();
@@ -1187,7 +1352,11 @@ mod tests {
             }
             println!(
                 "t={:>5.2}  zoom {:>5.2}  lean {:>4.2}  pin {:>4.2}  ink {ink:>4}  flying {}",
-                l.t, zoom, lean, pin, l.flying()
+                l.t,
+                zoom,
+                lean,
+                pin,
+                l.flying()
             );
         }
         assert!(shown > 10, "the map was blank for most of its arrival");
@@ -1201,8 +1370,8 @@ mod tests {
     /// alone would pass with the two of them not speaking.
     #[test]
     fn a_place_question_draws_a_map_beside_the_answer() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut s = Shell::new();
         s.skip_boot();
@@ -1215,13 +1384,21 @@ mod tests {
         s.tick(1.0);
 
         let (w, h) = (160, 44);
-        let body = Rect { x: 0, y: 1, width: w, height: h - 2 };
+        let body = Rect {
+            x: 0,
+            y: 1,
+            width: w,
+            height: h - 2,
+        };
         let Some((at, spot, fade)) = crate::ask::map_panel(body, &s.ask) else {
             panic!("no map panel for a place question");
         };
         assert_eq!(spot.id.as_deref(), Some("gateway"));
         assert_eq!(fade, 1.0, "the panel never finished arriving");
-        assert!(at.width > 20 && at.height > 6, "the picture has no room: {at:?}");
+        assert!(
+            at.width > 20 && at.height > 6,
+            "the picture has no room: {at:?}"
+        );
 
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| s.render(f)).unwrap();
@@ -1232,7 +1409,10 @@ mod tests {
         // is still a drawn panel -- so the caption is what gets asserted, and
         // the tiles are checked only when there are tiles.
         let plain = termap::snapshot::plain(&buf);
-        assert!(plain.contains("Gateway Corp"), "the panel lost its caption:\n{plain}");
+        assert!(
+            plain.contains("Gateway Corp"),
+            "the panel lost its caption:\n{plain}"
+        );
 
         if std::env::var_os("LOOK").is_some() {
             println!("\n{plain}");
@@ -1246,6 +1426,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_rich_explainer_keeps_looping_after_the_answer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut s = Shell::new();
+        s.skip_boot();
+        s.go(Section::Ask);
+        s.switch = 0.0;
+        s.ask.state = crate::ask::State::Ready;
+        let board = s.ask.board_token().expect("no board").to_string();
+        let preview = mcp_handle(
+            &board,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preview_diagram","arguments":{
+                "title":"Backpressure across the request path",
+                "elements":[
+                    {"id":"runtime","rect":{"x":0,"y":0,"width":100,"height":100},"kind":"group","title":"Runtime boundary","tone":"muted"},
+                    {"id":"ingress","rect":{"x":3,"y":8,"width":22,"height":22},"kind":"box","title":"Ingress","lines":["decode","admit"],"frame":"double"},
+                    {"id":"load","rect":{"x":30,"y":10,"width":28,"height":12},"kind":"meter","label":"Worker load","value":0.25,"unit":"capacity","tone":"accent"},
+                    {"id":"queue","rect":{"x":64,"y":8,"width":32,"height":13},"kind":"buffer","label":"Bounded queue","cells":["done","active","ready","ready","empty"]},
+                    {"id":"signal","rect":{"x":3,"y":40,"width":28,"height":20},"kind":"plot","label":"Arrival waveform","samples":[0.1,0.8,0.2,0.9,0.35,0.65],"plot":"waveform"},
+                    {"id":"release","rect":{"x":36,"y":40,"width":36,"height":18},"kind":"timeline","label":"Admission window","markers":[{"at":0.2,"label":"open","tone":"pass"},{"at":0.75,"label":"throttle","tone":"warn"}],"cursor":0.1},
+                    {"id":"health","rect":{"x":76,"y":40,"width":21,"height":16},"kind":"status","label":"Gateway","state":"warn","detail":"tail latency rising"},
+                    {"id":"consequence","rect":{"x":18,"y":72,"width":64,"height":14},"kind":"text","text":"The bounded queue turns overload into explicit admission pressure, not unbounded memory growth.","role":"callout","align":"center","tone":"accent"}
+                ],
+                "connectors":[
+                    {"id":"admit","from":"ingress","to":"load","label":"accepted","tone":"accent"},
+                    {"id":"enqueue","from":"load","to":"queue","label":"pressure","style":"bidirectional","tone":"warn"}
+                ],
+                "beats":[
+                    {"caption":"Requests enter and load rises","duration":1.5,"actions":[
+                        {"action":"flow","target":"admit"},
+                        {"action":"pulse","target":"ingress"},
+                        {"action":"meter","target":"load","from":0.25,"to":0.9}
+                    ]},
+                    {"caption":"Pressure becomes visible and bounded","duration":2.0,"actions":[
+                        {"action":"flow","target":"enqueue","reverse":true},
+                        {"action":"shift","target":"queue"},
+                        {"action":"scan","target":"signal"},
+                        {"action":"timeline","target":"release","from":0.1,"to":0.85}
+                    ]}
+                ]
+            }}}"#,
+        )
+        .unwrap();
+        assert!(!preview.contains("isError"), "{preview}");
+        let draft_id = crate::json::parse(&preview)
+            .and_then(|reply| {
+                reply
+                    .get("result")?
+                    .get("content")?
+                    .as_array()?
+                    .first()?
+                    .get("text")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .and_then(|answer| crate::json::parse(&answer))
+            .and_then(|answer| answer.get("draft_id")?.as_f64())
+            .expect("preview returned no draft id");
+        let shown = mcp_handle(
+            &board,
+            &r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_diagram","arguments":{"draft_id":DRAFT}}}"#
+                .replace("DRAFT", &format!("{draft_id:.0}")),
+        )
+        .unwrap();
+        assert!(!shown.contains("isError"), "{shown}");
+
+        s.tick(0.016);
+        for width in [96, 110, 150, 240] {
+            let body = Rect::new(0, 1, width, 38);
+            let stage = crate::ask::diagram_panel(body, &s.ask)
+                .map(|(at, ..)| at)
+                .expect("the rich scene has no stage");
+            let prose = crate::ask::prose_rect(body, &s.ask);
+            assert!(
+                prose.right() <= stage.x,
+                "diagram {stage:?} overlaps prose {prose:?} at width {width}"
+            );
+            assert!(
+                stage.width >= 48,
+                "diagram stage is too narrow at width {width}"
+            );
+        }
+        s.ask.state = crate::ask::State::Thinking;
+        let panel = s
+            .ask
+            .panel
+            .as_mut()
+            .expect("the rich scene never reached the page");
+        panel.life = crate::ask::Life::Held;
+        panel.since = 0.2;
+        panel.story = 0.2;
+        let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
+        term.draw(|f| s.render(f)).unwrap();
+        let early = term.backend().buffer().clone();
+        let plain = termap::snapshot::plain(&early);
+        for text in [
+            "Backpressure across the request path",
+            "Ingress",
+            "Worker load",
+            "Bounded queue",
+            "Arrival waveform",
+            "Admission window",
+            "Gateway",
+            "Requests enter and load rises",
+        ] {
+            assert!(plain.contains(text), "the diagram lost {text:?}:\n{plain}");
+        }
+        assert!(
+            s.animating(),
+            "the active answer did not keep its explainer moving"
+        );
+
+        s.ask.panel.as_mut().unwrap().story = 0.9;
+        term.draw(|f| s.render(f)).unwrap();
+        assert_ne!(
+            &early,
+            term.backend().buffer(),
+            "the running scene stayed static"
+        );
+
+        s.ask.state = crate::ask::State::Ready;
+        let before = s.ask.panel.as_ref().unwrap().story;
+        s.tick(0.4);
+        assert!(s.ask.panel.as_ref().unwrap().story > before);
+        term.draw(|f| s.render(f)).unwrap();
+        let looping = termap::snapshot::plain(term.backend().buffer());
+        assert!(
+            looping.contains("not unbounded memory growth"),
+            "the rich scene lost its architectural consequence:\n{looping}"
+        );
+        assert!(
+            s.animating(),
+            "the completed explainer stopped requesting frames"
+        );
+    }
 
     /// The whole point, end to end: the agent asks and the page obeys.
     #[test]
@@ -1260,12 +1577,19 @@ mod tests {
         // land on is dropped.
         s.ask.input = "tell me about the terminal".into();
         s.ask.submit();
-        assert!(s.ask.panel.is_none(), "the guess fired on a question with no place in it");
+        assert!(
+            s.ask.panel.is_none(),
+            "the guess fired on a question with no place in it"
+        );
 
         // The token the tool server would address this page by. `go` already
         // registered one; this is the same call the agent's tool would make.
-        let board = s.ask.board_token().expect("no board registered").to_string();
-        let out = crate::mcp::handle(
+        let board = s
+            .ask
+            .board_token()
+            .expect("no board registered")
+            .to_string();
+        let out = mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
@@ -1274,21 +1598,33 @@ mod tests {
         assert!(!out.contains("isError"), "{out}");
 
         s.tick(0.016);
-        let Some(crate::ask::Panel { what: crate::ask::Show::Place(tour), .. }) = &s.ask.panel
+        let Some(crate::ask::Panel {
+            what: crate::ask::Show::Place(tour),
+            ..
+        }) = &s.ask.panel
         else {
             panic!("the tool call did not raise a map");
         };
         let spot = tour.here();
         assert_eq!(spot.name, "Jaipur");
         assert!((spot.lonlat.0 - 75.79).abs() < 1e-9);
-        assert!(s.ask.agent_drives, "the page did not notice the agent driving");
+        assert!(
+            s.ask.agent_drives,
+            "the page did not notice the agent driving"
+        );
 
         // The row says what was called and with what. The ACP stream cannot say
         // -- no name in the protocol, empty title from Copilot -- so this comes
         // from our own tool server, which knows exactly.
-        let row = s.ask.turns.last().map(|t| t.calls.clone()).unwrap_or_default();
+        let row = s
+            .ask
+            .turns
+            .last()
+            .map(|t| t.calls.clone())
+            .unwrap_or_default();
         assert!(
-            row.iter().any(|c| c.title == "show_map" && c.detail.contains("Jaipur")),
+            row.iter()
+                .any(|c| c.title == "show_map" && c.detail.contains("Jaipur")),
             "no named tool row: {row:?}"
         );
 
@@ -1306,7 +1642,10 @@ mod tests {
         s.ask.input = "where does he work?".into();
         s.ask.submit();
         s.tick(0.016);
-        let Some(crate::ask::Panel { what: crate::ask::Show::Place(tour), .. }) = &s.ask.panel
+        let Some(crate::ask::Panel {
+            what: crate::ask::Show::Place(tour),
+            ..
+        }) = &s.ask.panel
         else {
             panic!("the map vanished");
         };
@@ -1345,7 +1684,7 @@ mod tests {
         s.ask.input = "where is jaipur".into();
         s.ask.submit();
         let board = s.ask.board_token().expect("no board").to_string();
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
@@ -1365,9 +1704,15 @@ mod tests {
         let flat = s.chat_camera().unwrap().tilt;
         s.on_key(plain('u'));
         let leaned = s.chat_camera().unwrap().tilt;
-        assert!(leaned > flat, "bare `u` did not lean it: {flat} to {leaned}");
+        assert!(
+            leaned > flat,
+            "bare `u` did not lean it: {flat} to {leaned}"
+        );
         s.on_key(plain('o'));
-        assert!(s.chat_camera().unwrap().tilt < leaned, "bare `o` did not flatten it");
+        assert!(
+            s.chat_camera().unwrap().tilt < leaned,
+            "bare `o` did not flatten it"
+        );
 
         // And the rest of the vocabulary, none of which is restated in this
         // crate: zoom, pan, bearing.
@@ -1376,22 +1721,35 @@ mod tests {
         assert!(s.chat_camera().unwrap().zoom > z, "bare `+` did not zoom");
         let lon = s.chat_camera().unwrap().lonlat.0;
         s.on_key(plain('l'));
-        assert!(s.chat_camera().unwrap().lonlat.0 > lon, "bare `l` did not pan");
+        assert!(
+            s.chat_camera().unwrap().lonlat.0 > lon,
+            "bare `l` did not pan"
+        );
         s.on_key(plain('.'));
-        assert_ne!(s.chat_camera().unwrap().bearing, 0.0, "bare `.` did not turn it");
+        assert_ne!(
+            s.chat_camera().unwrap().bearing,
+            0.0,
+            "bare `.` did not turn it"
+        );
 
         // Nothing typed into the question the whole time.
         assert_eq!(s.ask.input, "", "driving the map typed into the line");
 
         // Search stays behind: it is a mode inside a mode.
         s.on_key(plain('?'));
-        assert!(s.map.query.is_none(), "the search box opened inside the chat");
+        assert!(
+            s.map.query.is_none(),
+            "the search box opened inside the chat"
+        );
 
         // Escape gives the keyboard back, and then letters are letters again.
         s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!s.driving(), "escape did not end it");
         s.on_key(plain('u'));
-        assert_eq!(s.ask.input, "u", "a letter did not go back to being a letter");
+        assert_eq!(
+            s.ask.input, "u",
+            "a letter did not go back to being a letter"
+        );
     }
 
     /// The same thing again, but from the bytes a terminal really sends.
@@ -1410,7 +1768,7 @@ mod tests {
         s.ask.input = "where is jaipur".into();
         s.ask.submit();
         let board = s.ask.board_token().expect("no board").to_string();
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
@@ -1432,14 +1790,29 @@ mod tests {
         let flat = s.chat_camera().unwrap().tilt;
         typed(&mut s, &[0x15]);
         let leaned = s.chat_camera().unwrap().tilt;
-        assert!(leaned > flat, "ctrl-u as a byte did nothing: {flat} -> {leaned}");
+        assert!(
+            leaned > flat,
+            "ctrl-u as a byte did nothing: {flat} -> {leaned}"
+        );
 
         // ctrl-o, 0x0F: back the other way. This is the one that was reported
         // as not working, so it is asserted from the byte and not from a
         // KeyEvent somebody built by hand.
         typed(&mut s, &[0x0f]);
         let back = s.chat_camera().unwrap().tilt;
-        assert!(back < leaned, "ctrl-o as byte 0x0f did nothing: {leaned} -> {back}");
+        assert!(
+            back < leaned,
+            "ctrl-o as byte 0x0f did nothing: {leaned} -> {back}"
+        );
+
+        // Keyboard-enhancement mode sends the same chord as CSI-u rather than
+        // the legacy control byte. Both forms must reach the map.
+        let flat = s.chat_camera().unwrap().tilt;
+        typed(&mut s, b"\x1b[117;5u");
+        assert!(
+            s.chat_camera().unwrap().tilt > flat,
+            "ctrl-u as CSI-u did not reach the map"
+        );
 
         // And the line is untouched by all of it -- these are chords, not text.
         assert_eq!(s.ask.input, "", "a map chord typed into the question");
@@ -1447,7 +1820,10 @@ mod tests {
         // Each one leaves a read-out, which is the difference between a chord
         // that did something too small to see and one that never arrived.
         let (said, _) = s.chord.clone().expect("the chord said nothing");
-        assert!(said.to_lowercase().contains("tilt"), "unhelpful read-out: {said}");
+        assert!(
+            said.to_lowercase().contains("tilt"),
+            "unhelpful read-out: {said}"
+        );
         s.tick(CHORD_SECS + 0.1);
         assert!(s.chord.is_none(), "the read-out never went away");
     }
@@ -1471,7 +1847,7 @@ mod tests {
         s.ask.input = "where is jaipur".into();
         s.ask.submit();
         let board = s.ask.board_token().expect("no board").to_string();
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91,"lon":75.79,"zoom":11.0,"label":"Jaipur"}}}"#,
@@ -1486,33 +1862,55 @@ mod tests {
 
         s.on_key(ctrl('u'));
         let after = s.chat_camera().expect("no camera");
-        assert!(after.tilt > before.tilt, "ctrl-u did not lean it: {} to {}", before.tilt, after.tilt);
+        assert!(
+            after.tilt > before.tilt,
+            "ctrl-u did not lean it: {} to {}",
+            before.tilt,
+            after.tilt
+        );
         s.on_key(ctrl('o'));
         s.on_key(ctrl('o'));
-        assert!(s.chat_camera().unwrap().tilt < after.tilt, "ctrl-o did not flatten it");
+        assert!(
+            s.chat_camera().unwrap().tilt < after.tilt,
+            "ctrl-o did not flatten it"
+        );
 
         let z = s.chat_camera().unwrap().zoom;
         s.on_key(ctrl('+'));
         assert!(s.chat_camera().unwrap().zoom > z, "ctrl-+ did not zoom in");
         let lon = s.chat_camera().unwrap().lonlat.0;
         s.on_key(ctrl('l'));
-        assert!(s.chat_camera().unwrap().lonlat.0 > lon, "ctrl-l did not pan east");
+        assert!(
+            s.chat_camera().unwrap().lonlat.0 > lon,
+            "ctrl-l did not pan east"
+        );
         s.on_key(ctrl('.'));
-        assert_ne!(s.chat_camera().unwrap().bearing, 0.0, "ctrl-. did not swing the bearing");
+        assert_ne!(
+            s.chat_camera().unwrap().bearing,
+            0.0,
+            "ctrl-. did not swing the bearing"
+        );
 
         // Through all of that, the experience section's camera never moved.
-        assert_eq!(s.map.vp.center, section.center, "the section's camera was dragged along");
+        assert_eq!(
+            s.map.vp.center, section.center,
+            "the section's camera was dragged along"
+        );
         assert_eq!(s.map.vp.zoom, section.zoom);
         assert_eq!(s.map.vp.tilt, section.tilt);
 
         // ctrl-g hands it back to the flight.
         s.on_key(ctrl('g'));
         let back = s.chat_camera().expect("no camera");
-        assert!((back.lonlat.0 - 75.79).abs() < 1e-6, "ctrl-g did not return to the place");
+        assert!(
+            (back.lonlat.0 - 75.79).abs() < 1e-6,
+            "ctrl-g did not return to the place"
+        );
         assert_eq!(back.bearing, 0.0);
 
         // A ctrl-wheel zooms wherever the pointer is, which is why the decoder
         // had to start keeping the modifiers at all.
+        s.body = Rect::new(0, 1, 160, 42);
         let wheel = |mods| MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 2,
@@ -1521,12 +1919,19 @@ mod tests {
         };
         let z = s.chat_camera().unwrap().zoom;
         s.on_mouse(wheel(KeyModifiers::CONTROL));
-        assert!(s.chat_camera().unwrap().zoom > z, "ctrl-wheel over the words did not zoom");
+        assert!(
+            s.chat_camera().unwrap().zoom > z,
+            "ctrl-wheel over the words did not zoom"
+        );
 
         // Without ctrl, over the words, it is the transcript that scrolls.
         let z = s.chat_camera().unwrap().zoom;
         s.on_mouse(wheel(KeyModifiers::NONE));
-        assert_eq!(s.chat_camera().unwrap().zoom, z, "a plain wheel moved the map");
+        assert_eq!(
+            s.chat_camera().unwrap().zoom,
+            z,
+            "a plain wheel moved the map"
+        );
     }
 
     /// A stop that names its own start is flown from there.
@@ -1548,7 +1953,7 @@ mod tests {
 
         // Somewhere else entirely first, so "from wherever the camera was" and
         // "from the named start" cannot be confused.
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91,"lon":75.79,"label":"Jaipur"}}}"#,
@@ -1557,7 +1962,7 @@ mod tests {
         s.tick(0.016);
         s.tick(4.0);
 
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":23.020,"lon":73.070,"label":"Kapadwanj",
@@ -1570,19 +1975,31 @@ mod tests {
         // The first frame of the flight is at the start it was given -- not at
         // Jaipur, where the camera was sitting.
         let ((lon, lat), _, _, _) = s.locator.expect("no camera").now();
-        assert!((lon - 72.580).abs() < 0.05, "set out from lon {lon}, not the named start");
-        assert!((lat - 23.022).abs() < 0.05, "set out from lat {lat}, not the named start");
-        assert!(s.locator.unwrap().flying(), "a journey that was over before it began");
+        assert!(
+            (lon - 72.580).abs() < 0.05,
+            "set out from lon {lon}, not the named start"
+        );
+        assert!(
+            (lat - 23.022).abs() < 0.05,
+            "set out from lat {lat}, not the named start"
+        );
+        assert!(
+            s.locator.unwrap().flying(),
+            "a journey that was over before it began"
+        );
 
         // And it ends where it was told to.
         s.tick(6.0);
         let ((lon, lat), _, _, pin) = s.locator.unwrap().now();
-        assert!((lon - 73.070).abs() < 1e-6 && (lat - 23.020).abs() < 1e-6, "{lon},{lat}");
+        assert!(
+            (lon - 73.070).abs() < 1e-6 && (lat - 23.020).abs() < 1e-6,
+            "{lon},{lat}"
+        );
         assert_eq!(pin, 1.0, "the pin never landed");
 
         // Without a start it still flies from wherever it is, which is the
         // ordinary case and must not have changed.
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":22.300,"lon":73.200,"label":"Vadodara"}}}"#,
@@ -1590,7 +2007,10 @@ mod tests {
         .unwrap();
         s.tick(0.016);
         let ((lon, _), _, _, _) = s.locator.unwrap().now();
-        assert!((lon - 73.070).abs() < 0.2, "it did not set out from where it had landed: {lon}");
+        assert!(
+            (lon - 73.070).abs() < 0.2,
+            "it did not set out from where it had landed: {lon}"
+        );
     }
 
     /// A route: several places in one call, walked with ctrl-n and ctrl-b.
@@ -1606,7 +2026,7 @@ mod tests {
         s.ask.submit();
         let board = s.ask.board_token().expect("no board").to_string();
 
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"places":[
@@ -1620,21 +2040,34 @@ mod tests {
 
         let names = |s: &Shell| -> (String, usize, usize) {
             match &s.ask.panel {
-                Some(crate::ask::Panel { what: crate::ask::Show::Place(t), .. }) => {
-                    (t.here().name.clone(), t.at, t.stops.len())
-                }
+                Some(crate::ask::Panel {
+                    what: crate::ask::Show::Place(t),
+                    ..
+                }) => (t.here().name.clone(), t.at, t.stops.len()),
                 _ => panic!("no route on the page"),
             }
         };
-        assert_eq!(names(&s), ("Agra".into(), 0, 3), "the route did not arrive whole");
+        assert_eq!(
+            names(&s),
+            ("Agra".into(), 0, 3),
+            "the route did not arrive whole"
+        );
         // The note came with it -- a pin without one is worth much less.
-        assert!(crate::ask::showing_place(&s.ask).unwrap().note.contains("Taj Mahal"));
+        assert!(
+            crate::ask::showing_place(&s.ask)
+                .unwrap()
+                .note
+                .contains("Taj Mahal")
+        );
 
         let ctrl = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         s.on_key(ctrl('n'));
         s.tick(0.016);
         assert_eq!(names(&s).0, "Varanasi", "ctrl-n did not move");
-        assert!(s.locator.unwrap().flying(), "it cut to the next stop instead of flying");
+        assert!(
+            s.locator.unwrap().flying(),
+            "it cut to the next stop instead of flying"
+        );
 
         s.on_key(ctrl('b'));
         s.tick(0.016);
@@ -1642,7 +2075,11 @@ mod tests {
 
         // A route is a loop rather than a dead end.
         s.on_key(ctrl('b'));
-        assert_eq!(names(&s).0, "Ayodhya", "walking back off the start stopped dead");
+        assert_eq!(
+            names(&s).0,
+            "Ayodhya",
+            "walking back off the start stopped dead"
+        );
         s.on_key(ctrl('n'));
         assert_eq!(names(&s).0, "Agra", "walking on off the end stopped dead");
 
@@ -1650,7 +2087,10 @@ mod tests {
         s.ask.input = "and what about".into();
         s.on_key(ctrl('n'));
         assert_eq!(names(&s).0, "Varanasi", "the route froze while typing");
-        assert_eq!(s.ask.input, "and what about", "walking the route typed into the line");
+        assert_eq!(
+            s.ask.input, "and what about",
+            "walking the route typed into the line"
+        );
     }
 
     /// A second `show_map` flies rather than cuts.
@@ -1667,24 +2107,33 @@ mod tests {
             )
         };
 
-        crate::mcp::handle(&board, &call(23.03, 72.51)).unwrap();
+        mcp_handle(&board, &call(23.03, 72.51)).unwrap();
         s.tick(0.016);
         // An arrival is a descent, so it *is* flying -- and it starts wide and
         // comes down onto the point.
-        assert!(s.locator.unwrap().flying(), "the first map did not arrive, it appeared");
+        assert!(
+            s.locator.unwrap().flying(),
+            "the first map did not arrive, it appeared"
+        );
         let (_, wide, lean, pin) = s.locator.unwrap().now();
         assert!(wide < 11.0 - 2.0, "it did not start high up: {wide}");
         assert_eq!(lean, 0.0, "it arrived already tilted");
         assert_eq!(pin, 0.0, "the pin was down before the camera stopped");
         s.tick(ARRIVAL);
         let (_, landed, lean, pin) = s.locator.unwrap().now();
-        assert!((landed - 11.0).abs() < 1e-9, "it did not land on the zoom asked for: {landed}");
+        assert!(
+            (landed - 11.0).abs() < 1e-9,
+            "it did not land on the zoom asked for: {landed}"
+        );
         assert_eq!(lean, 1.0, "it never tilted");
         assert_eq!(pin, 1.0, "the pin never landed");
 
-        crate::mcp::handle(&board, &call(26.91, 75.79)).unwrap();
+        mcp_handle(&board, &call(26.91, 75.79)).unwrap();
         s.tick(0.016);
-        assert!(s.locator.unwrap().flying(), "the second map cut instead of flying");
+        assert!(
+            s.locator.unwrap().flying(),
+            "the second map cut instead of flying"
+        );
 
         // Part way across it is between the two, and pulled back from both. The
         // crossing takes as long as the path says, so the test asks the path
@@ -1692,14 +2141,20 @@ mod tests {
         let span = s.locator.unwrap().span;
         s.tick(span / 2.0);
         let (mid, mid_zoom, _, _) = s.locator.unwrap().now();
-        assert!(mid.0 > 72.51 && mid.0 < 75.79, "not between the two: {mid:?}");
+        assert!(
+            mid.0 > 72.51 && mid.0 < 75.79,
+            "not between the two: {mid:?}"
+        );
         assert!(mid_zoom < 11.0, "it crossed at street zoom: {mid_zoom}");
 
         // And it lands, exactly, rather than easing forever.
         s.tick(span);
         assert!(!s.locator.unwrap().flying());
         let (end, end_zoom, _, _) = s.locator.unwrap().now();
-        assert!((end.0 - 75.79).abs() < 1e-9 && (end.1 - 26.91).abs() < 1e-9, "{end:?}");
+        assert!(
+            (end.0 - 75.79).abs() < 1e-9 && (end.1 - 26.91).abs() < 1e-9,
+            "{end:?}"
+        );
         assert!((end_zoom - 11.0).abs() < 1e-9, "{end_zoom}");
     }
 
@@ -1711,20 +2166,23 @@ mod tests {
         s.go(Section::Ask);
         s.ask.state = crate::ask::State::Ready;
         let board = s.ask.board_token().expect("no board").to_string();
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"show_map","arguments":{"lat":23.0,"lon":72.5}}}"#,
         )
         .unwrap();
         s.tick(0.016);
         assert!(s.ask.panel.is_some());
-        crate::mcp::handle(
+        mcp_handle(
             &board,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hide_map","arguments":{}}}"#,
         )
         .unwrap();
         s.tick(0.016);
-        assert_eq!(s.ask.panel.as_ref().map(|p| p.life), Some(crate::ask::Life::Leaving));
+        assert_eq!(
+            s.ask.panel.as_ref().map(|p| p.life),
+            Some(crate::ask::Life::Leaving)
+        );
     }
 
     /// The locator draws where it is told, and gives the camera back.
@@ -1738,19 +2196,30 @@ mod tests {
     /// a test of a picture is testing the picture.
     #[test]
     fn the_locator_draws_where_it_is_told_and_hands_the_camera_back() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut s = Shell::new();
         if !s.map.source.has_basemap() {
             return; // Nothing to draw, and nothing this could prove.
         }
-        let at = Rect { x: 0, y: 0, width: 46, height: 20 };
+        let at = Rect {
+            x: 0,
+            y: 0,
+            width: 46,
+            height: 20,
+        };
         let shot = |m: &mut termap::app::App, lonlat: (f64, f64)| {
             let mut t = Terminal::new(TestBackend::new(at.width, at.height)).unwrap();
-            let cam =
-                termap::ui::Camera { lonlat, zoom: 13.0, tilt: 0.0, persp: 0.0, bearing: 0.0 };
-            t.draw(|f| termap::ui::render_locator(f, at, m, cam, None)).unwrap();
+            let cam = termap::ui::Camera {
+                lonlat,
+                zoom: 13.0,
+                tilt: 0.0,
+                persp: 0.0,
+                bearing: 0.0,
+            };
+            t.draw(|f| termap::ui::render_locator(f, at, m, cam, None))
+                .unwrap();
             termap::snapshot::plain(t.backend().buffer())
         };
 
@@ -1760,8 +2229,14 @@ mod tests {
         let there = shot(&mut s.map, (73.070, 23.020));
         assert_ne!(here, there, "the locator ignored the point it was given");
 
-        assert_eq!(s.map.vp.center, before.center, "the camera was left where the panel put it");
-        assert_eq!(s.map.vp.zoom, before.zoom, "the zoom was left where the panel put it");
+        assert_eq!(
+            s.map.vp.center, before.center,
+            "the camera was left where the panel put it"
+        );
+        assert_eq!(
+            s.map.vp.zoom, before.zoom,
+            "the zoom was left where the panel put it"
+        );
     }
 
     /// `/map` with a place at the side opens the tour on that stop, rather than
@@ -1781,8 +2256,16 @@ mod tests {
         s.ask.submit();
         s.tick(0.016);
 
-        assert_eq!(s.section, Section::Experience, "`/map` did not move the screen");
-        assert_eq!(s.map.tour_opens_on(), Some(want), "the tour opened somewhere else");
+        assert_eq!(
+            s.section,
+            Section::Experience,
+            "`/map` did not move the screen"
+        );
+        assert_eq!(
+            s.map.tour_opens_on(),
+            Some(want),
+            "the tour opened somewhere else"
+        );
     }
 
     /// The map's layer toggles must survive the trip through the shell. They are
@@ -1824,7 +2307,10 @@ mod tests {
             *l = false;
         }
         s.on_key(press(termap::app::ALL_LAYERS_KEY));
-        assert!(s.map.layers.iter().all(|&on| on), "layers did not all come back");
+        assert!(
+            s.map.layers.iter().all(|&on| on),
+            "layers did not all come back"
+        );
         assert_eq!(s.section, Section::Experience, "navigated away");
     }
 
@@ -1848,6 +2334,7 @@ mod tests {
     #[test]
     fn a_number_key_means_the_same_thing_from_every_section() {
         let want = [
+            ('0', Section::Home),
             ('1', Section::Experience),
             ('2', Section::Projects),
             ('3', Section::Skills),
@@ -1855,7 +2342,13 @@ mod tests {
         ];
         // Ask is left out as a starting point on purpose: it spawns an agent,
         // and it is the one place digits are text. That case is below.
-        for from in [Section::Home, Section::Experience, Section::Projects, Section::Skills, Section::Taste] {
+        for from in [
+            Section::Home,
+            Section::Experience,
+            Section::Projects,
+            Section::Skills,
+            Section::Taste,
+        ] {
             for (key, to) in want {
                 let mut s = shell();
                 s.go(from);
@@ -1877,24 +2370,115 @@ mod tests {
         assert_eq!(s.ask.input, "2q");
     }
 
-    /// The title card has to be escapable. One that is not gets resented on
-    /// the second visit, and this is a page people may come back to.
+    /// The first deliberate key both dismisses the title and does its job.
     #[test]
-    fn any_key_skips_the_opening() {
+    fn the_first_key_skips_the_opening_without_being_swallowed() {
         let mut s = Shell::new();
         assert!(s.booting());
-        s.on_key(press('x'));
+        s.on_key(press('1'));
         assert!(!s.booting());
-        // And it does not also do whatever that key normally means.
+        assert_eq!(s.section, Section::Experience);
+    }
+
+    #[test]
+    fn tab_completes_commands_and_never_changes_sections() {
+        let mut s = shell();
+        s.go(Section::Projects);
+        s.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Projects);
+        s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Projects);
+
+        s.section = Section::Ask;
+        s.ask.input = "/co".into();
+        let expected = s.ask.choices()[0].0;
+        s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Ask);
+        assert_eq!(s.ask.input, expected);
+    }
+
+    #[test]
+    fn escape_returns_to_home_after_local_modes_are_closed() {
+        for section in [
+            Section::Experience,
+            Section::Projects,
+            Section::Skills,
+            Section::Taste,
+        ] {
+            let mut s = shell();
+            s.go(section);
+            s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert_eq!(s.section, Section::Home, "escape failed from {section:?}");
+        }
+
+        let mut s = shell();
+        s.section = Section::Ask;
+        s.ask.state = crate::ask::State::Ready;
+        s.ask.input = "unfinished".into();
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Ask);
+        assert!(s.ask.input.is_empty());
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(s.section, Section::Home);
+
+        s.section = Section::Ask;
+        s.ask.state = crate::ask::State::Starting;
+        s.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(s.section, Section::Home);
     }
 
     #[test]
-    fn tab_wraps_in_both_directions() {
+    fn five_opens_ask() {
         let mut s = shell();
-        s.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(s.section, *Section::ALL.last().unwrap());
-        s.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(s.section, Section::Home);
+        s.on_key(press('5'));
+        assert_eq!(s.section, Section::Ask);
+    }
+
+    #[test]
+    fn reduced_motion_skips_boot_and_section_transitions() {
+        let mut shell = Shell::new();
+        shell.set_reduced_motion(true);
+        assert!(!shell.booting());
+        shell.go(Section::Projects);
+        assert_eq!(shell.switch, 0.0);
+        assert!(!shell.animating());
+    }
+
+    #[test]
+    fn the_numbered_rail_is_clickable() {
+        let mut s = shell();
+        s.body = Rect::new(0, 1, 160, 30);
+        let column = (0..s.body.width)
+            .find(|&column| s.rail_at(column) == Some(Section::Taste))
+            .expect("taste has no clickable rail span");
+        s.on_mouse(MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(s.section, Section::Taste);
+    }
+
+    #[test]
+    fn help_and_chrome_swallow_mouse_input() {
+        let mut s = shell();
+        s.go(Section::Taste);
+        s.body = Rect::new(0, 1, 160, 30);
+        let before = s.museum.sel;
+        let wheel = |row| MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 10,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        s.show_help = true;
+        s.on_mouse(wheel(10));
+        assert_eq!(s.museum.sel, before);
+
+        s.show_help = false;
+        s.on_mouse(wheel(s.body.bottom()));
+        assert_eq!(s.museum.sel, before);
     }
 }

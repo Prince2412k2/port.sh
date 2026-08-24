@@ -6,9 +6,10 @@
 //! recorded, and a returning visitor is recognised as one.
 //!
 //! **Append-only JSONL**, the same shape `reach.rs` writes and for the same
-//! reasons: no dependency, crash-safe (a torn write costs the last line and not
-//! the file), and readable with `jq` or `grep` at three in the morning. There is
-//! no schema migration to get wrong because there is no schema.
+//! reasons: no database, crash-safe (a torn write costs the last line and not
+//! the file), and readable with `jq` or `grep` at three in the morning. Restored
+//! chat snapshots carry an explicit version so an incompatible future view is
+//! skipped instead of guessed at.
 //!
 //! **What identifies somebody.** Over SSH, two things arrive for free and
 //! neither is a fingerprint taken behind anyone's back: the username they typed
@@ -102,7 +103,10 @@ pub fn last_seen() -> Option<String> {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Session ids, unique within one run of the process.
@@ -137,6 +141,7 @@ pub struct Visit {
     pub who: Who,
     started: u64,
     turns: u64,
+    saved: Vec<crate::ask::SavedTurn>,
 }
 
 /// How many times this id has been seen before, and when it first was.
@@ -171,14 +176,87 @@ fn history(id: &str) -> (u64, u64) {
     (seen, first)
 }
 
+/// The most recent completed exchanges for one stable identity.
+fn saved_turns(id: &str) -> Vec<crate::ask::SavedTurn> {
+    use std::collections::HashSet;
+
+    const KEEP: usize = 50;
+    if id.is_empty() {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(path()) else {
+        return Vec::new();
+    };
+    let mut turns = Vec::new();
+    let mut sessions = HashSet::new();
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let event = value.get("event").and_then(|event| event.as_str());
+        if event == Some("arrive") && value.get("id").and_then(|value| value.as_str()) == Some(id) {
+            if let Some(session) = value.get("session").and_then(|value| value.as_str()) {
+                sessions.insert(session.to_string());
+            }
+            continue;
+        }
+        if event != Some("ask") {
+            continue;
+        }
+        let belongs = match value.get("id").and_then(|value| value.as_str()) {
+            Some(turn_id) => turn_id == id,
+            None => value
+                .get("session")
+                .and_then(|value| value.as_str())
+                .is_some_and(|session| sessions.contains(session)),
+        };
+        if !belongs {
+            continue;
+        }
+        let (Some(q), Some(a)) = (
+            value.get("q").and_then(|value| value.as_str()),
+            value.get("a").and_then(|value| value.as_str()),
+        ) else {
+            continue;
+        };
+        let panel = (value.get("chat_version").and_then(|value| value.as_u64()) == Some(1))
+            .then(|| value.get("panel").cloned())
+            .flatten()
+            .and_then(|value| serde_json::from_value(value).ok());
+        turns.push(crate::ask::SavedTurn {
+            q: q.to_string(),
+            a: a.to_string(),
+            panel,
+        });
+    }
+    if turns.len() > KEEP {
+        turns.drain(..turns.len() - KEEP);
+    }
+    turns
+}
+
 fn append(line: &str) {
     let p = path();
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let _ = writeln!(f, "{line}");
     }
+}
+
+pub fn operational(level: &str, event: &str, detail: &str) {
+    eprintln!(
+        r#"{{"at":{},"level":{},"event":{},"detail":{}}}"#,
+        now(),
+        json::quote(level),
+        json::quote(event),
+        json::quote(detail),
+    );
 }
 
 impl Visit {
@@ -189,6 +267,7 @@ impl Visit {
     /// on somebody else's HTTP service would be a poor trade for a city name.
     pub fn open(who: Who) -> Visit {
         let (seen, first) = history(&who.id);
+        let saved = saved_turns(&who.id);
         let session = next_id();
         append(&format!(
             r#"{{"at":{},"event":"arrive","session":{},"via":{},"user":{},"id":{},"ip":{},"client":{},"returning":{},"seen_before":{},"first_seen":{}}}"#,
@@ -228,12 +307,54 @@ impl Visit {
             });
         }
 
-        Visit { session, who, started: now(), turns: 0 }
+        Visit {
+            session,
+            who,
+            started: now(),
+            turns: 0,
+            saved,
+        }
+    }
+
+    pub fn take_saved(&mut self) -> Vec<crate::ask::SavedTurn> {
+        std::mem::take(&mut self.saved)
+    }
+
+    pub fn question(&mut self, question: &str) {
+        append(&format!(
+            r#"{{"at":{},"event":"question","session":{},"id":{},"q":{}}}"#,
+            now(),
+            json::quote(&self.session),
+            json::quote(&self.who.id),
+            json::quote(question.trim()),
+        ));
+    }
+
+    pub fn question_status(&mut self, question: &str, status: &str) {
+        append(&format!(
+            r#"{{"at":{},"event":"question_status","session":{},"id":{},"status":{},"q":{}}}"#,
+            now(),
+            json::quote(&self.session),
+            json::quote(&self.who.id),
+            json::quote(status),
+            json::quote(question.trim()),
+        ));
     }
 
     /// Record one exchange. Both halves, because the question alone says what
     /// people want and the answer says whether they got it.
+    #[cfg(test)]
     pub fn asked(&mut self, question: &str, answer: &str, spent: Option<crate::acp::Spend>) {
+        self.asked_with_panel(question, answer, spent, None);
+    }
+
+    pub fn asked_with_panel(
+        &mut self,
+        question: &str,
+        answer: &str,
+        spent: Option<crate::acp::Spend>,
+        panel: Option<&crate::ask::SavedView>,
+    ) {
         self.turns += 1;
         // What it cost, where the agent reported it. Here rather than on screen:
         // a token count is a billing detail belonging to whoever pays for it,
@@ -254,10 +375,15 @@ impl Visit {
                 }
             ),
         };
+        let panel = panel
+            .and_then(|panel| serde_json::to_string(panel).ok())
+            .map(|panel| format!(r#","panel":{panel}"#))
+            .unwrap_or_default();
         append(&format!(
-            r#"{{"at":{},"event":"ask","session":{},"n":{},"q":{},"a":{}{cost}}}"#,
+            r#"{{"at":{},"event":"ask","session":{},"id":{},"chat_version":1,"n":{},"q":{},"a":{}{cost}{panel}}}"#,
             now(),
             json::quote(&self.session),
+            json::quote(&self.who.id),
             self.turns,
             json::quote(question.trim()),
             json::quote(answer.trim()),
@@ -271,12 +397,20 @@ impl Visit {
         // it live is worth one line per visit.
         eprintln!(
             "portfolio: visit over -- {}{} from {}, {} question{}",
-            if self.who.user.is_empty() { "someone" } else { &self.who.user },
+            if self.who.user.is_empty() {
+                "someone"
+            } else {
+                &self.who.user
+            },
             match self.who.via {
                 "web" => " (web)",
                 _ => " (ssh)",
             },
-            if self.who.ip.is_empty() { "somewhere" } else { &self.who.ip },
+            if self.who.ip.is_empty() {
+                "somewhere"
+            } else {
+                &self.who.ip
+            },
             self.turns,
             if self.turns == 1 { "" } else { "s" },
         );
@@ -354,12 +488,24 @@ mod tests {
 
         let rows = read(&p);
         assert_eq!(rows.len(), 3, "{rows:?}");
-        assert_eq!(rows[0].get("event").and_then(|e| e.as_str()), Some("arrive"));
+        assert_eq!(
+            rows[0].get("event").and_then(|e| e.as_str()),
+            Some("arrive")
+        );
         assert_eq!(rows[0].get("user").and_then(|u| u.as_str()), Some("alice"));
         assert_eq!(rows[0].get("via").and_then(|u| u.as_str()), Some("ssh"));
-        assert_eq!(rows[0].get("returning").and_then(|r| r.as_bool()), Some(false));
-        assert_eq!(rows[1].get("q").and_then(|q| q.as_str()), Some("why braille?"));
-        assert_eq!(rows[1].get("a").and_then(|a| a.as_str()), Some("Because dots."));
+        assert_eq!(
+            rows[0].get("returning").and_then(|r| r.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            rows[1].get("q").and_then(|q| q.as_str()),
+            Some("why braille?")
+        );
+        assert_eq!(
+            rows[1].get("a").and_then(|a| a.as_str()),
+            Some("Because dots.")
+        );
         assert_eq!(rows[2].get("turns").and_then(|t| t.as_f64()), Some(1.0));
     }
 
@@ -382,15 +528,89 @@ mod tests {
             .filter(|r| r.get("event").and_then(|e| e.as_str()) == Some("arrive"))
             .collect();
         assert_eq!(arrivals.len(), 4);
-        assert_eq!(arrivals[0].get("seen_before").and_then(|s| s.as_f64()), Some(0.0));
-        assert_eq!(arrivals[2].get("seen_before").and_then(|s| s.as_f64()), Some(2.0));
-        assert_eq!(arrivals[2].get("returning").and_then(|r| r.as_bool()), Some(true));
+        assert_eq!(
+            arrivals[0].get("seen_before").and_then(|s| s.as_f64()),
+            Some(0.0)
+        );
+        assert_eq!(
+            arrivals[2].get("seen_before").and_then(|s| s.as_f64()),
+            Some(2.0)
+        );
+        assert_eq!(
+            arrivals[2].get("returning").and_then(|r| r.as_bool()),
+            Some(true)
+        );
         assert_eq!(
             arrivals[3].get("returning").and_then(|r| r.as_bool()),
             Some(false),
             "a different key was taken for the same visitor"
         );
         let _ = (third.session, other.session);
+    }
+
+    #[test]
+    fn a_stable_identity_restores_only_its_latest_fifty_completed_turns() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = scratch("saved-turns");
+        std::env::set_var("PORTFOLIO_VISITS", &p);
+
+        let mut first = Visit::open(ssh_visitor("alice", "SHA256:AAA"));
+        for n in 0..51 {
+            let panel = (n == 50).then_some(crate::ask::SavedView {
+                show: crate::ask::SavedShow::Cert,
+                source: Some("showed the credential".into()),
+            });
+            first.asked_with_panel(
+                &format!("question {n}"),
+                &format!("answer {n}"),
+                None,
+                panel.as_ref(),
+            );
+        }
+
+        let mut returning = Visit::open(ssh_visitor("alice", "SHA256:AAA"));
+        let restored = returning.take_saved();
+        let mut stranger = Visit::open(ssh_visitor("alice", "SHA256:BBB"));
+        std::env::remove_var("PORTFOLIO_VISITS");
+
+        assert_eq!(restored.len(), 50);
+        assert_eq!(
+            restored.first().map(|turn| turn.q.as_str()),
+            Some("question 1")
+        );
+        assert_eq!(
+            restored.last().map(|turn| turn.a.as_str()),
+            Some("answer 50")
+        );
+        assert!(matches!(
+            restored
+                .last()
+                .and_then(|turn| turn.panel.as_ref())
+                .map(|view| &view.show),
+            Some(crate::ask::SavedShow::Cert)
+        ));
+        assert!(
+            stranger.take_saved().is_empty(),
+            "a different key inherited the chat"
+        );
+    }
+
+    #[test]
+    fn ask_records_from_before_snapshot_versioning_keep_their_text() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let p = scratch("legacy-turn");
+        std::env::set_var("PORTFOLIO_VISITS", &p);
+        append(r#"{"at":1,"event":"arrive","session":"old","id":"SHA256:AAA"}"#);
+        append(r#"{"at":2,"event":"ask","session":"old","q":"old question","a":"old answer"}"#);
+
+        let mut returning = Visit::open(ssh_visitor("alice", "SHA256:AAA"));
+        std::env::remove_var("PORTFOLIO_VISITS");
+        let restored = returning.take_saved();
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].q, "old question");
+        assert_eq!(restored[0].a, "old answer");
+        assert!(restored[0].panel.is_none());
     }
 
     /// Nothing identifying is offered, so nothing is claimed. Somebody who
@@ -406,7 +626,10 @@ mod tests {
         Visit::open(ssh_visitor("", "")).close();
         std::env::remove_var("PORTFOLIO_VISITS");
 
-        for r in read(&p).iter().filter(|r| r.get("event").and_then(|e| e.as_str()) == Some("arrive")) {
+        for r in read(&p)
+            .iter()
+            .filter(|r| r.get("event").and_then(|e| e.as_str()) == Some("arrive"))
+        {
             assert_eq!(r.get("returning").and_then(|x| x.as_bool()), Some(false));
         }
     }
@@ -426,10 +649,22 @@ mod tests {
         v.asked(
             "where is jaipur",
             "Rajasthan.",
-            Some(crate::acp::Spend { used: 1256, window: 128_000, cost: Some(0.000_74) }),
+            Some(crate::acp::Spend {
+                used: 1256,
+                window: 128_000,
+                cost: Some(0.000_74),
+            }),
         );
         // A priced-at-nothing model: the window is known, the money is not.
-        v.asked("and kochi", "Kerala.", Some(crate::acp::Spend { used: 1391, window: 128_000, cost: None }));
+        v.asked(
+            "and kochi",
+            "Kerala.",
+            Some(crate::acp::Spend {
+                used: 1391,
+                window: 128_000,
+                cost: None,
+            }),
+        );
         v.asked("/cert", "A badge.", None);
         v.close();
         std::env::remove_var("PORTFOLIO_VISITS");
@@ -442,16 +677,31 @@ mod tests {
         assert_eq!(asks.len(), 3);
 
         assert_eq!(asks[0].get("used").and_then(|u| u.as_f64()), Some(1256.0));
-        assert_eq!(asks[0].get("window").and_then(|u| u.as_f64()), Some(128_000.0));
+        assert_eq!(
+            asks[0].get("window").and_then(|u| u.as_f64()),
+            Some(128_000.0)
+        );
         // Six places, because two would round this one to free.
-        let cost = asks[0].get("cost").and_then(|c| c.as_f64()).expect("no cost");
+        let cost = asks[0]
+            .get("cost")
+            .and_then(|c| c.as_f64())
+            .expect("no cost");
         assert!((cost - 0.000_74).abs() < 1e-9, "{cost}");
 
         assert_eq!(asks[1].get("used").and_then(|u| u.as_f64()), Some(1391.0));
-        assert!(asks[1].get("cost").is_none(), "an unpriced model was given a price");
+        assert!(
+            asks[1].get("cost").is_none(),
+            "an unpriced model was given a price"
+        );
 
-        assert!(asks[2].get("used").is_none(), "a local command reported tokens");
-        assert!(asks[2].get("cost").is_none(), "a local command reported a cost");
+        assert!(
+            asks[2].get("used").is_none(),
+            "a local command reported tokens"
+        );
+        assert!(
+            asks[2].get("cost").is_none(),
+            "a local command reported a cost"
+        );
 
         // And every row is still one parseable line.
         assert!(rows.iter().all(|r| r.get("at").is_some()));
@@ -474,14 +724,22 @@ mod tests {
 
         let rows = read(&p);
         assert_eq!(rows.len(), 3, "a newline became a record: {rows:?}");
-        assert!(rows
-            .iter()
-            .all(|r| r.get("id").and_then(|i| i.as_str()) != Some("forged")));
+        assert!(
+            rows.iter()
+                .all(|r| r.get("id").and_then(|i| i.as_str()) != Some("forged"))
+        );
     }
 
     #[test]
     fn private_addresses_are_never_sent_to_a_lookup() {
-        for p in ["10.0.0.1", "127.0.0.1", "192.168.1.9", "172.16.4.4", "::1", ""] {
+        for p in [
+            "10.0.0.1",
+            "127.0.0.1",
+            "192.168.1.9",
+            "172.16.4.4",
+            "::1",
+            "",
+        ] {
             assert!(is_private(p), "{p} would have been looked up");
         }
         for public in ["8.8.8.8", "1.1.1.1", "172.32.0.1"] {

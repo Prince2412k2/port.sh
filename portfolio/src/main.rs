@@ -3,6 +3,7 @@
 mod acp;
 mod about;
 mod boot;
+mod budget;
 mod ask;
 mod browse;
 mod cert;
@@ -66,6 +67,7 @@ fn main() -> io::Result<()> {
                 println!("  --plain          snapshot without colour");
                 println!("  --at SECONDS     how far into the section's animation to draw");
                 println!("  --probe          check which agent tier is answering, and exit");
+                println!("  --health         process health check; prints ok and exits");
                 println!("  --tools          serve our tools and print what an agent calls, and");
                 println!("                   exit on ctrl-c. For pointing an agent at by hand");
                 println!();
@@ -101,6 +103,10 @@ fn main() -> io::Result<()> {
                     at: None,
                     scroll: None,
                 });
+            }
+            "--health" => {
+                println!("ok");
+                return Ok(());
             }
             "--plain" => {
                 if let Some(s) = shot.as_mut() {
@@ -204,6 +210,13 @@ fn main() -> io::Result<()> {
                                 }
                             );
                         }
+                        mcp::Directive::Diagram(spec) => println!(
+                            "  diagram  {}  {} elements, {} connectors, {} beats",
+                            spec.title,
+                            spec.elements.len(),
+                            spec.connectors.len(),
+                            spec.beats.len()
+                        ),
                         mcp::Directive::Clear => println!("  map     cleared"),
                     }
                 }
@@ -391,12 +404,14 @@ fn setup() -> io::Result<Term> {
     // Crossterm's capture only reports motion while a button is held; 1003
     // reports it unconditionally, which is what hover needs.
     write!(out, "\x1b[?1003h")?;
+    out.write_all(wire::ENABLE_KEYS)?;
     out.flush()?;
     Terminal::new(CrosstermBackend::new(out))
 }
 
 fn restore(term: &mut Term) -> io::Result<()> {
     let mut out = io::stdout();
+    out.write_all(wire::DISABLE_KEYS)?;
     write!(out, "\x1b[?1003l")?;
     out.flush()?;
     execute!(out, crossterm::cursor::Show, event::DisableMouseCapture, LeaveAlternateScreen)?;
@@ -410,6 +425,7 @@ fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let mut out = io::stdout();
+        let _ = out.write_all(wire::DISABLE_KEYS);
         let _ = write!(out, "\x1b[?1003l");
         let _ = execute!(
             out,

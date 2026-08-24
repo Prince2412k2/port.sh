@@ -13,7 +13,7 @@
 //! return value -- we bind a loopback listener and answer the call on the spot.
 //! The session that owns the panel is the one that handles the tool call.
 //!
-//! Two tools, and they are deliberately two:
+//! The two map tools are deliberately separate:
 //!
 //! - `locate_place` turns a name into a point. The agent is good at knowing
 //!   that a question is about Jaipur and bad at knowing where Jaipur is to four
@@ -65,7 +65,14 @@ pub enum Directive {
     /// Which parts, rather than a whole card, because the three are different
     /// answers -- and an agent that merely mentions a project in passing asks
     /// for none of them and gets the facts alone.
-    Work { id: String, mark: bool, diagram: bool },
+    Work {
+        id: String,
+        mark: bool,
+        diagram: bool,
+    },
+    /// A new explainer authored for this answer. The renderer owns layout and
+    /// motion; the agent supplies only the typed scene.
+    Diagram(skysheet::diagram::Spec),
     /// Take whatever is showing away.
     Clear,
     /// A tool was called, and this is what it was asked for.
@@ -73,8 +80,9 @@ pub enum Directive {
     /// The page cannot learn this from the ACP stream: ACP's `ToolCall` has no
     /// name, Copilot sends an empty title, and the transcript showed a row
     /// reading `\u{2713} tool` with nothing on it. But *this* file knows exactly
-    /// which tool was called and with what -- so it says so, and the row can
-    /// read `locate_place  Taj Mahal` instead.
+    /// which tool was called and with what -- so it says so. The Ask renderer
+    /// turns that machine identity into a human action and keeps the target on
+    /// the rail below it.
     Called { tool: String, detail: String },
 }
 
@@ -93,6 +101,14 @@ struct Board {
     /// resets when the session ends is the same thing as one that lives on the
     /// board -- `forget` takes it with the rest.
     spent: usize,
+    located: Vec<(f64, f64)>,
+    draft: Option<DiagramDraft>,
+    next_draft: u64,
+}
+
+struct DiagramDraft {
+    id: u64,
+    spec: skysheet::diagram::Spec,
 }
 
 /// Somewhere on the map, as the agent described it.
@@ -131,11 +147,21 @@ pub fn register(
     tx: Sender<Directive>,
     place: Option<std::sync::Arc<Mutex<Option<termap::home::Where>>>>,
 ) -> String {
+    static NEXT_BOARD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
     let token = token();
-    boards()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(token.clone(), Board { to: tx, place, spent: 0 });
+    let board_id = NEXT_BOARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    boards().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        token.clone(),
+        Board {
+            to: tx,
+            place,
+            spent: 0,
+            located: Vec::new(),
+            draft: None,
+            next_draft: board_id << 32 | 1,
+        },
+    );
     token
 }
 
@@ -172,7 +198,10 @@ fn token() -> String {
 /// Stop accepting directives for a session. Called when it ends; without it the
 /// table grows by one entry for every visitor for the life of the process.
 pub fn forget(token: &str) {
-    boards().lock().unwrap_or_else(|e| e.into_inner()).remove(token);
+    boards()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(token);
 }
 
 /// The projects, parsed once from the same file the projects section reads.
@@ -243,7 +272,9 @@ static COVERS: OnceLock<[f64; 4]> = OnceLock::new();
 
 /// Whether there is a map to draw at this point.
 fn on_this_map(lat: f64, lon: f64) -> bool {
-    let Some([x0, y0, x1, y1]) = COVERS.get() else { return false };
+    let Some([x0, y0, x1, y1]) = COVERS.get() else {
+        return false;
+    };
     let [x, y] = termap::geo::lonlat_to_world(lon, lat);
     x >= *x0 && x <= *x1 && y >= *y0 && y <= *y1
 }
@@ -287,8 +318,9 @@ thread_local! {
     ///
     /// Thread-local because `Source` holds `Rc`s and is not `Send`, and the tool
     /// server runs every request on one thread -- a current-thread runtime, on
-    /// purpose. The cost is one extra copy of the terrain grid, 28 MB, once for
-    /// the process rather than once per session.
+    /// purpose. The terrain is mapped rather than read, so this second source
+    /// shares its pages instead of copying them; the decoded tiles and the city
+    /// sweep are per-process.
     static NEARBY: std::cell::RefCell<Nearby> = const { std::cell::RefCell::new(Nearby::new()) };
 }
 
@@ -303,7 +335,10 @@ struct Nearby {
 
 impl Nearby {
     const fn new() -> Nearby {
-        Nearby { src: None, seen: Vec::new() }
+        Nearby {
+            src: None,
+            seen: Vec::new(),
+        }
     }
 }
 
@@ -405,7 +440,10 @@ struct Asked {
 
 impl Asked {
     const fn new() -> Asked {
-        Asked { seen: Vec::new(), last: None }
+        Asked {
+            seen: Vec::new(),
+            last: None,
+        }
     }
 }
 
@@ -428,7 +466,12 @@ fn geocode(query: &str) -> Option<Placed> {
     let cached = GEOCODED.with(|g| {
         let g = g.borrow();
         g.seen.iter().find(|(q, _)| q == query).map(|(_, found)| {
-            found.as_ref().map(|p| Placed { lat: p.lat, lon: p.lon, name: p.name.clone(), zoom: p.zoom })
+            found.as_ref().map(|p| Placed {
+                lat: p.lat,
+                lon: p.lon,
+                name: p.name.clone(),
+                zoom: p.zoom,
+            })
         })
     });
     if let Some(hit) = cached {
@@ -509,7 +552,11 @@ fn parse_nominatim(body: &str) -> Option<Placed> {
         .get("boundingbox")
         .and_then(|b| b.as_array())
         .and_then(|b| {
-            let f = |i: usize| b.get(i).and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok());
+            let f = |i: usize| {
+                b.get(i)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+            };
             Some(((f(1)? - f(0)?).abs()).max((f(3)? - f(2)?).abs()))
         })
         .unwrap_or(0.0);
@@ -549,7 +596,15 @@ fn urlencode(s: &str) -> String {
 /// bug this exists to prevent: an agent quietly missing a capability, with the
 /// handshake succeeding and nothing anywhere saying which tools it got.
 fn on_offer() -> Vec<&'static str> {
-    let mut names = vec!["locate_place", "show_map", "locate_visitor", "hide_map", "show_project"];
+    let mut names = vec![
+        "locate_place",
+        "show_map",
+        "locate_visitor",
+        "hide_map",
+        "show_project",
+        "preview_diagram",
+        "show_diagram",
+    ];
     if crate::browse::can_search() {
         names.push("search_web");
     }
@@ -568,7 +623,11 @@ fn on_offer() -> Vec<&'static str> {
 /// whole diagnosis.
 fn say_what_is_offered() {
     let names = on_offer();
-    eprintln!("portfolio: serving {} tools: {}", names.len(), names.join(", "));
+    eprintln!(
+        "portfolio: serving {} tools: {}",
+        names.len(),
+        names.join(", ")
+    );
     for (what, keyed, var) in [
         ("search_web", crate::browse::can_search(), "EXA_API_KEY"),
         ("fetch_page", crate::browse::can_read(), "JINA_API_KEY"),
@@ -649,7 +708,12 @@ fn tool_list() -> String {
     // The web tools are listed only when this box can actually use them. A tool
     // an agent can see and cannot use is worse than one it cannot see: it
     // reaches for it, gets a failure, and reports having looked.
-    let mut tools = vec![core, one_of("show_project", PROJECT_WHEN, PROJECT_ARGS)];
+    let mut tools = vec![
+        core,
+        one_of("show_project", PROJECT_WHEN, PROJECT_ARGS),
+        preview_diagram_tool(),
+        show_diagram_tool(),
+    ];
     if crate::browse::can_search() {
         tools.push(one("search_web", SEARCH_WHEN, "query", QUERY_ARG));
     }
@@ -720,6 +784,93 @@ const PROJECT_WHEN: &str = "Everything this box knows about one of Prince's \
 const PROJECT_ARGS: &str = r#""name":{"type":"string","description":"Which project, by name. Hyphens and spaces are both fine."},
             "show":{"type":"array","description":"What to draw beside your answer: `mark`, `diagram`, both, or leave it out for the facts alone.","items":{"type":"string","enum":["mark","diagram"]}}"#;
 
+const DIAGRAM_WHEN: &str = "Draft a new animated engineering explainer for this answer. \
+    This is not a generic flowchart: compose a dense, question-specific scene \
+    from panels, annotations, metrics, buffers, plots, timelines, statuses and \
+    connectors wherever each form makes the mechanism clearer. Use the canvas \
+    densely and make the visual hierarchy explain the system; reserve prose and \
+    callouts for the architectural consequence rather than repeating component \
+    labels.\n\nUse it when seeing boundaries, state, pressure, timing or flow explains the \
+    answer better than another paragraph. Inspect the returned terminal preview \
+    and warnings, then replace the whole draft with another preview_diagram call \
+    until the composition is strong. Publish the latest successful draft with \
+    show_diagram. Beats keep looping after the answer arrives. Tie every animation \
+    action to meaning -- movement of data, changing \
+    load, progress, scanning or queue movement -- never decoration. This draft is \
+    the only editable artifact: these tools cannot edit files, run a shell, change \
+    the source tree, or execute arbitrary code.";
+
+fn preview_diagram_tool() -> String {
+    format!(
+        r##"{{"name":"preview_diagram","description":{},"inputSchema":{{
+          "type":"object","additionalProperties":false,
+          "description":"A bespoke composed scene, not a generic flowchart. Fill the normalized 100x100 logical canvas densely with complementary visual forms; keep text and callouts for the architectural consequence, and make actions express system behavior.",
+          "properties":{{
+            "title":{{"type":"string","maxLength":72,"description":"Short scene title; defaults to empty."}},
+            "elements":{{"type":"array","minItems":1,"maxItems":32,"description":"The composed scene. Rects are normalized logical layout coordinates: x, y, width and height stay within 0..100 and x+width/y+height must not exceed 100. Combine groups, boxes, metrics, buffers, plots, timelines, statuses and sparse consequence-focused text rather than drawing a row of boxes.","items":{{"$ref":"#/$defs/element"}}}},
+            "connectors":{{"type":"array","maxItems":24,"description":"Meaningful relationships between non-group elements; defaults to empty.","items":{{"$ref":"#/$defs/connector"}}}},
+            "beats":{{"type":"array","maxItems":12,"description":"Animation beats that loop while the diagram is visible. Defaults to empty. Use actions for meaningful flow, pressure, progress, scanning or queue movement, never ornament.","items":{{"$ref":"#/$defs/beat"}}}}
+          }},"required":["elements"],
+          "$defs":{{
+            "id":{{"type":"string","minLength":1,"maxLength":32,"pattern":"^[A-Za-z0-9_-]+$"}},
+            "tone":{{"type":"string","enum":["normal","accent","pass","warn","stop","muted"],"default":"normal"}},
+            "rect":{{"type":"object","additionalProperties":false,"description":"Normalized logical rectangle; all coordinates are percentages of the scene, never terminal cells.","properties":{{
+              "x":{{"type":"integer","minimum":0,"maximum":100}},"y":{{"type":"integer","minimum":0,"maximum":100}},
+              "width":{{"type":"integer","minimum":1,"maximum":100}},"height":{{"type":"integer","minimum":1,"maximum":100}}
+            }},"required":["x","y","width","height"]}},
+            "marker":{{"type":"object","additionalProperties":false,"properties":{{
+              "at":{{"type":"number","minimum":0,"maximum":1}},"label":{{"type":"string","minLength":1,"maxLength":80}},"tone":{{"$ref":"#/$defs/tone"}}
+            }},"required":["at","label"]}},
+            "element":{{"type":"object","additionalProperties":false,"description":"One scene primitive. `kind` selects its applicable fields; there are no glyph, raw color or ANSI fields.","properties":{{
+              "id":{{"$ref":"#/$defs/id"}},"rect":{{"$ref":"#/$defs/rect"}},"kind":{{"type":"string","enum":["group","box","text","meter","buffer","plot","timeline","status"]}},"tone":{{"$ref":"#/$defs/tone"}},
+              "title":{{"type":"string","minLength":1,"maxLength":80,"description":"Group or box title."}},
+              "lines":{{"type":"array","maxItems":8,"items":{{"type":"string","minLength":1,"maxLength":240}},"description":"Compact box details; defaults to empty."}},
+              "frame":{{"type":"string","enum":["plain","strong","double"],"default":"plain"}},
+              "text":{{"type":"string","minLength":1,"maxLength":240,"description":"Heading, annotation, body, or architectural callout text."}},
+              "role":{{"type":"string","enum":["heading","body","annotation","callout"],"default":"body"}},
+              "align":{{"type":"string","enum":["left","center","right"],"default":"left"}},
+              "label":{{"type":"string","minLength":1,"maxLength":80}},"value":{{"type":"number","minimum":0,"maximum":1}},"unit":{{"type":"string","maxLength":80}},
+              "cells":{{"type":"array","minItems":1,"maxItems":32,"items":{{"type":"string","enum":["empty","ready","active","done","blocked"]}}}},
+              "samples":{{"type":"array","minItems":2,"maxItems":64,"items":{{"type":"number"}}}},"plot":{{"type":"string","enum":["sparkline","waveform","bars"],"default":"sparkline"}},
+              "markers":{{"type":"array","maxItems":16,"items":{{"$ref":"#/$defs/marker"}},"description":"Timeline markers; defaults to empty."}},"cursor":{{"type":"number","minimum":0,"maximum":1,"default":0}},
+              "state":{{"type":"string","enum":["idle","active","pass","warn","stop"],"default":"idle"}},"detail":{{"type":"string","minLength":1,"maxLength":240}}
+            }},"required":["id","rect","kind"],"allOf":[
+              {{"if":{{"properties":{{"kind":{{"const":"group"}}}}}},"then":{{"required":["title"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"box"}}}}}},"then":{{"required":["title"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"text"}}}}}},"then":{{"required":["text"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"meter"}}}}}},"then":{{"required":["label","value"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"buffer"}}}}}},"then":{{"required":["label","cells"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"plot"}}}}}},"then":{{"required":["label","samples"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"timeline"}}}}}},"then":{{"required":["label"]}}}},
+              {{"if":{{"properties":{{"kind":{{"const":"status"}}}}}},"then":{{"required":["label","detail"]}}}}
+            ]}},
+            "connector":{{"type":"object","additionalProperties":false,"properties":{{
+              "id":{{"$ref":"#/$defs/id"}},"from":{{"$ref":"#/$defs/id"}},"to":{{"$ref":"#/$defs/id"}},"label":{{"type":"string","maxLength":80}},"tone":{{"$ref":"#/$defs/tone"}},
+              "style":{{"type":"string","enum":["arrow","bidirectional","blocked","dashed"],"default":"arrow"}}
+            }},"required":["id","from","to"]}},
+            "action":{{"oneOf":[
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"focus"}},"targets":{{"type":"array","minItems":1,"maxItems":56,"items":{{"$ref":"#/$defs/id"}}}}}},"required":["action","targets"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"flow"}},"target":{{"$ref":"#/$defs/id"}},"reverse":{{"type":"boolean","default":false}}}},"required":["action","target"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"pulse"}},"target":{{"$ref":"#/$defs/id"}}}},"required":["action","target"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"meter"}},"target":{{"$ref":"#/$defs/id"}},"from":{{"type":"number","minimum":0,"maximum":1}},"to":{{"type":"number","minimum":0,"maximum":1}}}},"required":["action","target","from","to"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"timeline"}},"target":{{"$ref":"#/$defs/id"}},"from":{{"type":"number","minimum":0,"maximum":1}},"to":{{"type":"number","minimum":0,"maximum":1}}}},"required":["action","target","from","to"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"scan"}},"target":{{"$ref":"#/$defs/id"}}}},"required":["action","target"]}},
+              {{"type":"object","additionalProperties":false,"properties":{{"action":{{"const":"shift"}},"target":{{"$ref":"#/$defs/id"}}}},"required":["action","target"]}}
+            ]}},
+            "beat":{{"type":"object","additionalProperties":false,"properties":{{
+              "caption":{{"type":"string","minLength":1,"maxLength":240}},"duration":{{"type":"number","minimum":0.1,"maximum":5}},
+              "actions":{{"type":"array","maxItems":12,"description":"Typed, meaning-bearing animation actions; defaults to empty.","items":{{"$ref":"#/$defs/action"}}}}
+            }},"required":["caption","duration"]}}
+          }}
+        }}}}"##,
+        json::quote(DIAGRAM_WHEN)
+    )
+}
+
+fn show_diagram_tool() -> String {
+    r#"{"name":"show_diagram","description":"Publish the latest successfully previewed draft beside the answer. It cannot create or edit scenes itself.","inputSchema":{"type":"object","additionalProperties":false,"properties":{"draft_id":{"type":"integer","minimum":1,"description":"The draft_id returned by the latest successful preview_diagram call in this session."}},"required":["draft_id"]}}"#.to_string()
+}
+
 /// A tool with a hand-written argument block, for the ones whose arguments are
 /// not all one string.
 fn one_of(name: &str, when: &str, args: &str) -> String {
@@ -742,6 +893,549 @@ fn one(name: &str, when: &str, arg: &str, about: &str) -> String {
     )
 }
 
+fn diagram_of(args: Option<&Value>) -> Result<skysheet::diagram::Spec, String> {
+    use std::collections::BTreeMap;
+
+    use skysheet::diagram::{
+        Action, Align, Beat, CellState, Connector, ConnectorStyle, Element, ElementKind, Frame,
+        Marker, PlotKind, RectSpec, Spec, StatusState, TextRole, Tone,
+    };
+
+    fn object<'a>(value: &'a Value, what: &str) -> Result<&'a BTreeMap<String, Value>, String> {
+        match value {
+            Value::Obj(fields) => Ok(fields),
+            _ => Err(format!("preview_diagram {what} must be an object")),
+        }
+    }
+
+    fn known(fields: &BTreeMap<String, Value>, allowed: &[&str], what: &str) -> Result<(), String> {
+        if let Some(key) = fields.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(format!("preview_diagram {what} has unknown field `{key}`"));
+        }
+        Ok(())
+    }
+
+    fn string(fields: &BTreeMap<String, Value>, key: &str, what: &str) -> Result<String, String> {
+        fields
+            .get(key)
+            .ok_or_else(|| format!("preview_diagram {what} needs `{key}`"))?
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("preview_diagram {what} `{key}` must be a string"))
+    }
+
+    fn optional_string(
+        fields: &BTreeMap<String, Value>,
+        key: &str,
+        what: &str,
+    ) -> Result<String, String> {
+        match fields.get(key) {
+            None => Ok(String::new()),
+            Some(value) => value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("preview_diagram {what} `{key}` must be a string")),
+        }
+    }
+
+    fn number(fields: &BTreeMap<String, Value>, key: &str, what: &str) -> Result<f64, String> {
+        fields
+            .get(key)
+            .ok_or_else(|| format!("preview_diagram {what} needs `{key}`"))?
+            .as_f64()
+            .ok_or_else(|| format!("preview_diagram {what} `{key}` must be a number"))
+    }
+
+    fn array<'a>(
+        fields: &'a BTreeMap<String, Value>,
+        key: &str,
+        max: usize,
+        what: &str,
+    ) -> Result<&'a [Value], String> {
+        let values = match fields.get(key) {
+            None => return Ok(&[]),
+            Some(value) => value
+                .as_array()
+                .ok_or_else(|| format!("preview_diagram {what} `{key}` must be an array"))?,
+        };
+        if values.len() > max {
+            return Err(format!(
+                "preview_diagram {what} `{key}` has more than {max} items"
+            ));
+        }
+        Ok(values)
+    }
+
+    fn tone(fields: &BTreeMap<String, Value>, what: &str) -> Result<Tone, String> {
+        match optional_string(fields, "tone", what)?.as_str() {
+            "" | "normal" => Ok(Tone::Normal),
+            "accent" => Ok(Tone::Accent),
+            "pass" => Ok(Tone::Pass),
+            "warn" => Ok(Tone::Warn),
+            "stop" => Ok(Tone::Stop),
+            "muted" => Ok(Tone::Muted),
+            other => Err(format!("preview_diagram {what} has unknown tone {other:?}")),
+        }
+    }
+
+    fn rect(value: &Value, what: &str) -> Result<RectSpec, String> {
+        let fields = object(value, what)?;
+        known(fields, &["x", "y", "width", "height"], what)?;
+        let coordinate = |key: &str| -> Result<u16, String> {
+            let value = number(fields, key, what)?;
+            if value.fract() != 0.0 || !(0.0..=100.0).contains(&value) {
+                return Err(format!(
+                    "preview_diagram {what} `{key}` must be an integer in 0..=100"
+                ));
+            }
+            Ok(value as u16)
+        };
+        Ok(RectSpec {
+            x: coordinate("x")?,
+            y: coordinate("y")?,
+            width: coordinate("width")?,
+            height: coordinate("height")?,
+        })
+    }
+
+    let args = args.ok_or_else(|| "preview_diagram needs an argument object".to_string())?;
+    let root = object(args, "arguments")?;
+    known(
+        root,
+        &["title", "elements", "connectors", "beats"],
+        "arguments",
+    )?;
+    let title = optional_string(root, "title", "arguments")?;
+
+    let elements = array(root, "elements", 32, "arguments")?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let what = format!("element {index}");
+            let fields = object(value, &what)?;
+            let kind_name = string(fields, "kind", &what)?;
+            let allowed = match kind_name.as_str() {
+                "group" => &["id", "rect", "kind", "tone", "title"][..],
+                "box" => &["id", "rect", "kind", "tone", "title", "lines", "frame"],
+                "text" => &["id", "rect", "kind", "tone", "text", "role", "align"],
+                "meter" => &["id", "rect", "kind", "tone", "label", "value", "unit"],
+                "buffer" => &["id", "rect", "kind", "tone", "label", "cells"],
+                "plot" => &["id", "rect", "kind", "tone", "label", "samples", "plot"],
+                "timeline" => &["id", "rect", "kind", "tone", "label", "markers", "cursor"],
+                "status" => &["id", "rect", "kind", "tone", "label", "state", "detail"],
+                other => return Err(format!("preview_diagram {what} has unknown kind {other:?}")),
+            };
+            known(fields, allowed, &what)?;
+            let kind = match kind_name.as_str() {
+                "group" => ElementKind::Group {
+                    title: string(fields, "title", &what)?,
+                },
+                "box" => {
+                    let lines = array(fields, "lines", 8, &what)?
+                        .iter()
+                        .map(|line| {
+                            line.as_str().map(str::to_string).ok_or_else(|| {
+                                format!("preview_diagram {what} `lines` items must be strings")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let frame = match optional_string(fields, "frame", &what)?.as_str() {
+                        "" | "plain" => Frame::Plain,
+                        "strong" => Frame::Strong,
+                        "double" => Frame::Double,
+                        other => {
+                            return Err(format!(
+                                "preview_diagram {what} has unknown frame {other:?}"
+                            ))
+                        }
+                    };
+                    ElementKind::Box {
+                        title: string(fields, "title", &what)?,
+                        lines,
+                        frame,
+                    }
+                }
+                "text" => {
+                    let role = match optional_string(fields, "role", &what)?.as_str() {
+                        "" | "body" => TextRole::Body,
+                        "heading" => TextRole::Heading,
+                        "annotation" => TextRole::Annotation,
+                        "callout" => TextRole::Callout,
+                        other => {
+                            return Err(format!(
+                                "preview_diagram {what} has unknown text role {other:?}"
+                            ))
+                        }
+                    };
+                    let align = match optional_string(fields, "align", &what)?.as_str() {
+                        "" | "left" => Align::Left,
+                        "center" => Align::Center,
+                        "right" => Align::Right,
+                        other => {
+                            return Err(format!(
+                                "preview_diagram {what} has unknown alignment {other:?}"
+                            ))
+                        }
+                    };
+                    ElementKind::Text {
+                        text: string(fields, "text", &what)?,
+                        role,
+                        align,
+                    }
+                }
+                "meter" => ElementKind::Meter {
+                    label: string(fields, "label", &what)?,
+                    value: number(fields, "value", &what)?,
+                    unit: optional_string(fields, "unit", &what)?,
+                },
+                "buffer" => {
+                    let cells = array(fields, "cells", 32, &what)?
+                        .iter()
+                        .map(|cell| match cell.as_str() {
+                            Some("empty") => Ok(CellState::Empty),
+                            Some("ready") => Ok(CellState::Ready),
+                            Some("active") => Ok(CellState::Active),
+                            Some("done") => Ok(CellState::Done),
+                            Some("blocked") => Ok(CellState::Blocked),
+                            Some(other) => Err(format!(
+                                "preview_diagram {what} has unknown cell state {other:?}"
+                            )),
+                            None => Err(format!(
+                                "preview_diagram {what} `cells` items must be strings"
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    ElementKind::Buffer {
+                        label: string(fields, "label", &what)?,
+                        cells,
+                    }
+                }
+                "plot" => {
+                    let samples = array(fields, "samples", 64, &what)?
+                        .iter()
+                        .map(|sample| {
+                            sample.as_f64().ok_or_else(|| {
+                                format!("preview_diagram {what} `samples` items must be numbers")
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let kind = match optional_string(fields, "plot", &what)?.as_str() {
+                        "" | "sparkline" => PlotKind::Sparkline,
+                        "waveform" => PlotKind::Waveform,
+                        "bars" => PlotKind::Bars,
+                        other => {
+                            return Err(format!(
+                                "preview_diagram {what} has unknown plot kind {other:?}"
+                            ))
+                        }
+                    };
+                    ElementKind::Plot {
+                        label: string(fields, "label", &what)?,
+                        samples,
+                        kind,
+                    }
+                }
+                "timeline" => {
+                    let markers = array(fields, "markers", 16, &what)?
+                        .iter()
+                        .enumerate()
+                        .map(|(marker_index, marker)| {
+                            let marker_what = format!("{what} marker {marker_index}");
+                            let marker = object(marker, &marker_what)?;
+                            known(marker, &["at", "label", "tone"], &marker_what)?;
+                            Ok(Marker {
+                                at: number(marker, "at", &marker_what)?,
+                                label: string(marker, "label", &marker_what)?,
+                                tone: tone(marker, &marker_what)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    let cursor = match fields.get("cursor") {
+                        None => 0.0,
+                        Some(_) => number(fields, "cursor", &what)?,
+                    };
+                    ElementKind::Timeline {
+                        label: string(fields, "label", &what)?,
+                        markers,
+                        cursor,
+                    }
+                }
+                "status" => {
+                    let state = match optional_string(fields, "state", &what)?.as_str() {
+                        "" | "idle" => StatusState::Idle,
+                        "active" => StatusState::Active,
+                        "pass" => StatusState::Pass,
+                        "warn" => StatusState::Warn,
+                        "stop" => StatusState::Stop,
+                        other => {
+                            return Err(format!(
+                                "preview_diagram {what} has unknown status state {other:?}"
+                            ))
+                        }
+                    };
+                    ElementKind::Status {
+                        label: string(fields, "label", &what)?,
+                        state,
+                        detail: string(fields, "detail", &what)?,
+                    }
+                }
+                _ => unreachable!(),
+            };
+            Ok(Element {
+                id: string(fields, "id", &what)?,
+                rect: fields
+                    .get("rect")
+                    .ok_or_else(|| format!("preview_diagram {what} needs `rect`"))
+                    .and_then(|value| rect(value, &format!("{what} `rect`")))?,
+                tone: tone(fields, &what)?,
+                kind,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let connectors = array(root, "connectors", 24, "arguments")?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let what = format!("connector {index}");
+            let fields = object(value, &what)?;
+            known(
+                fields,
+                &["id", "from", "to", "label", "tone", "style"],
+                &what,
+            )?;
+            let style = match optional_string(fields, "style", &what)?.as_str() {
+                "" | "arrow" => ConnectorStyle::Arrow,
+                "bidirectional" => ConnectorStyle::Bidirectional,
+                "blocked" => ConnectorStyle::Blocked,
+                "dashed" => ConnectorStyle::Dashed,
+                other => {
+                    return Err(format!(
+                        "preview_diagram {what} has unknown connector style {other:?}"
+                    ))
+                }
+            };
+            Ok(Connector {
+                id: string(fields, "id", &what)?,
+                from: string(fields, "from", &what)?,
+                to: string(fields, "to", &what)?,
+                label: optional_string(fields, "label", &what)?,
+                tone: tone(fields, &what)?,
+                style,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let beats = array(root, "beats", 12, "arguments")?
+        .iter()
+        .enumerate()
+        .map(|(beat_index, value)| {
+            let what = format!("beat {beat_index}");
+            let fields = object(value, &what)?;
+            known(fields, &["caption", "duration", "actions"], &what)?;
+            let actions = array(fields, "actions", 12, &what)?
+                .iter()
+                .enumerate()
+                .map(|(action_index, value)| {
+                    let action_what = format!("{what} action {action_index}");
+                    let action = object(value, &action_what)?;
+                    let action_name = string(action, "action", &action_what)?;
+                    let target = |action: &BTreeMap<String, Value>| string(action, "target", &action_what);
+                    match action_name.as_str() {
+                        "focus" => {
+                            known(action, &["action", "targets"], &action_what)?;
+                            let targets = array(action, "targets", 56, &action_what)?
+                                .iter()
+                                .map(|target| {
+                                    target.as_str().map(str::to_string).ok_or_else(|| {
+                                        format!("preview_diagram {action_what} `targets` items must be strings")
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            Ok(Action::Focus { targets })
+                        }
+                        "flow" => {
+                            known(action, &["action", "target", "reverse"], &action_what)?;
+                            let reverse = match action.get("reverse") {
+                                None => false,
+                                Some(value) => value.as_bool().ok_or_else(|| {
+                                    format!("preview_diagram {action_what} `reverse` must be a boolean")
+                                })?,
+                            };
+                            Ok(Action::Flow {
+                                target: target(action)?,
+                                reverse,
+                            })
+                        }
+                        "pulse" => {
+                            known(action, &["action", "target"], &action_what)?;
+                            Ok(Action::Pulse {
+                                target: target(action)?,
+                            })
+                        }
+                        "meter" => {
+                            known(action, &["action", "target", "from", "to"], &action_what)?;
+                            Ok(Action::Meter {
+                                target: target(action)?,
+                                from: number(action, "from", &action_what)?,
+                                to: number(action, "to", &action_what)?,
+                            })
+                        }
+                        "timeline" => {
+                            known(action, &["action", "target", "from", "to"], &action_what)?;
+                            Ok(Action::Timeline {
+                                target: target(action)?,
+                                from: number(action, "from", &action_what)?,
+                                to: number(action, "to", &action_what)?,
+                            })
+                        }
+                        "scan" => {
+                            known(action, &["action", "target"], &action_what)?;
+                            Ok(Action::Scan {
+                                target: target(action)?,
+                            })
+                        }
+                        "shift" => {
+                            known(action, &["action", "target"], &action_what)?;
+                            Ok(Action::Shift {
+                                target: target(action)?,
+                            })
+                        }
+                        other => Err(format!("preview_diagram {action_what} has unknown action {other:?}")),
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(Beat {
+                caption: string(fields, "caption", &what)?,
+                duration: number(fields, "duration", &what)?,
+                actions,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let spec = Spec {
+        title,
+        elements,
+        connectors,
+        beats,
+    };
+    skysheet::diagram::validate(&spec).map_err(|why| format!("preview_diagram {why}"))?;
+    Ok(spec)
+}
+
+fn diagram_warnings(spec: &skysheet::diagram::Spec) -> Vec<String> {
+    use skysheet::diagram::ElementKind;
+
+    let elements: Vec<_> = spec
+        .elements
+        .iter()
+        .filter(|element| !matches!(element.kind, ElementKind::Group { .. }))
+        .collect();
+    let mut warnings = Vec::new();
+
+    for (index, left) in elements.iter().enumerate() {
+        let a = left.rect;
+        for right in &elements[index + 1..] {
+            let b = right.rect;
+            if a.x < b.x + b.width
+                && b.x < a.x + a.width
+                && a.y < b.y + b.height
+                && b.y < a.y + a.height
+            {
+                warnings.push(format!(
+                    "element rectangles overlap: `{}` and `{}`",
+                    left.id, right.id
+                ));
+            }
+        }
+    }
+
+    for element in &elements {
+        let rect = element.rect;
+        let width = (u32::from(rect.x + rect.width) * 100 / 100) - (u32::from(rect.x) * 100 / 100);
+        let height = (u32::from(rect.y + rect.height) * 30 / 100) - (u32::from(rect.y) * 30 / 100);
+        let (kind, min_width, min_height) = match element.kind {
+            ElementKind::Box { .. } => ("box", 8, 3),
+            ElementKind::Text { .. } => ("text", 4, 1),
+            ElementKind::Meter { .. } => ("meter", 12, 2),
+            ElementKind::Buffer { .. } => ("buffer", 10, 3),
+            ElementKind::Plot { .. } => ("plot", 12, 4),
+            ElementKind::Timeline { .. } => ("timeline", 16, 4),
+            ElementKind::Status { .. } => ("status", 12, 2),
+            ElementKind::Group { .. } => unreachable!(),
+        };
+        if width < min_width || height < min_height {
+            warnings.push(format!(
+                "`{}` {kind} maps to {width}x{height} cells; likely too small",
+                element.id
+            ));
+        }
+    }
+
+    let mut covered = [false; 100 * 100];
+    for element in &elements {
+        let rect = element.rect;
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                covered[usize::from(y) * 100 + usize::from(x)] = true;
+            }
+        }
+    }
+    let coverage = covered.iter().filter(|cell| **cell).count();
+    if coverage < 3000 {
+        warnings.push(format!(
+            "sparse composition: non-group elements cover {}% of the logical canvas",
+            coverage / 100
+        ));
+    }
+
+    warnings
+}
+
+fn draft_id_of(args: Option<&Value>) -> Result<u64, &'static str> {
+    let Some(Value::Obj(fields)) = args else {
+        return Err("show_diagram needs an argument object");
+    };
+    if fields.len() != 1 || !fields.contains_key("draft_id") {
+        return Err("show_diagram accepts only a `draft_id`");
+    }
+    let Some(id) = fields.get("draft_id").and_then(Value::as_f64) else {
+        return Err("show_diagram `draft_id` must be a positive integer");
+    };
+    if !id.is_finite() || id < 1.0 || id.fract() != 0.0 || id > (1u64 << 53) as f64 {
+        return Err("show_diagram `draft_id` must be a positive integer");
+    }
+    Ok(id as u64)
+}
+
+fn remember_location(token: &str, lat: f64, lon: f64) {
+    let mut boards = boards().lock().unwrap_or_else(|error| error.into_inner());
+    let Some(board) = boards.get_mut(token) else {
+        return;
+    };
+    if board.located.len() == 64 {
+        board.located.remove(0);
+    }
+    board.located.push((lat, lon));
+}
+
+fn was_located(token: &str, lat: f64, lon: f64) -> bool {
+    boards()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(token)
+        .is_some_and(|board| {
+            board.located.iter().any(|(known_lat, known_lon)| {
+                (known_lat - lat).abs() < 0.00002 && (known_lon - lon).abs() < 0.00002
+            })
+        })
+}
+
+#[cfg(test)]
+pub fn trust_location(token: &str, lat: f64, lon: f64) {
+    remember_location(token, lat, lon);
+}
+
 /// Answer one tool call. `token` says whose screen it is.
 ///
 /// Logged, every one. It is the only positive evidence that the agent can see
@@ -751,9 +1445,19 @@ fn one(name: &str, when: &str, arg: &str, about: &str) -> String {
 /// spelling of their names. An empty log next to a working handshake is the
 /// shape of that bug.
 fn call(token: &str, name: &str, args: Option<&Value>) -> String {
-    eprintln!("portfolio: agent called `{name}`");
-    send(token, Directive::Called { tool: name.to_string(), detail: detail_of(name, args) });
-    let arg_str = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    crate::visits::operational("info", "agent_tool_call", name);
+    send(
+        token,
+        Directive::Called {
+            tool: name.to_string(),
+            detail: detail_of(name, args),
+        },
+    );
+    let arg_str = |k: &str| {
+        args.and_then(|a| a.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    };
 
     match name {
         "locate_place" => {
@@ -780,14 +1484,17 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 true => index().and_then(|g| g.find(want)).cloned(),
             };
             match local {
-                Some(e) => text(&format!(
-                    r#"{{"found":true,"name":{},"kind":{},"lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"map data"}}"#,
-                    json::quote(&e.name),
-                    json::quote(e.what),
-                    e.lonlat.1,
-                    e.lonlat.0,
-                    e.zoom
-                )),
+                Some(e) => {
+                    remember_location(token, e.lonlat.1, e.lonlat.0);
+                    text(&format!(
+                        r#"{{"found":true,"name":{},"kind":{},"lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"map data"}}"#,
+                        json::quote(&e.name),
+                        json::quote(e.what),
+                        e.lonlat.1,
+                        e.lonlat.0,
+                        e.zoom
+                    ))
+                }
                 None => match geocode(&match near.trim().is_empty() {
                     // The city goes into the query rather than being a separate
                     // field: "Zen Cafe" alone finds a Zen Cafe, and there are a
@@ -795,14 +1502,17 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                     true => want.to_string(),
                     false => format!("{want}, {near}"),
                 }) {
-                    Some(p) => text(&format!(
-                        r#"{{"found":true,"name":{},"kind":"geocoded","lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"OpenStreetMap","on_this_map":{}}}"#,
-                        json::quote(&p.name),
-                        p.lat,
-                        p.lon,
-                        p.zoom,
-                        on_this_map(p.lat, p.lon)
-                    )),
+                    Some(p) => {
+                        remember_location(token, p.lat, p.lon);
+                        text(&format!(
+                            r#"{{"found":true,"name":{},"kind":"geocoded","lat":{:.5},"lon":{:.5},"zoom":{:.2},"source":"OpenStreetMap","on_this_map":{}}}"#,
+                            json::quote(&p.name),
+                            p.lat,
+                            p.lon,
+                            p.zoom,
+                            on_this_map(p.lat, p.lon)
+                        ))
+                    }
                     // Deliberately not the nearest thing. Answering a miss with
                     // a town forty kilometres away would look exactly like an
                     // answer.
@@ -836,10 +1546,19 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
             let mut stops = Vec::new();
             for one in raw {
                 let num = |k: &str| one.get(k).and_then(|v| v.as_f64());
-                let text_of =
-                    |k: &str| one.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let (Some(lat), Some(lon)) = (num("lat"), num("lon")) else { continue };
+                let text_of = |k: &str| {
+                    one.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let (Some(lat), Some(lon)) = (num("lat"), num("lon")) else {
+                    continue;
+                };
                 if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+                    continue;
+                }
+                if !was_located(token, lat, lon) {
                     continue;
                 }
                 // `from` is optional and its zoom more so: the flight's own
@@ -851,6 +1570,9 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                     let (from_lat, from_lon) = (n("lat")?, n("lon")?);
                     if !(-90.0..=90.0).contains(&from_lat) || !(-180.0..=180.0).contains(&from_lon)
                     {
+                        return None;
+                    }
+                    if !was_located(token, from_lat, from_lon) {
                         return None;
                     }
                     // A journey to where the camera already is, is not a
@@ -866,7 +1588,9 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                     Some((
                         from_lat,
                         from_lon,
-                        n("zoom").unwrap_or(num("zoom").unwrap_or(11.5)).clamp(3.0, 16.5),
+                        n("zoom")
+                            .unwrap_or(num("zoom").unwrap_or(11.5))
+                            .clamp(3.0, 16.5),
                     ))
                 });
                 stops.push(Stop {
@@ -885,7 +1609,7 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 });
             }
             if stops.is_empty() {
-                return err("show_map needs lat and lon, or a places list of them");
+                return err("show_map accepts only coordinates returned by locate_place");
             }
             match send(token, Directive::Map { stops }) {
                 true => text(r#"{"shown":true}"#),
@@ -900,12 +1624,15 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 .and_then(|b| b.place.clone())
                 .and_then(|slot| slot.lock().unwrap_or_else(|e| e.into_inner()).clone());
             match found {
-                Some(w) => text(&format!(
-                    r#"{{"found":true,"where":{},"lat":{:.4},"lon":{:.4},"accuracy":"city"}}"#,
-                    json::quote(&w.label()),
-                    w.lat,
-                    w.lon
-                )),
+                Some(w) => {
+                    remember_location(token, w.lat, w.lon);
+                    text(&format!(
+                        r#"{{"found":true,"where":{},"lat":{:.4},"lon":{:.4},"accuracy":"city"}}"#,
+                        json::quote(&w.label()),
+                        w.lat,
+                        w.lon
+                    ))
+                }
                 None => text(
                     r#"{"found":false,"why":"the lookup has not come back, or the address is private"}"#,
                 ),
@@ -962,11 +1689,73 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 },
             }
         }
+        "preview_diagram" => {
+            if !boards()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(token)
+            {
+                return err("that screen is gone");
+            }
+            let spec = match diagram_of(args) {
+                Ok(spec) => spec,
+                Err(why) => return err(&why),
+            };
+            let area = ratatui::layout::Rect::new(0, 0, 100, 34);
+            let mut buffer = ratatui::buffer::Buffer::empty(area);
+            if !skysheet::diagram::render(&mut buffer, area, &spec, 1.0, false) {
+                return err("preview_diagram could not render the scene");
+            }
+            let preview = termap::snapshot::plain(&buffer);
+            let warnings = diagram_warnings(&spec);
+            let (elements, connectors, beats) =
+                (spec.elements.len(), spec.connectors.len(), spec.beats.len());
+            let mut table = boards().lock().unwrap_or_else(|e| e.into_inner());
+            let Some(board) = table.get_mut(token) else {
+                return err("that screen is gone");
+            };
+            let draft_id = board.next_draft;
+            board.next_draft += 1;
+            board.draft = Some(DiagramDraft { id: draft_id, spec });
+            let warnings: Vec<String> = warnings
+                .iter()
+                .map(|warning| json::quote(warning))
+                .collect();
+            text(&format!(
+                r#"{{"draft_id":{draft_id},"ready":true,"elements":{elements},"connectors":{connectors},"beats":{beats},"preview":{},"warnings":[{}]}}"#,
+                json::quote(&preview),
+                warnings.join(",")
+            ))
+        }
+        "show_diagram" => {
+            let draft_id = match draft_id_of(args) {
+                Ok(id) => id,
+                Err(why) => return err(why),
+            };
+            let mut table = boards().lock().unwrap_or_else(|e| e.into_inner());
+            let Some(board) = table.get_mut(token) else {
+                return err("that screen is gone");
+            };
+            let Some(draft) = &board.draft else {
+                return err("show_diagram has no previewed draft in this session");
+            };
+            if draft.id != draft_id {
+                return err("show_diagram may publish only this session's latest draft_id");
+            }
+            let spec = draft.spec.clone();
+            let (elements, connectors, beats) =
+                (spec.elements.len(), spec.connectors.len(), spec.beats.len());
+            match board.to.send(Directive::Diagram(spec)) {
+                Ok(()) => text(&format!(
+                    r#"{{"shown":true,"elements":{elements},"connectors":{connectors},"beats":{beats}}}"#
+                )),
+                Err(_) => err("that screen is gone"),
+            }
+        }
         "show_project" => {
             let want = arg_str("name");
             let Some(p) = project_named(want) else {
-                let known: Vec<String> =
-                    projects().iter().map(|p| json::quote(&p.id)).collect();
+                let known: Vec<String> = projects().iter().map(|p| json::quote(&p.id)).collect();
                 return text(&format!(
                     r#"{{"found":false,"asked":{},"projects":[{}]}}"#,
                     json::quote(want),
@@ -980,11 +1769,19 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
                 args.and_then(|a| a.get("show"))
                     .and_then(|s| s.as_array())
                     .is_some_and(|list| {
-                        list.iter().any(|v| v.as_str().is_some_and(|s| s.trim() == what))
+                        list.iter()
+                            .any(|v| v.as_str().is_some_and(|s| s.trim() == what))
                     })
             };
             let (mark, diagram) = (asked("mark"), asked("diagram"));
-            send(token, Directive::Work { id: p.id.clone(), mark, diagram });
+            send(
+                token,
+                Directive::Work {
+                    id: p.id.clone(),
+                    mark,
+                    diagram,
+                },
+            );
 
             let beats: Vec<String> = p
                 .beats
@@ -1031,7 +1828,11 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
 /// not what anybody is trying to read. The name being looked up, or the point
 /// being flown to.
 fn detail_of(name: &str, args: Option<&Value>) -> String {
-    let str_of = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_str()).unwrap_or("");
+    let str_of = |k: &str| {
+        args.and_then(|a| a.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    };
     let num_of = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_f64());
     match name {
         "locate_place" => str_of("name").to_string(),
@@ -1040,6 +1841,11 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
         // whether it went looking for what they asked about.
         "search_web" => str_of("query").to_string(),
         "show_project" => str_of("name").to_string(),
+        "preview_diagram" => str_of("title").to_string(),
+        "show_diagram" => num_of("draft_id")
+            .filter(|id| id.fract() == 0.0)
+            .map(|id| format!("draft {id:.0}"))
+            .unwrap_or_default(),
         "fetch_page" => str_of("url").to_string(),
         "show_map" if args.and_then(|a| a.get("from")).is_some() => {
             let label = str_of("label");
@@ -1049,7 +1855,10 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
             }
         }
         "show_map" => {
-            if let Some(list) = args.and_then(|a| a.get("places")).and_then(|p| p.as_array()) {
+            if let Some(list) = args
+                .and_then(|a| a.get("places"))
+                .and_then(|p| p.as_array())
+            {
                 let names: Vec<&str> = list
                     .iter()
                     .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
@@ -1102,7 +1911,10 @@ fn send(token: &str, d: Directive) -> bool {
 
 /// An MCP tool result: content blocks, and a flag for the error case.
 fn text(body: &str) -> String {
-    format!(r#"{{"content":[{{"type":"text","text":{}}}]}}"#, json::quote(body))
+    format!(
+        r#"{{"content":[{{"type":"text","text":{}}}]}}"#,
+        json::quote(body)
+    )
 }
 
 fn err(why: &str) -> String {
@@ -1143,7 +1955,10 @@ pub fn handle(token: &str, body: &str) -> Option<String> {
         }
         "tools/list" => tool_list(),
         "tools/call" => {
-            let name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+            let name = params
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
             call(token, name, params.and_then(|p| p.get("arguments")))
         }
         "ping" => "{}".to_string(),
@@ -1153,7 +1968,9 @@ pub fn handle(token: &str, body: &str) -> Option<String> {
             ))
         }
     };
-    Some(format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#))
+    Some(format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"result":{result}}}"#
+    ))
 }
 
 /// Where the tool server is listening, once it is.
@@ -1171,7 +1988,10 @@ pub fn serve() {
     }
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("portfolio: no runtime for the tool server: {e}");
@@ -1195,11 +2015,9 @@ pub fn serve() {
                 axum::routing::post(
                     |axum::extract::Path(token): axum::extract::Path<String>, body: String| async move {
                         match handle(&token, &body) {
-                            Some(out) => (
-                                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                out,
-                            )
-                                .into_response(),
+                            Some(out) => {
+                                ([(axum::http::header::CONTENT_TYPE, "application/json")], out).into_response()
+                            }
                             // A notification is answered with 202 and no body,
                             // which is what Streamable HTTP asks for.
                             None => axum::http::StatusCode::ACCEPTED.into_response(),
@@ -1230,6 +2048,34 @@ pub fn url_for(token: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn trusted_show(token: &str, request: &str) -> Option<String> {
+        let value: serde_json::Value = serde_json::from_str(request).expect("test request");
+        let args = value.pointer("/params/arguments");
+        let points = args
+            .and_then(|args| args.get("places"))
+            .and_then(|places| places.as_array())
+            .filter(|places| !places.is_empty())
+            .map(|places| places.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|| args.into_iter().collect());
+        for point in points {
+            if let (Some(lat), Some(lon)) = (
+                point.get("lat").and_then(|value| value.as_f64()),
+                point.get("lon").and_then(|value| value.as_f64()),
+            ) {
+                trust_location(token, lat, lon);
+            }
+            if let Some(from) = point.get("from") {
+                if let (Some(lat), Some(lon)) = (
+                    from.get("lat").and_then(|value| value.as_f64()),
+                    from.get("lon").and_then(|value| value.as_f64()),
+                ) {
+                    trust_location(token, lat, lon);
+                }
+            }
+        }
+        handle(token, request)
+    }
+
     /// A tool's answer, parsed. The result carries JSON *inside* a JSON string,
     /// so matching escaped substrings against it is a test that fails on its own
     /// escaping rather than on the answer -- which is exactly what happened to
@@ -1247,24 +2093,37 @@ mod tests {
     }
 
     fn result_of(out: &str) -> Value {
-        json::parse(out).expect("not json").get("result").cloned().expect("no result")
+        json::parse(out)
+            .expect("not json")
+            .get("result")
+            .cloned()
+            .expect("no result")
     }
 
     /// A notification gets no answer. Replying to one is a protocol error.
     #[test]
     fn a_notification_is_not_answered() {
-        assert!(handle("t", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).is_none());
+        assert!(handle(
+            "t",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        )
+        .is_none());
         assert!(handle("t", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).is_some());
     }
 
     /// The handshake echoes the version the agent asked for.
     #[test]
     fn initialize_answers_with_tools_and_the_asked_version() {
-        let out =
-            handle("t", r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#)
-                .unwrap();
+        let out = handle(
+            "t",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+        )
+        .unwrap();
         let r = result_of(&out);
-        assert_eq!(r.get("protocolVersion").and_then(|v| v.as_str()), Some("2025-03-26"));
+        assert_eq!(
+            r.get("protocolVersion").and_then(|v| v.as_str()),
+            Some("2025-03-26")
+        );
         assert!(r.get("capabilities").and_then(|c| c.get("tools")).is_some());
     }
 
@@ -1283,6 +2142,8 @@ mod tests {
         assert!(names.contains(&"show_map".to_string()), "{names:?}");
         assert!(names.contains(&"hide_map".to_string()), "{names:?}");
         assert!(names.contains(&"locate_visitor".to_string()), "{names:?}");
+        assert!(names.contains(&"preview_diagram".to_string()), "{names:?}");
+        assert!(names.contains(&"show_diagram".to_string()), "{names:?}");
     }
 
     /// What the log says it serves is what `tools/list` serves.
@@ -1293,7 +2154,9 @@ mod tests {
     /// be worse than no log at all.
     #[test]
     fn the_log_line_lists_exactly_what_the_agent_is_handed() {
-        let _lock = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::visits::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for (exa, jina) in [(false, false), (true, false), (false, true), (true, true)] {
             match exa {
                 true => std::env::set_var("EXA_API_KEY", "k"),
@@ -1312,7 +2175,10 @@ mod tests {
                 .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
                 .collect();
             let said: Vec<String> = on_offer().iter().map(|s| s.to_string()).collect();
-            assert_eq!(said, served, "the log and the server disagree (exa {exa}, jina {jina})");
+            assert_eq!(
+                said, served,
+                "the log and the server disagree (exa {exa}, jina {jina})"
+            );
         }
         std::env::remove_var("EXA_API_KEY");
         std::env::remove_var("JINA_API_KEY");
@@ -1323,7 +2189,9 @@ mod tests {
     /// reported as a search that happened.
     #[test]
     fn the_web_tools_are_offered_only_when_this_box_has_the_keys() {
-        let _lock = crate::visits::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::visits::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let names = || -> Vec<String> {
             let out = handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap();
             result_of(&out)
@@ -1357,7 +2225,10 @@ mod tests {
         std::env::remove_var("JINA_API_KEY");
 
         // Whatever the environment, the list is still JSON an agent can read.
-        assert!(crate::json::parse(&handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap()).is_some());
+        assert!(crate::json::parse(
+            &handle("t", r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#).unwrap()
+        )
+        .is_some());
     }
 
     /// The allowance is per session and it runs out.
@@ -1382,7 +2253,11 @@ mod tests {
         )
         .unwrap();
         let r = result_of(&out);
-        assert_eq!(r.get("isError").and_then(|e| e.as_bool()), Some(true), "{out}");
+        assert_eq!(
+            r.get("isError").and_then(|e| e.as_bool()),
+            Some(true),
+            "{out}"
+        );
         let said = r
             .get("content")
             .and_then(|c| c.as_array())
@@ -1395,7 +2270,10 @@ mod tests {
         // A different session still has its own.
         let (tx2, _rx2) = std::sync::mpsc::channel();
         let other = register(tx2, None);
-        assert!(spend(&other).is_ok(), "one visitor spent another's allowance");
+        assert!(
+            spend(&other).is_ok(),
+            "one visitor spent another's allowance"
+        );
         forget(&board);
         forget(&other);
     }
@@ -1426,7 +2304,8 @@ mod tests {
     /// say whether the agent looked for what was asked about.
     #[test]
     fn a_web_call_says_what_it_went_looking_for() {
-        let args = crate::json::parse(r#"{"query":"acp schema","url":"https://x.test/a"}"#).unwrap();
+        let args =
+            crate::json::parse(r#"{"query":"acp schema","url":"https://x.test/a"}"#).unwrap();
         assert_eq!(detail_of("search_web", Some(&args)), "acp schema");
         assert_eq!(detail_of("fetch_page", Some(&args)), "https://x.test/a");
     }
@@ -1453,8 +2332,14 @@ mod tests {
         let a = answer(&handle(&token, &ask("")).unwrap());
         assert_eq!(a.get("found").and_then(|v| v.as_bool()), Some(true));
         assert_eq!(a.get("id").and_then(|v| v.as_str()), Some("netjail"));
-        assert!(a.get("repo").is_some() && a.get("built_with").is_some(), "{a:?}");
-        let beats = a.get("engineering").and_then(|b| b.as_array()).expect("no beats");
+        assert!(
+            a.get("repo").is_some() && a.get("built_with").is_some(),
+            "{a:?}"
+        );
+        let beats = a
+            .get("engineering")
+            .and_then(|b| b.as_array())
+            .expect("no beats");
         assert!(beats.len() >= 2, "a project with no engineering on it");
         assert!(beats[0].get("heading").and_then(|h| h.as_str()).is_some());
         match rx.try_iter().find_map(|d| match d {
@@ -1489,6 +2374,300 @@ mod tests {
         forget(&token);
     }
 
+    #[test]
+    fn an_agent_can_draw_a_new_explainer_for_this_answer() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preview_diagram","arguments":{
+                "title":"Backpressure across the request path",
+                "elements":[
+                    {"id":"runtime","rect":{"x":0,"y":0,"width":100,"height":100},"kind":"group","title":"Runtime boundary","tone":"muted"},
+                    {"id":"ingress","rect":{"x":3,"y":8,"width":22,"height":22},"kind":"box","title":"Ingress","lines":["decode","admit"],"frame":"double"},
+                    {"id":"load","rect":{"x":30,"y":10,"width":28,"height":12},"kind":"meter","label":"Worker load","value":0.25,"unit":"capacity","tone":"accent"},
+                    {"id":"queue","rect":{"x":64,"y":8,"width":32,"height":13},"kind":"buffer","label":"Bounded queue","cells":["done","active","ready","ready","empty"]},
+                    {"id":"signal","rect":{"x":3,"y":40,"width":28,"height":20},"kind":"plot","label":"Arrival waveform","samples":[0.1,0.8,0.2,0.9,0.35,0.65],"plot":"waveform"},
+                    {"id":"release","rect":{"x":36,"y":40,"width":36,"height":18},"kind":"timeline","label":"Admission window","markers":[{"at":0.2,"label":"open","tone":"pass"},{"at":0.75,"label":"throttle","tone":"warn"}],"cursor":0.1},
+                    {"id":"health","rect":{"x":76,"y":40,"width":21,"height":16},"kind":"status","label":"Gateway","state":"warn","detail":"tail latency rising"},
+                    {"id":"consequence","rect":{"x":18,"y":72,"width":64,"height":14},"kind":"text","text":"The bounded queue turns overload into explicit admission pressure, not unbounded memory growth.","role":"callout","align":"center","tone":"accent"}
+                ],
+                "connectors":[
+                    {"id":"admit","from":"ingress","to":"load","label":"accepted","tone":"accent"},
+                    {"id":"enqueue","from":"load","to":"queue","label":"pressure","style":"bidirectional","tone":"warn"},
+                    {"id":"observe","from":"signal","to":"release","label":"sampled","style":"dashed"}
+                ],
+                "beats":[
+                    {"caption":"Requests enter and load rises","duration":1.5,"actions":[
+                        {"action":"focus","targets":["ingress","admit","load"]},
+                        {"action":"flow","target":"admit"},
+                        {"action":"pulse","target":"ingress"},
+                        {"action":"meter","target":"load","from":0.25,"to":0.9}
+                    ]},
+                    {"caption":"Pressure becomes visible and bounded","duration":2.0,"actions":[
+                        {"action":"flow","target":"enqueue","reverse":true},
+                        {"action":"shift","target":"queue"},
+                        {"action":"scan","target":"signal"},
+                        {"action":"timeline","target":"release","from":0.1,"to":0.85},
+                        {"action":"focus","targets":["queue","signal","release","health","consequence"]}
+                    ]}
+                ]
+            }}}"#;
+        let expected = json::parse(request)
+            .and_then(|request| request.get("params")?.get("arguments").cloned())
+            .and_then(|args| diagram_of(Some(&args)).ok())
+            .expect("rich scene did not parse");
+        let out = handle(&token, request).unwrap();
+        let previewed = answer(&out);
+        assert_eq!(
+            previewed.get("ready").and_then(|v| v.as_bool()),
+            Some(true),
+            "{out}"
+        );
+        let preview = previewed
+            .get("preview")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        for label in ["Ingress", "Worker load", "Bounded queue", "Gateway"] {
+            assert!(
+                preview.contains(label),
+                "preview omitted {label:?}: {preview}"
+            );
+        }
+        assert!(previewed
+            .get("warnings")
+            .and_then(Value::as_array)
+            .is_some());
+        assert!(!rx
+            .try_iter()
+            .any(|directive| matches!(directive, Directive::Diagram(_))));
+
+        let draft_id = previewed
+            .get("draft_id")
+            .and_then(Value::as_f64)
+            .expect("no draft id");
+        let shown = handle(
+            &token,
+            &r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_diagram","arguments":{"draft_id":DRAFT}}}"#
+                .replace("DRAFT", &format!("{draft_id:.0}")),
+        )
+        .unwrap();
+        assert_eq!(
+            answer(&shown).get("shown").and_then(Value::as_bool),
+            Some(true)
+        );
+        let spec = rx.try_iter().find_map(|directive| match directive {
+            Directive::Diagram(spec) => Some(spec),
+            _ => None,
+        });
+        let spec = spec.expect("the page never received the diagram");
+        assert_eq!(spec, expected);
+        assert_eq!(spec.title, "Backpressure across the request path");
+        assert_eq!(spec.elements.len(), 8);
+        assert!(matches!(
+            spec.elements[0].kind,
+            skysheet::diagram::ElementKind::Group { .. }
+        ));
+        assert!(matches!(
+            spec.elements[4].kind,
+            skysheet::diagram::ElementKind::Plot {
+                kind: skysheet::diagram::PlotKind::Waveform,
+                ..
+            }
+        ));
+        assert!(matches!(
+            spec.elements[7].kind,
+            skysheet::diagram::ElementKind::Text {
+                role: skysheet::diagram::TextRole::Callout,
+                ..
+            }
+        ));
+        assert!(matches!(
+            spec.beats[0].actions[1],
+            skysheet::diagram::Action::Flow { reverse: false, .. }
+        ));
+        assert!(matches!(
+            spec.beats[0].actions[3],
+            skysheet::diagram::Action::Meter { .. }
+        ));
+        assert!(matches!(
+            spec.beats[1].actions[1],
+            skysheet::diagram::Action::Shift { .. }
+        ));
+        assert!(matches!(
+            spec.beats[1].actions[2],
+            skysheet::diagram::Action::Scan { .. }
+        ));
+        assert!(matches!(
+            spec.beats[1].actions[3],
+            skysheet::diagram::Action::Timeline { .. }
+        ));
+        assert_eq!(skysheet::diagram::validate(&spec), Ok(()));
+        forget(&token);
+    }
+
+    #[test]
+    fn an_invalid_explainer_never_reaches_the_page() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        for (actions, expected) in [
+            (r#"[{"action":"scan","target":"load"}]"#, "incompatible"),
+            (
+                r#"[{"action":"pulse","target":"missing"}]"#,
+                "unknown target",
+            ),
+        ] {
+            let request = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"preview_diagram","arguments":{{
+                "title":"Broken","elements":[
+                    {{"id":"load","rect":{{"x":5,"y":5,"width":40,"height":20}},"kind":"meter","label":"Load","value":0.5}},
+                    {{"id":"note","rect":{{"x":50,"y":5,"width":40,"height":20}},"kind":"text","text":"Not a plot"}}
+                ],
+                "beats":[{{"caption":"Invalid target","duration":1,"actions":{actions}}}]
+            }}}}}}"#
+            );
+            let out = handle(&token, &request).unwrap();
+            assert_eq!(
+                result_of(&out).get("isError").and_then(Value::as_bool),
+                Some(true),
+                "{out}"
+            );
+            assert!(out.contains(expected), "missing {expected:?}: {out}");
+        }
+        assert!(!rx
+            .try_iter()
+            .any(|directive| matches!(directive, Directive::Diagram(_))));
+        assert!(boards()
+            .lock()
+            .unwrap()
+            .get(&token)
+            .unwrap()
+            .draft
+            .is_none());
+        forget(&token);
+    }
+
+    #[test]
+    fn a_preview_reports_layout_risks_without_refusing_the_draft() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let out = handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preview_diagram","arguments":{"elements":[
+                {"id":"first","rect":{"x":2,"y":2,"width":5,"height":5},"kind":"box","title":"First"},
+                {"id":"second","rect":{"x":4,"y":4,"width":5,"height":5},"kind":"box","title":"Second"}
+            ]}}}"#,
+        )
+        .unwrap();
+        let previewed = answer(&out);
+        assert_eq!(previewed.get("ready").and_then(Value::as_bool), Some(true));
+        let warnings = previewed
+            .get("warnings")
+            .and_then(Value::as_array)
+            .expect("preview returned no warnings");
+        let warnings: Vec<_> = warnings.iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            warnings,
+            [
+                "element rectangles overlap: `first` and `second`",
+                "`first` box maps to 5x2 cells; likely too small",
+                "`second` box maps to 5x1 cells; likely too small",
+                "sparse composition: non-group elements cover 0% of the logical canvas",
+            ]
+        );
+        forget(&token);
+    }
+
+    #[test]
+    fn diagram_drafts_are_isolated_replaceable_and_publish_only_when_current() {
+        fn preview(token: &str, title: &str, id: &str) -> Value {
+            let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preview_diagram","arguments":{"title":"TITLE","elements":[{"id":"ELEMENT","rect":{"x":10,"y":10,"width":70,"height":50},"kind":"box","title":"TITLE"}]}}}"#
+                .replace("TITLE", title)
+                .replace("ELEMENT", id);
+            answer(&handle(token, &request).unwrap())
+        }
+
+        fn show(token: &str, draft_id: f64) -> String {
+            handle(
+                token,
+                &r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"show_diagram","arguments":{"draft_id":DRAFT}}}"#
+                    .replace("DRAFT", &format!("{draft_id:.0}")),
+            )
+            .unwrap()
+        }
+
+        let (tx_a, rx_a) = std::sync::mpsc::channel();
+        let (tx_b, rx_b) = std::sync::mpsc::channel();
+        let board_a = register(tx_a, None);
+        let board_b = register(tx_b, None);
+        let first = preview(&board_a, "First", "first");
+        let other = preview(&board_b, "Other", "other");
+        let first_id = first.get("draft_id").and_then(Value::as_f64).unwrap();
+        let other_id = other.get("draft_id").and_then(Value::as_f64).unwrap();
+        assert_ne!(
+            first_id, other_id,
+            "board draft ids must identify their owner"
+        );
+
+        let crossed = show(&board_b, first_id);
+        assert_eq!(
+            result_of(&crossed).get("isError").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!rx_b.try_iter().any(|d| matches!(d, Directive::Diagram(_))));
+
+        let second = preview(&board_a, "Second", "second");
+        let second_id = second.get("draft_id").and_then(Value::as_f64).unwrap();
+        assert!(second_id > first_id);
+        let stale = show(&board_a, first_id);
+        assert_eq!(
+            result_of(&stale).get("isError").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let broken = handle(
+            &board_a,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"preview_diagram","arguments":{"elements":[{"id":"load","rect":{"x":10,"y":10,"width":70,"height":50},"kind":"meter","label":"Load","value":0.5}],"beats":[{"caption":"bad","duration":1,"actions":[{"action":"scan","target":"load"}]}]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            result_of(&broken).get("isError").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        for arguments in [
+            "{}".to_string(),
+            r#"{"draft_id":1.5}"#.to_string(),
+            format!(r#"{{"draft_id":"{second_id:.0}"}}"#),
+            format!(r#"{{"draft_id":{second_id:.0},"extra":true}}"#),
+        ] {
+            let out = handle(
+                &board_a,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"show_diagram","arguments":{arguments}}}}}"#
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                result_of(&out).get("isError").and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+        assert!(!rx_a.try_iter().any(|d| matches!(d, Directive::Diagram(_))));
+
+        let shown = show(&board_a, second_id);
+        assert_eq!(
+            answer(&shown).get("shown").and_then(Value::as_bool),
+            Some(true)
+        );
+        let published = rx_a.try_iter().find_map(|directive| match directive {
+            Directive::Diagram(spec) => Some(spec),
+            _ => None,
+        });
+        assert_eq!(published.map(|spec| spec.title), Some("Second".to_string()));
+
+        forget(&board_a);
+        forget(&board_b);
+    }
+
     /// A name that is not a project lists the ones that are, so the model spends
     /// one call rather than answering from memory about a repository it has
     /// never read.
@@ -1509,7 +2688,10 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert!(known.contains(&"netjail") && known.contains(&"termap"), "{known:?}");
+        assert!(
+            known.contains(&"netjail") && known.contains(&"termap"),
+            "{known:?}"
+        );
     }
 
     /// Asked the way a model actually asks: with a space, with the display name,
@@ -1547,8 +2729,15 @@ mod tests {
             ),
         )
         .unwrap();
-        let note = answer(&out).get("note").and_then(|n| n.as_str()).unwrap_or("").to_string();
-        assert!(note.contains("written from a summary"), "a draft did not admit it: {note:?}");
+        let note = answer(&out)
+            .get("note")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            note.contains("written from a summary"),
+            "a draft did not admit it: {note:?}"
+        );
     }
 
     /// An unknown scene name is ignored rather than refused: the facts are the
@@ -1586,7 +2775,7 @@ mod tests {
     fn show_map_draws_on_the_session_that_asked_for_it() {
         let (tx, rx) = std::sync::mpsc::channel();
         let token = register(tx, None);
-        let out = handle(
+        let out = trusted_show(
             &token,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":23.03,"lon":72.51,"zoom":12.5,"label":"Ahmedabad"}}}"#,
@@ -1618,7 +2807,10 @@ mod tests {
                "arguments":{"lat":1.0,"lon":1.0}}}"#,
         )
         .unwrap();
-        assert!(out.contains("isError"), "an unknown token was served: {out}");
+        assert!(
+            out.contains("isError"),
+            "an unknown token was served: {out}"
+        );
         assert!(rx.try_recv().is_err(), "it drew on somebody else's screen");
         let _ = &rx;
 
@@ -1629,7 +2821,10 @@ mod tests {
                "arguments":{"lat":1.0,"lon":1.0}}}"#,
         )
         .unwrap();
-        assert!(out.contains("isError"), "a forgotten session still accepts calls");
+        assert!(
+            out.contains("isError"),
+            "a forgotten session still accepts calls"
+        );
     }
 
     /// The payload a real model actually sent, which this used to refuse.
@@ -1643,7 +2838,7 @@ mod tests {
     fn the_payload_a_model_really_sent_is_drawn_rather_than_refused() {
         let (tx, rx) = std::sync::mpsc::channel();
         let token = register(tx, None);
-        let out = handle(
+        let out = trusted_show(
             &token,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":26.91546,"lon":75.81898,"zoom":11,"label":"Jaipur, Rajasthan",
@@ -1652,7 +2847,10 @@ mod tests {
                  "places":[]}}}"#,
         )
         .unwrap();
-        assert!(!out.contains("isError"), "the point beside an empty list was refused: {out}");
+        assert!(
+            !out.contains("isError"),
+            "the point beside an empty list was refused: {out}"
+        );
         let map = rx.try_iter().find_map(|d| match d {
             Directive::Map { stops } => Some(stops),
             _ => None,
@@ -1675,7 +2873,7 @@ mod tests {
     fn a_from_somewhere_else_is_still_a_journey() {
         let (tx, rx) = std::sync::mpsc::channel();
         let token = register(tx, None);
-        handle(
+        trusted_show(
             &token,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":23.02,"lon":73.07,"zoom":12,"label":"Kapadwanj",
@@ -1701,7 +2899,7 @@ mod tests {
     fn a_list_with_places_in_it_is_the_route() {
         let (tx, rx) = std::sync::mpsc::channel();
         let token = register(tx, None);
-        handle(
+        trusted_show(
             &token,
             r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_map",
                "arguments":{"lat":0.0,"lon":0.0,
@@ -1748,6 +2946,19 @@ mod tests {
         forget(&token);
     }
 
+    #[test]
+    fn a_valid_coordinate_the_tools_never_returned_is_refused() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let out = handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"show_map","arguments":{"lat":23.03,"lon":72.51}}}"#,
+        )
+        .unwrap();
+        assert!(out.contains("isError"), "model-authored coordinates were trusted: {out}");
+        forget(&token);
+    }
+
     /// The visitor lookup reads the slot, not a copy of it -- the geolocation
     /// finishes after the session starts, and a tool called later must see it.
     #[test]
@@ -1769,7 +2980,10 @@ mod tests {
             lon: 73.07,
         });
         let out = handle(&token, ask).unwrap();
-        assert!(out.contains("Kapadwanj"), "the late answer never arrived: {out}");
+        assert!(
+            out.contains("Kapadwanj"),
+            "the late answer never arrived: {out}"
+        );
         assert!(out.contains("23.02"), "{out}");
         forget(&token);
     }
@@ -1805,7 +3019,10 @@ mod tests {
         assert_eq!(p.zoom, 14.0);
 
         // Nothing found is an empty array, not an error and not a null.
-        assert!(parse_nominatim("[]").is_none(), "an empty result invented a place");
+        assert!(
+            parse_nominatim("[]").is_none(),
+            "an empty result invented a place"
+        );
         assert!(parse_nominatim("not json at all").is_none());
         // And a point off the globe is refused rather than drawn.
         assert!(parse_nominatim(r#"[{"lat":"91.0","lon":"0.0"}]"#).is_none());
@@ -1814,10 +3031,16 @@ mod tests {
     /// The query is escaped, because place names have spaces and commas in them.
     #[test]
     fn a_place_name_survives_being_put_in_a_url() {
-        assert_eq!(urlencode("Gateway of India, Mumbai"), "Gateway+of+India%2C+Mumbai");
+        assert_eq!(
+            urlencode("Gateway of India, Mumbai"),
+            "Gateway+of+India%2C+Mumbai"
+        );
         assert_eq!(urlencode("Ward's Lake"), "Ward%27s+Lake");
         // Not ASCII, and not a reason to send a malformed request.
-        assert_eq!(urlencode("गेटवे"), "%E0%A4%97%E0%A5%87%E0%A4%9F%E0%A4%B5%E0%A5%87");
+        assert_eq!(
+            urlencode("गेटवे"),
+            "%E0%A4%97%E0%A5%87%E0%A4%9F%E0%A4%B5%E0%A5%87"
+        );
     }
 
     /// The user agent identifies the deployment, which their policy requires.
@@ -1825,18 +3048,30 @@ mod tests {
     fn the_geocoder_says_who_it_is() {
         let ua = agent_line();
         assert!(ua.contains("terminal-portfolio"), "{ua}");
-        assert!(ua.contains('@') || ua.contains("http"), "no way to reach anybody: {ua}");
+        assert!(
+            ua.contains('@') || ua.contains("http"),
+            "no way to reach anybody: {ua}"
+        );
     }
 
     /// A name the index does not have is a miss, not the nearest thing.
     #[test]
     fn a_place_that_is_not_there_is_not_invented() {
+        // The last tier asks OpenStreetMap, and some networks answer it --
+        // there is a real Lannisport Drive in Caldwell, Idaho. What is under
+        // test is that the local tiers invent nothing, so the internet tier
+        // is switched off here rather than relied upon to be unreachable.
+        let _lock = crate::visits::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PORTFOLIO_NO_GEOCODE", "1");
         let out = handle(
             "t",
             r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"locate_place",
                "arguments":{"name":"Lannisport"}}}"#,
         )
         .unwrap();
+        std::env::remove_var("PORTFOLIO_NO_GEOCODE");
         assert!(out.contains("\\\"found\\\":false"), "{out}");
     }
 }

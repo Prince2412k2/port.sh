@@ -2,8 +2,8 @@
 //!
 //! The rest of this project hand-rolls its formats because they are small and a
 //! dependency would cost more than it saves. This one is different: JSON is not
-//! small, and I would rather have had `serde_json`. It is not in the offline
-//! registry, so here is a parser for the subset the Agent Client Protocol
+//! small. The direct `serde_json` dependency now used for persisted chat
+//! snapshots came later; this remains the parser for the Agent Client Protocol
 //! actually sends — objects, arrays, strings with escapes, numbers, the three
 //! literals — with the awkward parts (surrogate pairs, exponents) handled
 //! rather than assumed away, because those are where a hand-rolled parser
