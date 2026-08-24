@@ -264,13 +264,19 @@ fn parse_resize(s: &str) -> Option<(u16, u16)> {
 /// xterm.js comes from a CDN rather than being vendored, which is the one
 /// outside dependency on this page -- swap it for a local copy if that matters.
 ///
-/// The CRT switch in the corner is a real post-processing pass, not a stack of
-/// CSS overlays: the terminal is rendered to a canvas, that canvas is uploaded
-/// as a texture, and a fragment shader draws it back with tube curvature,
-/// scanlines, a shadow mask, phosphor bloom and a little convergence error.
-/// Doing it in a shader is what buys the curvature -- bending the image means
-/// sampling it somewhere other than where the pixel is, and CSS cannot express
-/// that.
+/// The CRT switch in the corner is a real post-processing chain, not a stack
+/// of CSS overlays: the terminal is rendered to a canvas, that canvas is
+/// uploaded as a texture, and four programs turn it into a photograph of a
+/// display -- a composite signal, a phosphor with a memory, a bloom, and then
+/// the glass, the beam and the mask. The switch beside it says which display,
+/// and there are seven of them: two colour tubes, a television, amber and
+/// green monochrome, the same television fed off a tape, and an early panel.
+///
+/// Doing it in shaders is what buys the parts that are not overlays at all.
+/// Bending the image means sampling it somewhere other than where the pixel
+/// is; a scanline that gets fatter as it gets brighter means asking four rows
+/// what they contribute here; a phosphor that lets go slowly means keeping the
+/// last frame. CSS cannot express any of those.
 ///
 /// It is also the one feature on this page that costs nothing on the wire. The
 /// server sends the same bytes either way; the whole effect is the visitor's
@@ -339,6 +345,11 @@ const INDEX: &str = r##"<!doctype html>
   #chrome button:hover { color: #60666f; border-color: #33373f; }
   #chrome button[aria-pressed="true"] { color: #ffb040; border-color: #6b4d1c; }
   #chrome button[disabled] { opacity: .35; cursor: default; }
+  /* Which screen, rather than whether. It carries no pressed state because it
+     is not a switch -- it is a dial with seven positions, and it is only there
+     at all while there is a tube to point it at. */
+  #chrome #screen { color: #4d5560; letter-spacing: .1em; }
+  #chrome #screen:hover { color: #7d8d8f; }
   @media (prefers-reduced-motion: reduce) {
     #hint, #chrome button { transition: none; }
   }
@@ -348,6 +359,7 @@ const INDEX: &str = r##"<!doctype html>
 <div id="term"></div>
 <canvas id="glass"></canvas>
 <div id="chrome">
+  <button id="screen" type="button" title="which screen" hidden>p22</button>
   <button id="crt" type="button" aria-pressed="false" title="old tube">crt</button>
   <button id="full" type="button" aria-pressed="false" title="full screen (ctrl-f)">full</button>
 </div>
@@ -564,16 +576,31 @@ for (const ev of ['paste', 'drop', 'dragover']) {
 // ---------------------------------------------------------------------------
 // The tube.
 //
-// One full-screen quad, one texture, one fragment shader. The texture is
-// whatever xterm's canvas renderer last drew; the shader is where it becomes a
-// picture of a monitor rather than a monitor.
+// A chain of passes rather than one shader. The terminal's canvas goes in at
+// the top; what comes out the bottom is a photograph of a display, and which
+// display is a setting. The chain is:
 //
-// It repaints when the terminal repaints and at no other time. A CRT wants a
-// flicker and it is deliberately not here: driving one means running the GPU
-// sixty times a second for as long as the tab is open, and an idle screen that
-// warms somebody's laptop is the same mistake as an idle screen that streams
-// 100 KB/s. Curvature, scanlines, mask and bloom are all static, and they are
-// most of the look anyway.
+//   signal    the picture as a broadcast carried it, for the screens that were
+//             fed by one -- chroma smeared sideways, luma sharp, the two
+//             leaking into each other. Skipped by anything with a cable.
+//   phosphor  half resolution, and the only pass that remembers: a decaying
+//             copy of every frame so far. Green and amber tubes are mostly
+//             this, and it is what makes text drag when you scroll.
+//   glow      quarter resolution, thresholded, blurred on each axis. Sampled
+//             twice at the end -- once tight for bloom, once spread wide for
+//             halation, the light that scatters inside the faceplate rather
+//             than in the phosphor.
+//   tube      the glass, the beam, the mask, the rim and the room it is in.
+//
+// Everything except the last pass is optional and every screen turns off what
+// it does not need, so an aperture-grille tube costs three passes and a VHS
+// deck costs five.
+//
+// It repaints when the terminal repaints, plus for as long as it has something
+// left to say: a phosphor still fading, a tube still warming up, a tape still
+// moving. Then it stops. An idle screen that warms somebody's laptop is the
+// same mistake as an idle screen that streams 100 KB/s, and the screens that
+// never settle are ones a visitor has to go and choose.
 
 const VERT = `
 attribute vec2 pos;
@@ -584,23 +611,189 @@ void main() {
 }
 `;
 
-const FRAG = `
+// Phosphor persistence. The only pass with a memory, so the only one that has
+// to be ping-ponged between two targets.
+//
+// `max` rather than a blend: a phosphor that is already lit does not average
+// with the beam that hits it again, it simply stays lit. Blending made every
+// static frame drift dimmer than the one before it.
+const FRAG_PERSIST = `
+precision highp float;
+uniform sampler2D frame;
+uniform sampler2D prev;
+uniform vec3 decay;
+varying vec2 uv;
+void main() {
+  vec3 now = texture2D(frame, uv).rgb;
+  // A fixed floor as well as a fraction. Eight bits per channel and a purely
+  // multiplicative decay leaves the last bit lit forever, which is a screen
+  // that never finishes fading and therefore never stops asking for frames.
+  vec3 old = max(texture2D(prev, uv).rgb * decay - 0.008, vec3(0.0));
+  gl_FragColor = vec4(max(now, old), 1.0);
+}
+`;
+
+// One axis of a gaussian, five taps riding the hardware's linear filtering to
+// cover nine. Run twice with `dir` turned, it is a separable blur.
+//
+// The threshold is here rather than in a pass of its own: the first of the two
+// runs is the only one that sees the original image, and cutting the darks
+// there costs nothing.
+const FRAG_BLUR = `
+precision highp float;
+uniform sampler2D frame;
+uniform vec2 dir;
+uniform float cut;
+varying vec2 uv;
+vec3 lit(vec2 p) {
+  vec3 c = texture2D(frame, p).rgb;
+  c = max(c - cut, vec3(0.0)) / max(1.0 - cut, 0.001);
+  return c * c;
+}
+void main() {
+  vec3 sum = lit(uv) * 0.2270270270;
+  sum += (lit(uv + dir * 1.3846153846) + lit(uv - dir * 1.3846153846)) * 0.3162162162;
+  sum += (lit(uv + dir * 3.2307692308) + lit(uv - dir * 3.2307692308)) * 0.0702702703;
+  // Written back with a gamma curve on it. The target is eight bits and the
+  // interesting part of a glow is all in the bottom of the range.
+  gl_FragColor = vec4(sqrt(sum), 1.0);
+}
+`;
+
+// What a composite cable did to a picture.
+//
+// Colour and brightness went down one wire, separated at the far end by a
+// filter that could not quite do it: the chroma comes back smeared sideways
+// because it was carried at a fraction of the luma's bandwidth, and some of it
+// never makes it out of the luma at all, which is the crawling chequerboard
+// along every vertical edge.
+//
+// The rest is the tape rather than the signal. Each line is written by a head
+// on a drum that is not perfectly in step with the last one, so lines start a
+// little to the left or right of where they should; and the drum's two heads
+// hand over a few lines from the bottom of the frame, which is the tear that
+// lives down there on every VHS ever played.
+const FRAG_NTSC = `
+precision highp float;
+uniform sampler2D frame;
+uniform vec2 res;
+uniform vec2 px;
+uniform float dpr;
+uniform float time;
+varying vec2 uv;
+
+const float PI = 3.14159265359;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec3 toYIQ(vec3 c) {
+  return vec3(
+    dot(c, vec3(0.299, 0.587, 0.114)),
+    dot(c, vec3(0.596, -0.274, -0.322)),
+    dot(c, vec3(0.211, -0.523, 0.312)));
+}
+
+vec3 toRGB(vec3 c) {
+  return vec3(
+    c.x + 0.956 * c.y + 0.621 * c.z,
+    c.x - 0.272 * c.y - 0.647 * c.z,
+    c.x - 1.106 * c.y + 1.703 * c.z);
+}
+
+void main() {
+  float line = floor(uv.y * res.y / dpr);
+
+  // Where this line starts. Slow drift for the tape, a per-line jump for the
+  // heads, and a hard shove through the switching band at the bottom.
+  float drift = (hash(vec2(line * 0.031, floor(time * 3.0))) - 0.5) * WOBBLE;
+  drift += sin(uv.y * 9.0 + time * 1.7) * WOBBLE * 0.35;
+  float sw = smoothstep(0.055, 0.0, uv.y);
+  drift += sw * (hash(vec2(line, floor(time * 24.0))) - 0.5) * 0.09;
+
+  vec2 p = vec2(uv.x + drift, uv.y);
+
+  vec3 here = toYIQ(texture2D(frame, p).rgb);
+  float y = here.x;
+
+  // Chroma, dragged to the right of where it belongs because it arrives late.
+  vec2 iq = vec2(0.0);
+  float wsum = 0.0;
+  for (int k = 0; k < 8; k++) {
+    float o = float(k) * CHROMA_LAG * px.x;
+    float w = 1.0 - float(k) / 9.0;
+    iq += toYIQ(texture2D(frame, p - vec2(o, 0.0)).rgb).yz * w;
+    wsum += w;
+  }
+  iq /= wsum;
+
+  // The chroma that never left the luma. Its phase advances a quarter cycle
+  // per pixel and half a cycle per line, which is what makes the pattern climb
+  // the screen instead of sitting still.
+  float phase = (p.x * res.x * 0.5 + p.y * res.y + time * 12.0) * PI;
+  y += sin(phase) * length(iq) * DOT_CRAWL;
+
+  // Tape grain, and a band of it that walks slowly down the picture.
+  float band = exp(-pow((fract(uv.y + time * 0.037) - 0.5) * 7.0, 2.0));
+  float grain = hash(vec2(uv.x * res.x, line + floor(time * 30.0))) - 0.5;
+  y += grain * (TAPE_GRAIN + band * 0.10);
+  iq *= 1.0 - band * 0.45;
+
+  // Through the switching band the signal is barely there at all.
+  y = mix(y, y * 0.55 + hash(vec2(uv.x * 90.0, floor(time * 24.0))) * 0.35, sw * 0.85);
+
+  gl_FragColor = vec4(clamp(toRGB(vec3(y, iq)), 0.0, 1.0), 1.0);
+}
+`;
+
+// The display itself.
+//
+// One shader, compiled once per screen with a block of `#define`s in front of
+// it. The screens are not variations on a theme -- a shadow mask and an LCD
+// grid have nothing in common but the quad they are drawn on -- so the parts
+// that differ are compiled out rather than branched over, and the parts that
+// are shared are shared honestly.
+const FRAG_TUBE = `
 precision highp float;
 
 uniform sampler2D frame;
+uniform sampler2D glow;
+uniform sampler2D haze;
+uniform sampler2D ghost;
 uniform vec2 res;
+uniform vec2 px;
+uniform float dpr;
+uniform float time;
+uniform float warm;
 
 varying vec2 uv;
 
-const float PI = 3.14159265;
+const float PI = 3.14159265359;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Light adds; sRGB does not. Everything between here and the end of main is in
+// linear light, because a scanline that halves the signal should halve the
+// light and not the number that encodes it. Gamma 2.0 rather than 2.2: it is
+// one multiply against three pows, the error is under a percent of a stop, and
+// this shader samples the frame a dozen times.
+vec3 lin(vec3 c) { return c * c; }
+vec3 gam(vec3 c) { return sqrt(max(c, vec3(0.0))); }
 
 // The glass. Pulls the corners out further than the edges, which is what makes
 // a rectangle of text read as a curved surface rather than a scaled one.
 vec2 bend(vec2 p) {
+#if CURVE
   p = p * 2.0 - 1.0;
-  vec2 k = abs(p.yx) / vec2(7.0, 5.0);
+  vec2 k = abs(p.yx) / vec2(CURVE_X, CURVE_Y);
   p += p * k * k;
   return p * 0.5 + 0.5;
+#else
+  return p;
+#endif
 }
 
 // Three guns that never quite converge, and converge worse toward the rim.
@@ -608,85 +801,442 @@ vec2 bend(vec2 p) {
 // The coefficient is small because the text is small. At 0.008 the corners
 // split by five or six device pixels, which is *most of a glyph* at a 14px
 // font: the section rail and the footer stopped being readable, and a monitor
-// effect that eats the navigation is a broken monitor. This is about half of
-// what looks right on a still and exactly as much as the corners will carry.
-vec3 guns(vec2 p) {
-  vec2 off = (p - 0.5) * length(p - 0.5) * 0.0038;
-  return vec3(
-    texture2D(frame, p + off).r,
+// effect that eats the navigation is a broken monitor.
+vec3 tap(vec2 p) {
+  vec2 d = p - 0.5;
+  vec2 o = d * dot(d, d) * CONVERGE;
+  return lin(vec3(
+    texture2D(frame, p + o).r,
     texture2D(frame, p).g,
-    texture2D(frame, p - off).b
-  );
+    texture2D(frame, p - o).b));
+}
+
+// The beam, as a line of light with a width rather than a row of pixels.
+//
+// Four scanlines are asked what they contribute here, each weighted by a
+// gaussian on its distance. The width of that gaussian rises with the
+// brightness of the line, which is the whole trick: a dark line stays a thin
+// bright wire with black either side, and a white one swells until it closes
+// the gap to its neighbours. That single relationship is most of why a CRT
+// looks like a CRT and a scanline overlay does not.
+vec3 beam(vec2 p) {
+#if SCAN
+  float lines = res.y / (SCAN_PITCH * dpr);
+  float s = p.y * lines - 0.5;
+  float base = floor(s);
+  vec3 sum = vec3(0.0);
+  for (int i = -1; i <= 2; i++) {
+    float ln = base + float(i);
+    vec3 c = tap(vec2(p.x, (ln + 0.5) / lines));
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float sig = mix(SIG_MIN, SIG_MAX, sqrt(clamp(lum, 0.0, 1.0)));
+    float d = s - ln;
+    sum += c * exp(-(d * d) / (2.0 * sig * sig));
+  }
+  // Normalised on a fixed width, not on the one that was used. Dividing by the
+  // actual width would cancel exactly the brightness-to-thickness link the
+  // loop above exists to create.
+  return sum * (1.0 / (SIG_MID * 2.5066283));
+#else
+  return tap(p);
+#endif
+}
+
+// What the screen is made of, at the pitch it is made at.
+//
+// Every one of these is a period in device pixels, so the mask is a property
+// of the visitor's display rather than of the picture: it stays the same size
+// whether the window is a phone or a wall, exactly as the real thing does.
+vec3 mask(vec2 frag) {
+#if MASK == 0
+  return vec3(1.0);
+#else
+  float pitch = MASK_PITCH * dpr;
+  float x = frag.x;
+  float y = frag.y;
+
+#if MASK == 2
+  // A shadow mask is drilled holes, and the rows of holes are staggered so the
+  // triads pack hexagonally rather than in columns.
+  float rowh = pitch * 0.8660254;
+  x += mod(floor(y / rowh), 2.0) * pitch * 0.5;
+#endif
+#if MASK == 3
+  // A slot mask is the compromise between the two: grille stripes, chopped
+  // into slots and offset row to row.
+  float rowh = pitch * 1.6;
+  x += mod(floor(y / rowh), 2.0) * pitch * 0.5;
+#endif
+
+  float s = fract(x / pitch) * 3.0;
+  vec3 d = abs(vec3(s) - vec3(0.5, 1.5, 2.5));
+  d = min(d, 3.0 - d);
+  vec3 m = exp(-d * d * MASK_SHARP);
+  // Renormalised so a mask changes the colour of a pixel and not the
+  // brightness of the picture. Without this every mask is also a dimmer, and
+  // the compensation gets made somewhere else where it does not belong.
+  m *= 3.0 / max(m.r + m.g + m.b, 0.001);
+
+#if MASK == 2
+  float dy = abs(fract(y / rowh) - 0.5) * 2.0;
+  m *= 1.0 - 0.5 * dy * dy;
+#endif
+#if MASK == 3
+  float slot = fract(y / rowh);
+  m *= 0.45 + 0.55 * smoothstep(0.0, 0.14, slot) * smoothstep(1.0, 0.86, slot);
+#endif
+#if MASK == 4
+  // A panel is a grid, not a weave: hard edges, a black gap between every
+  // subpixel and a wider one between every row of them.
+  vec3 hard = step(abs(vec3(s) - vec3(0.5, 1.5, 2.5)), vec3(0.42));
+  m = mix(m, hard * 2.6, 0.75);
+  float gy = fract(y / pitch);
+  m *= smoothstep(0.0, 0.12, gy) * smoothstep(1.0, 0.9, gy);
+#endif
+
+  return mix(vec3(1.0), m, MASK_DEPTH);
+#endif
 }
 
 void main() {
-  vec2 p = bend(uv);
+  // Two coordinates, because two different things are being shaped. The glass
+  // is a fixed object and its rim never moves; the picture is the beam's
+  // deflection, and switching the set on and off is that deflection collapsing
+  // to a line and then to a point.
+  vec2 b = bend(uv);
 
-  // Past the edge of the glass is the inside of the bezel, not more terminal.
-  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0) {
-    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-    return;
-  }
+  // Width first, then height. A tube going out collapses to a line across the
+  // middle and then to a point in the centre of it, so a tube coming on does
+  // that backwards -- and getting the two the wrong way round reads as a
+  // window opening rather than a picture arriving.
+  float openX = smoothstep(0.00, 0.42, warm);
+  float openY = smoothstep(0.30, 1.00, warm);
+  vec2 p = (b - 0.5) / vec2(max(openX, 0.0012), max(openY, 0.0012)) + 0.5;
 
-  vec3 c = guns(p);
+  // The rim, as a rounded rectangle with a soft edge rather than a reject.
+  // Derivatives are an extension in this version of GL and one device pixel is
+  // known here anyway.
+  vec2 dd = abs(b * 2.0 - 1.0) - (1.0 - ROUND);
+  float sd = length(max(dd, vec2(0.0))) + min(max(dd.x, dd.y), 0.0) - ROUND;
+  float aa = 2.5 * max(px.x, px.y);
+  float glassy = 1.0 - smoothstep(-aa, aa, sd);
 
-  // Phosphor bloom. Added rather than mixed: a bright cell on a tube spills
-  // light onto its neighbours, it does not blur into them.
-  vec2 px = 1.5 / res;
-  vec3 spill = guns(p + vec2(px.x, 0.0)) + guns(p - vec2(px.x, 0.0))
-             + guns(p + vec2(0.0, px.y)) + guns(p - vec2(0.0, px.y));
-  c += spill * 0.085;
+  // Past the edge of the picture is the unlit part of the phosphor, which is
+  // not the same colour as the bezel and not black either.
+  vec2 g2 = step(vec2(0.0), p) * step(p, vec2(1.0));
+  float painted = g2.x * g2.y;
 
-  // Scanlines, one dark band per pair of device rows.
-  c *= 0.86 + 0.14 * sin(p.y * res.y * PI);
+  vec3 c = beam(p) * painted;
 
-  // The shadow mask: each device column leans toward one gun. Subtle on
-  // purpose -- at three columns per triad this is a texture you notice at the
-  // size of a letter, not a stripe you read as a defect.
-  float m = mod(gl_FragCoord.x, 3.0);
-  vec3 mask = vec3(0.93);
-  if (m < 1.0) mask.r = 1.11;
-  else if (m < 2.0) mask.g = 1.11;
-  else mask.b = 1.11;
-  c *= mask;
+#if GHOSTING
+  // Only the part of the memory that is brighter than what is on screen now.
+  // The rest of it is the picture, and adding the picture to itself is just a
+  // gain control with extra steps.
+  vec3 old = lin(texture2D(ghost, p).rgb) * painted;
+  c += max(old - c, vec3(0.0)) * GHOST_GAIN;
+#endif
+
+#if BLOOM
+  // Halation is not bloom. Bloom is the phosphor spilling into its neighbours;
+  // halation is light that made it into the faceplate, bounced off the front
+  // of the glass and came back out somewhere else entirely -- so it is wide,
+  // weak, and warmer than what caused it, because the glass passes red best.
+  // Two blurs rather than one sampled at an offset: four taps around a thin
+  // bright line is four copies of that line, which is not what scattering
+  // looks like from any distance at all.
+  c += lin(texture2D(glow, p).rgb) * BLOOM_GAIN;
+  c += lin(texture2D(haze, p).rgb) * vec3(HALO_R, HALO_G, HALO_B);
+#endif
+
+  // The phosphor, after everything that is made of phosphor light and before
+  // anything that is not. A single-gun tube has no way to be told what colour
+  // to be, and that has to be as true of its afterglow and its halation as it
+  // is of the beam -- monochroming only the beam left a green screen glowing
+  // in the colours of the thing it was supposed to have forgotten.
+#if MONO
+  c = vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))) * vec3(TINT_R, TINT_G, TINT_B);
+#else
+  c *= vec3(TINT_R, TINT_G, TINT_B);
+#endif
+
+  c *= mask(gl_FragCoord.xy);
+
+#if FLICKER
+  // The picture and the mains are never quite the same frequency, so their
+  // difference walks up the screen as a broad band about a stop down.
+  float hum = sin((b.y * 1.7 - time * 0.31) * PI * 2.0);
+  c *= 1.0 + hum * FLICKER_AMT;
+#endif
 
   // Falls off toward the corners, the way the gun does.
   //
-  // Weighted low for the same reason the convergence error is: the four
-  // corners of this app are the name, the section rail, the key hints and the
-  // work index -- every piece of navigation it has. Measured off a real frame,
-  // 0.6 here left the rail with 57% of its contrast and the corner hints with
-  // 44%, which is a mood bought with the interface. At this weight they keep
-  // 68% and 55%, and the falloff is still plainly there.
-  vec2 v = p * (1.0 - p.yx);
-  c *= mix(1.0, clamp(pow(v.x * v.y * 24.0, 0.22), 0.0, 1.0), 0.34);
+  // Weighted low on purpose: the four corners of this app are the name, the
+  // section rail, the key hints and the work index -- every piece of
+  // navigation it has. Measured off a real frame, 0.6 here left the rail with
+  // 57% of its contrast and the corner hints with 44%, which is a mood bought
+  // with the interface.
+  vec2 v = b * (1.0 - b.yx);
+  c *= mix(1.0, clamp(pow(v.x * v.y * 24.0, 0.22), 0.0, 1.0), VIGNETTE);
+
+#if BACKLIGHT
+  // A panel is lit from behind by tubes down its edges, and they leak.
+  float edge = max(abs(b.x - 0.5), abs(b.y - 0.5)) * 2.0;
+  c += pow(edge, 8.0) * vec3(0.026, 0.028, 0.040);
+#endif
+
+#if SHEEN
+  // The room the screen is in. A band of window across the face and a soft
+  // patch of ceiling light above it -- both stuck to the glass rather than to
+  // the picture, which is what tells you there is glass there at all.
+  float band = smoothstep(0.42, 0.0, abs(b.x * 0.62 + b.y - 0.78));
+  c += band * SHEEN_AMT * vec3(0.55, 0.62, 0.80);
+  vec2 r = (b - vec2(0.26, 0.84)) * vec2(1.9, 3.1);
+  c += exp(-dot(r, r)) * SHEEN_AMT * vec3(0.9, 0.9, 1.0);
+#endif
 
   // Phosphor is never entirely off, and neither is the glass: a dead-black CRT
   // is the one thing a real one never manages.
-  c += vec3(0.010, 0.011, 0.015);
+  c += vec3(GLOW_R, GLOW_G, GLOW_B);
 
-  gl_FragColor = vec4(c, 1.0);
+  c += (hash(gl_FragCoord.xy + fract(time) * 311.0) - 0.5) * GRAIN;
+
+  // Warming up, or going out. The flash is the last of the charge on the
+  // deflection plates dumping into a single line across the middle.
+  c *= smoothstep(0.0, 0.55, warm);
+  float shut = 1.0 - abs(warm * 2.0 - 1.0);
+  float wire = exp(-pow((uv.y - 0.5) * 90.0, 2.0));
+  c += vec3(0.85, 0.92, 1.0) * shut * shut * wire * 0.7;
+
+  // Outside the glass is the inside of the bezel. Not more terminal, and not
+  // pure black either: some of the tube's own light lands on it.
+  vec3 rim = vec3(0.011, 0.011, 0.013) * (1.0 - smoothstep(0.0, 0.05, sd));
+  c = mix(rim, c, glassy);
+
+  gl_FragColor = vec4(gam(c), 1.0);
 }
 `;
 
+// The screens.
+//
+// Ordered as the switch cycles them, which is roughly the order they were sat
+// in front of. `flags` are compiled as integers and decide which parts of the
+// shader exist at all; `nums` are the numbers those parts use. Everything a
+// screen does not set gets the default below, so a new one is a short entry
+// rather than a full copy.
+const SCREEN_BASE = {
+  flags: {
+    CURVE: 1, SCAN: 1, MASK: 1, MONO: 0, GHOSTING: 0, BLOOM: 1,
+    FLICKER: 0, SHEEN: 1, BACKLIGHT: 0,
+  },
+  nums: {
+    CURVE_X: 7.0, CURVE_Y: 5.0,
+    SCAN_PITCH: 1.5, SIG_MIN: 0.34, SIG_MAX: 0.68,
+    MASK_PITCH: 3.0, MASK_DEPTH: 0.30, MASK_SHARP: 3.4,
+    CONVERGE: 0.0038,
+    BLOOM_GAIN: 0.42, HALO_R: 0.16, HALO_G: 0.10, HALO_B: 0.07,
+    GHOST_GAIN: 0.0,
+    TINT_R: 1.0, TINT_G: 1.0, TINT_B: 1.0,
+    VIGNETTE: 0.34, ROUND: 0.06, SHEEN_AMT: 0.012, GRAIN: 0.010,
+    FLICKER_AMT: 0.0,
+    GLOW_R: 0.010, GLOW_G: 0.011, GLOW_B: 0.015,
+    WOBBLE: 0.0, CHROMA_LAG: 0.0, DOT_CRAWL: 0.0, TAPE_GRAIN: 0.0,
+  },
+};
+
+const SCREENS = [
+  {
+    id: 'p22',
+    hint: 'a shadow-mask colour tube, the one on the desk',
+    flags: { MASK: 2 },
+    nums: { MASK_PITCH: 3.2, MASK_DEPTH: 0.26, MASK_SHARP: 2.6 },
+  },
+  {
+    id: 'grille',
+    hint: 'an aperture grille: flatter glass, brighter, and two wires across it',
+    flags: { MASK: 1 },
+    nums: {
+      CURVE_X: 14.0, CURVE_Y: 11.0,
+      MASK_PITCH: 2.8, MASK_DEPTH: 0.34, MASK_SHARP: 4.2,
+      SIG_MIN: 0.32, SIG_MAX: 0.64,
+      TINT_R: 0.98, TINT_G: 1.0, TINT_B: 1.04,
+      BLOOM_GAIN: 0.5,
+    },
+  },
+  {
+    id: 'slot',
+    hint: 'a slot mask, off the back of a television',
+    flags: { MASK: 3, FLICKER: 1 },
+    nums: {
+      CURVE_X: 5.0, CURVE_Y: 3.6,
+      MASK_PITCH: 3.6, MASK_DEPTH: 0.32, MASK_SHARP: 3.0,
+      SCAN_PITCH: 1.8, SIG_MIN: 0.40, SIG_MAX: 0.80,
+      CONVERGE: 0.0062, FLICKER_AMT: 0.035, VIGNETTE: 0.42,
+      HALO_R: 0.22, HALO_G: 0.13, HALO_B: 0.09,
+    },
+  },
+  {
+    id: 'amber',
+    hint: 'P3 amber, one gun and a long memory',
+    flags: { MASK: 0, MONO: 1, GHOSTING: 1 },
+    persist: [0.90, 0.86, 0.72],
+    nums: {
+      SCAN_PITCH: 1.4, SIG_MIN: 0.32, SIG_MAX: 0.62,
+      CONVERGE: 0.0,
+      TINT_R: 1.0, TINT_G: 0.62, TINT_B: 0.12,
+      GHOST_GAIN: 0.55,
+      BLOOM_GAIN: 0.55, HALO_R: 0.26, HALO_G: 0.15, HALO_B: 0.04,
+      GLOW_R: 0.014, GLOW_G: 0.009, GLOW_B: 0.004,
+      GRAIN: 0.006,
+    },
+  },
+  {
+    id: 'green',
+    hint: 'P1 green, and it lets go of nothing',
+    flags: { MASK: 0, MONO: 1, GHOSTING: 1 },
+    persist: [0.80, 0.945, 0.82],
+    nums: {
+      CURVE_X: 5.5, CURVE_Y: 4.0,
+      SCAN_PITCH: 1.4, SIG_MIN: 0.34, SIG_MAX: 0.66,
+      CONVERGE: 0.0,
+      TINT_R: 0.24, TINT_G: 1.0, TINT_B: 0.40,
+      GHOST_GAIN: 0.8,
+      BLOOM_GAIN: 0.6, HALO_R: 0.10, HALO_G: 0.28, HALO_B: 0.12,
+      GLOW_R: 0.005, GLOW_G: 0.016, GLOW_B: 0.007,
+      VIGNETTE: 0.40, GRAIN: 0.008,
+    },
+  },
+  {
+    id: 'vhs',
+    hint: 'the same tube, fed off a worn tape',
+    flags: { MASK: 3, FLICKER: 1, GHOSTING: 1 },
+    signal: true,
+    persist: [0.62, 0.62, 0.66],
+    animated: true,
+    nums: {
+      CURVE_X: 5.0, CURVE_Y: 3.6,
+      MASK_PITCH: 3.6, MASK_DEPTH: 0.30, MASK_SHARP: 3.0,
+      SCAN_PITCH: 1.9, SIG_MIN: 0.44, SIG_MAX: 0.86,
+      CONVERGE: 0.0085, GHOST_GAIN: 0.35,
+      FLICKER_AMT: 0.045, VIGNETTE: 0.45,
+      BLOOM_GAIN: 0.55, HALO_R: 0.24, HALO_G: 0.15, HALO_B: 0.12,
+      GRAIN: 0.020,
+      WOBBLE: 0.0016, CHROMA_LAG: 2.6, DOT_CRAWL: 0.30, TAPE_GRAIN: 0.045,
+    },
+  },
+  {
+    id: 'lcd',
+    hint: 'an early colour panel: square, slow, and lit from the edges',
+    flags: { CURVE: 0, SCAN: 0, MASK: 4, GHOSTING: 1, BACKLIGHT: 1, SHEEN: 1 },
+    persist: [0.55, 0.58, 0.52],
+    nums: {
+      MASK_PITCH: 3.0, MASK_DEPTH: 0.42, MASK_SHARP: 3.0,
+      CONVERGE: 0.0,
+      GHOST_GAIN: 0.65,
+      BLOOM_GAIN: 0.14, HALO_R: 0.05, HALO_G: 0.05, HALO_B: 0.06,
+      TINT_R: 0.97, TINT_G: 1.0, TINT_B: 1.03,
+      VIGNETTE: 0.10, ROUND: 0.012, SHEEN_AMT: 0.020, GRAIN: 0.004,
+      GLOW_R: 0.013, GLOW_G: 0.014, GLOW_B: 0.018,
+    },
+  },
+];
+
+const screenById = (id) => SCREENS.filter((s) => s.id === id)[0] || SCREENS[0];
+
+// `#define`s, not uniforms. A screen is chosen a handful of times in a session
+// and read a few million times a frame, so the numbers belong in the compile.
+const preamble = (s) => {
+  const flags = Object.assign({}, SCREEN_BASE.flags, s.flags || {});
+  const nums = Object.assign({}, SCREEN_BASE.nums, s.nums || {});
+  const out = [];
+  for (const k in flags) out.push(`#define ${k} ${flags[k] | 0}`);
+  // Always with a decimal point on it: GLSL will not quietly widen an integer
+  // literal into a float, and `mix(1, x, y)` is a compile error rather than a
+  // rounding error.
+  for (const k in nums) out.push(`#define ${k} ${nums[k].toFixed(6)}`);
+  out.push(`#define SIG_MID ${((nums.SIG_MIN + nums.SIG_MAX) * 0.5).toFixed(6)}`);
+  return out.join('\n') + '\n';
+};
+
 const glass = document.getElementById('glass');
-const button = document.getElementById('crt');
 
 const tube = {
   on: false,
   gl: null,
-  tex: null,
-  res: null,
-  scratch: null,
-  sctx: null,
+  screen: SCREENS[0].id,
+  progs: {},
+  tex: {},
+  fbo: {},
+  size: { w: 0, h: 0 },
   pending: 0,
+  settle: 0,
+  warm: 0,
+  warmTo: 0,
+  last: 0,
+  t0: 0,
+  after: null,
+  chain: true,
 
-  // Compile once, on the first time somebody asks for it. Nobody who leaves
-  // the switch alone pays for a GL context.
+  now() {
+    return performance.now() / 1000;
+  },
+
+  // Compile on the first time somebody asks for it. Nobody who leaves the
+  // switch alone pays for a GL context.
   start() {
-    const gl = glass.getContext('webgl', { alpha: false, antialias: false });
+    const gl = glass.getContext('webgl', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
+      powerPreference: 'low-power',
+    });
     if (!gl) return false;
+    this.gl = gl;
+    this.t0 = performance.now() / 1000;
 
+    const quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+                  gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    try {
+      // Neither of these carries a screen's numbers -- what they do is set by
+      // uniforms -- so both are compiled once here rather than per screen.
+      this.progs.persist = this.link(FRAG_PERSIST);
+      this.progs.blur = this.link(FRAG_BLUR);
+    } catch (e) {
+      // The chain is a luxury; the last pass is not. A driver that will not
+      // take one of these still gets a tube, just a plainer one.
+      this.chain = false;
+    }
+    if (!this.program(this.screen)) {
+      this.gl = null;
+      return false;
+    }
+
+    this.source = gl.createTexture();
+    this.bind(this.source, gl.LINEAR);
+    // A 2D canvas has its origin top-left and a texture has it bottom-left.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+    // Something valid to hand the samplers a screen is not using. Sampling an
+    // unbound unit is undefined, and on some drivers that is a black frame and
+    // on others it is whatever was there before.
+    this.blank = gl.createTexture();
+    this.bind(this.blank, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE,
+                  new Uint8Array([0, 0, 0]));
+
+    this.scratch = document.createElement('canvas');
+    this.sctx = this.scratch.getContext('2d', { alpha: false });
+    return true;
+  },
+
+  link(fsrc, defs) {
+    const gl = this.gl;
     const build = (type, src) => {
       const s = gl.createShader(type);
       gl.shaderSource(s, src);
@@ -696,89 +1246,288 @@ const tube = {
       }
       return s;
     };
-
-    let prog;
-    try {
-      prog = gl.createProgram();
-      gl.attachShader(prog, build(gl.VERTEX_SHADER, VERT));
-      gl.attachShader(prog, build(gl.FRAGMENT_SHADER, FRAG));
-      gl.linkProgram(prog);
-      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
-    } catch (e) {
-      return false;
+    const prog = gl.createProgram();
+    gl.attachShader(prog, build(gl.VERTEX_SHADER, VERT));
+    gl.attachShader(prog, build(gl.FRAGMENT_SHADER, (defs || '') + fsrc));
+    // Bound rather than looked up, so every program in the chain reads the one
+    // quad that was bound at startup and nothing has to rebind between passes.
+    gl.bindAttribLocation(prog, 0, 'pos');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(prog) || 'program would not link');
     }
-    gl.useProgram(prog);
+    return prog;
+  },
 
-    const quad = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
-                  gl.STATIC_DRAW);
-    const pos = gl.getAttribLocation(prog, 'pos');
-    gl.enableVertexAttribArray(pos);
-    gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
+  // One program per screen, compiled the first time it is chosen and kept --
+  // including the failures, as null. A shader that would not compile will not
+  // compile on the next frame either, and trying it sixty times a second is
+  // how a screen that merely looks wrong becomes a screen that also stutters.
+  compile(key, src, id) {
+    if (this.progs[key] !== undefined) return this.progs[key];
+    try {
+      this.progs[key] = this.link(src, preamble(screenById(id)));
+    } catch (e) {
+      this.progs[key] = null;
+    }
+    return this.progs[key];
+  },
 
-    this.tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    // A 2D canvas has its origin top-left and a texture has it bottom-left.
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-    // Filtered, not nearest: once the image is bent it is sampled between
-    // pixels everywhere, and nearest sampling makes every glyph edge crawl.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  program(id) {
+    return this.compile('tube:' + id, FRAG_TUBE, id);
+  },
+
+  // The signal pass carries the screen's numbers as well, so it is compiled
+  // per screen too, and only for the screens that are fed by one.
+  signal(id) {
+    return this.compile('signal:' + id, FRAG_NTSC, id);
+  },
+
+  bind(tex, filter) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  },
 
-    this.scratch = document.createElement('canvas');
-    this.sctx = this.scratch.getContext('2d', { alpha: false });
-    this.res = gl.getUniformLocation(prog, 'res');
-    this.gl = gl;
-    return true;
+  target(name, w, h) {
+    const gl = this.gl;
+    if (!this.tex[name]) {
+      this.tex[name] = gl.createTexture();
+      this.fbo[name] = gl.createFramebuffer();
+    }
+    this.bind(this.tex[name], gl.LINEAR);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[name]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D,
+                            this.tex[name], 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return ok;
   },
 
   resize() {
-    if (!this.on || !this.gl) return;
-    // Capped at 2: past that this is several million fragments a frame to
-    // simulate a monitor that never had that many pixels.
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = Math.max(1, Math.round(glass.clientWidth * dpr));
-    const h = Math.max(1, Math.round(glass.clientHeight * dpr));
-    if (glass.width !== w || glass.height !== h) {
-      glass.width = w;
-      glass.height = h;
-      this.scratch.width = w;
-      this.scratch.height = h;
-      this.gl.viewport(0, 0, w, h);
+    // Nothing to size while it is hidden: a `display: none` canvas measures
+    // zero, and reallocating every target to one pixel is not a useful answer
+    // to a window being dragged with the tube switched off.
+    if (!this.gl || !this.on) return;
+    // Capped at 2, and capped again on area: past either of those this is
+    // several million fragments a pass to simulate a monitor that never had
+    // that many pixels.
+    let dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let w = Math.max(1, Math.round(glass.clientWidth * dpr));
+    let h = Math.max(1, Math.round(glass.clientHeight * dpr));
+    const budget = 4.2e6;
+    if (w * h > budget) {
+      const k = Math.sqrt(budget / (w * h));
+      w = Math.max(1, Math.round(w * k));
+      h = Math.max(1, Math.round(h * k));
+      dpr *= k;
     }
-    this.draw();
+    this.dpr = dpr;
+    if (this.size.w === w && this.size.h === h) return;
+    this.size = { w, h };
+
+    glass.width = w;
+    glass.height = h;
+    this.scratch.width = w;
+    this.scratch.height = h;
+    this.gl.viewport(0, 0, w, h);
+
+    if (this.chain) {
+      const half = [Math.max(1, w >> 1), Math.max(1, h >> 1)];
+      const quarter = [Math.max(1, w >> 2), Math.max(1, h >> 2)];
+      this.chain =
+        this.target('signal', w, h) &&
+        this.target('keepA', half[0], half[1]) &&
+        this.target('keepB', half[0], half[1]) &&
+        this.target('blurA', quarter[0], quarter[1]) &&
+        this.target('blurB', quarter[0], quarter[1]) &&
+        this.target('blurC', quarter[0], quarter[1]);
+    }
   },
 
-  // Coalesced into one frame: a burst of writes is one repaint, not thirty.
+  // What this screen is allowed to do here. Reduced motion is not a request to
+  // make the picture worse, it is a request for it to hold still -- so the
+  // glass, the mask and the beam all stay and only the parts that move go.
+  live() {
+    const s = screenById(this.screen);
+    if (!reducedMotion) return s;
+    const still = Object.assign({}, s);
+    still.persist = null;
+    still.animated = false;
+    return still;
+  },
+
+  // A repaint of the terminal, and however many more it takes for whatever is
+  // still moving to stop moving.
   schedule() {
-    if (!this.on || this.pending) return;
+    if (!this.on) return;
+    const s = this.live();
+    if (s.persist) this.settle = 48;
+    this.wake();
+  },
+
+  wake() {
+    if (this.pending || !this.gl || document.hidden) return;
     this.pending = requestAnimationFrame(() => {
       this.pending = 0;
-      this.draw();
+      this.frame();
     });
   },
 
-  draw() {
-    if (!this.on || !this.gl) return;
+  frame() {
+    const now = this.now();
+    const dt = this.last ? Math.min(now - this.last, 0.1) : 0.016;
+    this.last = now;
+
+    // Toward the switch, at a speed that reads as a tube rather than a fade --
+    // unless the visitor has asked for less of that, in which case the picture
+    // is simply there or simply gone. Collapsing to a line is the single most
+    // motion-like thing on this page.
+    const rate = reducedMotion ? 1e6 : (this.warmTo > this.warm ? 1.6 : 2.4);
+    const step = rate * dt;
+    if (Math.abs(this.warmTo - this.warm) <= step) this.warm = this.warmTo;
+    else this.warm += Math.sign(this.warmTo - this.warm) * step;
+
+    this.draw();
+
+    if (this.settle > 0) this.settle--;
+    const s = this.live();
+    const moving = this.warm !== this.warmTo || (this.on && (s.animated || this.settle > 0));
+    if (moving) this.wake();
+    else if (this.after && this.warm === this.warmTo) {
+      const done = this.after;
+      this.after = null;
+      done();
+    }
+  },
+
+  // Every pass is the same quad, so a pass is a program, a target and a list of
+  // textures to read.
+  pass(prog, target, w, h, reads, set) {
     const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? this.fbo[target] : null);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(prog);
+    for (let i = 0; i < reads.length; i++) {
+      gl.activeTexture(gl.TEXTURE0 + i);
+      gl.bindTexture(gl.TEXTURE_2D, reads[i][1]);
+      gl.uniform1i(gl.getUniformLocation(prog, reads[i][0]), i);
+    }
+    if (set) set(gl, prog);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  },
+
+  draw() {
+    if (!this.gl) return;
+    const gl = this.gl;
+    const s = this.live();
+    const prog = this.program(this.screen);
+    if (!prog) return;
+    const { w, h } = this.size;
+    const time = this.now() - this.t0;
 
     // xterm's canvas renderer stacks its layers as separate canvases in one
     // element, so they are flattened here in the order it draws them.
     this.sctx.fillStyle = '#08090b';
-    this.sctx.fillRect(0, 0, this.scratch.width, this.scratch.height);
+    this.sctx.fillRect(0, 0, w, h);
     const layers = screen.querySelectorAll('.xterm-screen canvas');
     for (let i = 0; i < layers.length; i++) {
-      this.sctx.drawImage(layers[i], 0, 0, this.scratch.width, this.scratch.height);
+      this.sctx.drawImage(layers[i], 0, 0, w, h);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.source);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, this.scratch);
+
+    let lit = this.source;
+    let ghost = this.blank;
+    let glow = this.blank;
+    let haze = this.blank;
+
+    const signal = s.signal ? this.signal(this.screen) : null;
+    if (this.chain && signal) {
+      this.pass(signal, 'signal', w, h, [['frame', lit]], (gl, p) => {
+        gl.uniform2f(gl.getUniformLocation(p, 'res'), w, h);
+        gl.uniform2f(gl.getUniformLocation(p, 'px'), 1 / w, 1 / h);
+        gl.uniform1f(gl.getUniformLocation(p, 'dpr'), this.dpr);
+        // Frozen when nothing is meant to move: a still frame of a tape rather
+        // than a tape that jumps once per keystroke.
+        gl.uniform1f(gl.getUniformLocation(p, 'time'), s.animated ? time : 0);
+      });
+      lit = this.tex.signal;
     }
 
-    gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, this.scratch);
-    gl.uniform2f(this.res, glass.width, glass.height);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (this.chain && s.persist) {
+      const hw = Math.max(1, w >> 1);
+      const hh = Math.max(1, h >> 1);
+      const from = this.flip ? 'keepB' : 'keepA';
+      const to = this.flip ? 'keepA' : 'keepB';
+      this.pass(this.progs.persist, to, hw, hh,
+        [['frame', lit], ['prev', this.tex[from]]], (gl, p) => {
+          gl.uniform3f(gl.getUniformLocation(p, 'decay'),
+                       s.persist[0], s.persist[1], s.persist[2]);
+        });
+      this.flip = !this.flip;
+      ghost = this.tex[to];
+    }
+
+    if (this.chain) {
+      const qw = Math.max(1, w >> 2);
+      const qh = Math.max(1, h >> 2);
+      // Four runs of one axis each: a tight pair off the picture for the
+      // bloom, and a wide pair off the tight one for the halation. Blurring an
+      // already blurred image is how a large radius is bought cheaply, and the
+      // second pair costs the same as the first because both are at a quarter.
+      const blur = (into, from, dx, dy, cut) =>
+        this.pass(this.progs.blur, into, qw, qh, [['frame', from]], (gl, p) => {
+          gl.uniform2f(gl.getUniformLocation(p, 'dir'), dx, dy);
+          gl.uniform1f(gl.getUniformLocation(p, 'cut'), cut);
+        });
+      blur('blurA', lit, 1 / qw, 0, 0.22);
+      blur('blurB', this.tex.blurA, 0, 1 / qh, 0);
+      blur('blurA', this.tex.blurB, 3.5 / qw, 0, 0);
+      blur('blurC', this.tex.blurA, 0, 3.5 / qh, 0);
+      glow = this.tex.blurB;
+      haze = this.tex.blurC;
+    }
+
+    this.pass(prog, null, w, h,
+      [['frame', lit], ['glow', glow], ['haze', haze], ['ghost', ghost]], (gl, p) => {
+        gl.uniform2f(gl.getUniformLocation(p, 'res'), w, h);
+        gl.uniform2f(gl.getUniformLocation(p, 'px'), 1 / w, 1 / h);
+        gl.uniform1f(gl.getUniformLocation(p, 'dpr'), this.dpr);
+        gl.uniform1f(gl.getUniformLocation(p, 'time'), s.animated ? time : 0);
+        gl.uniform1f(gl.getUniformLocation(p, 'warm'), this.warm);
+      });
   },
+};
+const button = document.getElementById('crt');
+const picker = document.getElementById('screen');
+
+const showScreen = () => {
+  const s = screenById(tube.screen);
+  picker.textContent = s.id;
+  picker.title = s.hint;
+};
+
+const setScreen = (id) => {
+  // A screen that will not compile is not a screen this browser has. Better to
+  // stay on the one that works than to hand somebody a black rectangle.
+  if (!tube.program(id)) return;
+  tube.screen = id;
+  showScreen();
+  try { localStorage.setItem('crt-screen', id); } catch (e) { /* private mode */ }
+  if (tube.on) {
+    // One frame is enough to change screens. The run of them is for a phosphor
+    // that has to fade the old picture out, and only a screen with one needs it.
+    tube.settle = tube.live().persist ? 48 : 0;
+    tube.wake();
+  }
 };
 
 const setCrt = (on) => {
@@ -787,18 +1536,33 @@ const setCrt = (on) => {
     button.title = 'no webgl in this browser';
     return;
   }
-  tube.on = on;
-  useRenderer(on ? 'canvas' : 'webgl');
-  screen.classList.toggle('shaded', on);
-  glass.classList.toggle('on', on);
   button.setAttribute('aria-pressed', on ? 'true' : 'false');
+  picker.hidden = !on;
   try { localStorage.setItem('crt', on ? '1' : '0'); } catch (e) { /* private mode */ }
   if (on) {
+    tube.on = true;
+    useRenderer('canvas');
+    screen.classList.add('shaded');
+    glass.classList.add('on');
     tube.resize();
+    tube.warmTo = 1;
+    tube.after = null;
     // The renderer just changed under it, and a screen nobody has typed on
     // has nothing to repaint on its own.
     term.refresh(0, term.rows - 1);
     tube.schedule();
+  } else {
+    // Going out is an animation, so everything it is drawn from has to stay
+    // where it is until it has finished: the canvas renderer, the hidden
+    // terminal underneath and the canvas on top all wait for `after`.
+    tube.warmTo = 0;
+    tube.after = () => {
+      tube.on = false;
+      glass.classList.remove('on');
+      screen.classList.remove('shaded');
+      useRenderer('webgl');
+    };
+    tube.wake();
   }
   // Clicking the switch must not be a way to lose the keyboard.
   term.focus();
@@ -807,17 +1571,43 @@ const setCrt = (on) => {
 // Every repaint of the terminal is a repaint of the tube, and nothing else is.
 term.onRender(() => tube.schedule());
 
+// A tab in the background is not a tube anybody is looking at. The frames it
+// would have drawn are not owed to it afterwards either -- whatever was fading
+// has finished fading by the time it comes back.
+addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (tube.pending) cancelAnimationFrame(tube.pending);
+    tube.pending = 0;
+    tube.last = 0;
+  } else if (tube.on) {
+    tube.settle = 2;
+    tube.wake();
+  }
+});
+
 if (window.CanvasAddon) {
+  let want = null;
+  let chosen = null;
+  try {
+    want = localStorage.getItem('crt');
+    chosen = localStorage.getItem('crt-screen');
+  } catch (e) { /* private mode */ }
+  if (chosen && screenById(chosen).id === chosen) tube.screen = chosen;
+  showScreen();
   button.addEventListener('click', () => {
     setCrt(button.getAttribute('aria-pressed') !== 'true');
   });
-  let want = null;
-  try { want = localStorage.getItem('crt'); } catch (e) { /* private mode */ }
+  picker.addEventListener('click', () => {
+    const ids = SCREENS.map((s) => s.id);
+    setScreen(ids[(ids.indexOf(tube.screen) + 1) % ids.length]);
+  });
   if (want === '1' && !reducedMotion) setCrt(true);
 } else {
   button.disabled = true;
+  picker.hidden = true;
   button.title = 'the canvas renderer this needs did not load';
 }
+
 
 const hint = document.getElementById('hint');
 const dismiss = () => hint.classList.add('gone');
@@ -860,5 +1650,132 @@ mod tests {
         let proxy = "127.0.0.1:1234".parse().unwrap();
         assert_eq!(client_ip(&headers, public), "203.0.113.7");
         assert_eq!(client_ip(&headers, proxy), "198.51.100.8");
+    }
+
+    /// The client between two markers, for reading one declaration out of it.
+    fn part<'a>(from: &str, to: &str) -> &'a str {
+        let at = INDEX.find(from).unwrap_or_else(|| panic!("no `{from}` in the client"))
+            + from.len();
+        let end = INDEX[at..]
+            .find(to)
+            .unwrap_or_else(|| panic!("`{from}` is never closed by `{to}`"));
+        &INDEX[at..at + end]
+    }
+
+    /// Line comments out. Every one of these shaders talks about CRTs and LCDs
+    /// and NTSC in its prose, and none of those are constants.
+    fn code(src: &str) -> String {
+        src.lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<&str>>()
+            .join("\n")
+    }
+
+    /// SHOUTING identifiers, whole words only.
+    fn shouted(src: &str) -> Vec<String> {
+        let bytes: Vec<char> = src.chars().collect();
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if !bytes[at].is_ascii_uppercase() || (at > 0 && ident(bytes[at - 1])) {
+                at += 1;
+                continue;
+            }
+            let mut end = at;
+            while end < bytes.len() && (bytes[end].is_ascii_uppercase() || bytes[end] == '_'
+                || bytes[end].is_ascii_digit())
+            {
+                end += 1;
+            }
+            // `toYIQ` is not a constant and neither is `PI`; a name has to be a
+            // whole word and worth more than two letters to be one.
+            if (end == bytes.len() || !ident(bytes[end])) && end - at >= 3 {
+                out.push(bytes[at..end].iter().collect());
+            }
+            at = end.max(at + 1);
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Names being declared, as `NAME:` in an object literal.
+    fn declared(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in shouted(&code(src)) {
+            for token in src.match_indices(&name) {
+                let after = src[token.0 + name.len()..].trim_start();
+                if after.starts_with(':') {
+                    out.push(name.clone());
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// Every constant the screens are compiled with is one the screens define.
+    ///
+    /// Written for a bug that no amount of reading found. The signal shader was
+    /// linked without the `#define` block in front of it, so the four numbers it
+    /// reads did not exist, so it would not compile -- and because one `catch`
+    /// covered three programs, the phosphor and the bloom went with it. Nothing
+    /// reported anything. Every screen simply came out worse than it was meant
+    /// to, in a way only a side-by-side would show.
+    ///
+    /// A browser is the only thing that can compile these, and there is no
+    /// browser in here. Checking the names is what there is, and the names are
+    /// where that bug lived.
+    #[test]
+    fn every_constant_a_shader_reads_is_one_a_screen_defines() {
+        let base = part("const SCREEN_BASE = {", "\n};");
+        let mut known = declared(base);
+        // Emitted by `preamble` from the two it sits between, so it is defined
+        // for every screen without appearing in the table.
+        known.push("SIG_MID".to_string());
+
+        for (what, src) in [
+            ("the tube", part("const FRAG_TUBE = `", "\n`;")),
+            ("the signal", part("const FRAG_NTSC = `", "\n`;")),
+        ] {
+            for name in shouted(&code(src)) {
+                assert!(
+                    known.contains(&name),
+                    "{what} shader reads `{name}`, which no screen defines"
+                );
+            }
+        }
+    }
+
+    /// And every constant a screen sets is one a shader would read.
+    ///
+    /// The other half of the same mistake, and the quieter one: a misspelled
+    /// override is not an error anywhere. It is silently ignored, the screen
+    /// keeps the default, and the only symptom is that turning a number did
+    /// nothing.
+    #[test]
+    fn every_constant_a_screen_sets_is_one_the_shaders_know() {
+        let known = declared(part("const SCREEN_BASE = {", "\n};"));
+        for name in declared(part("const SCREENS = [", "\n];")) {
+            assert!(
+                known.contains(&name),
+                "a screen sets `{name}`, which is not one of the constants"
+            );
+        }
+    }
+
+    /// The switch has something to say before any of this has run.
+    ///
+    /// The label is in the markup rather than written in by script, so it is
+    /// what a visitor sees for the first frame -- and if it names a screen that
+    /// is not the one the tube starts on, that first frame is a lie.
+    #[test]
+    fn the_screen_switch_opens_on_the_screen_the_tube_starts_on() {
+        let first = part("const SCREENS = [\n  {\n    id: '", "'");
+        assert!(
+            INDEX.contains(&format!(r#"title="which screen" hidden>{first}<"#)),
+            "the switch does not open on `{first}`"
+        );
     }
 }

@@ -42,14 +42,26 @@ their own full copy of the basemap and terrain. This design does not: one
 process serves everyone, so a memory optimisation benefits every visitor at
 once rather than being multiplied by them.
 
-### Shaders, later
+### The shaders
 
-xterm.js renders through its WebGL addon into a `<canvas>`, which is the
-right surface for a post-processing pass — CRT curvature, bloom, scanlines,
-phosphor persistence. The client already loads `WebglAddon` and falls back
-to the canvas renderer if WebGL is unavailable, so the hook is in place; a
-shader pass would sample that canvas as a texture rather than touching any
-of the server code.
+xterm.js renders into a `<canvas>`, and the `crt` switch in the corner takes
+that canvas as a texture and runs it through four programs: a composite
+signal, a phosphor that keeps a decaying copy of the last frame, a pair of
+blurs for bloom and halation, and then the tube itself — glass curvature, a
+beam that widens as it brightens, a shadow mask or an aperture grille or an
+LCD subpixel grid, convergence error, a hum bar, and the rim of the bezel.
+The switch beside it picks between seven screens.
+
+None of it touches the server: the same bytes go over the wire either way,
+and the whole effect is the visitor's GPU rewriting frames it has already
+been given. It repaints when the terminal repaints and for as long as it has
+something still moving to show, then stops — an idle tab does no work unless
+the visitor has gone and chosen a screen that never settles.
+
+WebGL is required for the switch and for xterm's fast path; without it the
+switch disables itself and everything else carries on. Turning the tube on
+also swaps xterm to its canvas renderer, because a WebGL drawing buffer is
+not reliably readable as a texture from another context.
 
 Published on **2222** for now rather than 22, so this never has to fight
 whatever the host's own sshd is doing. Move it to 22 later by changing the
