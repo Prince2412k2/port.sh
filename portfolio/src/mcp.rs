@@ -34,7 +34,7 @@
 //! token is answered with an error and dropped -- a tool call is an instruction
 //! to draw on somebody's screen, and which screen is not negotiable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
@@ -84,6 +84,14 @@ pub enum Directive {
     /// turns that machine identity into a human action and keeps the target on
     /// the rail below it.
     Called { tool: String, detail: String },
+    /// And that call came back an error.
+    ///
+    /// A row for one of our tools is put up the moment the call arrives, which
+    /// is what makes it appear while a page is still being fetched -- and what
+    /// made every one of them a tick. Six previews of a diagram that the
+    /// renderer kept refusing all read as six successes, so the transcript said
+    /// the agent was repeating itself for no reason.
+    Failed { tool: String },
 }
 
 /// One session, from the tool server's side: somewhere to draw, and where the
@@ -1446,13 +1454,32 @@ pub fn trust_location(token: &str, lat: f64, lon: f64) {
 /// shape of that bug.
 fn call(token: &str, name: &str, args: Option<&Value>) -> String {
     crate::visits::operational("info", "agent_tool_call", name);
+    // Up before the work, not after it: a page read takes seconds and a row
+    // that appears when it finishes is a row nobody saw it waiting for. The
+    // outcome follows on the same row once there is one.
     send(
         token,
         Directive::Called {
             tool: name.to_string(),
-            detail: detail_of(name, args),
+            detail: detail_of(token, name, args),
         },
     );
+    let out = answered(token, name, args);
+    // `err` writes the flag first and nothing else does. Matched on the prefix
+    // rather than anywhere in the body, because a fetched page is quoted into
+    // this string and is allowed to say whatever it likes.
+    if out.starts_with(r#"{"isError":true"#) {
+        send(
+            token,
+            Directive::Failed {
+                tool: name.to_string(),
+            },
+        );
+    }
+    out
+}
+
+fn answered(token: &str, name: &str, args: Option<&Value>) -> String {
     let arg_str = |k: &str| {
         args.and_then(|a| a.get(k))
             .and_then(|v| v.as_str())
@@ -1827,7 +1854,12 @@ fn call(token: &str, name: &str, args: Option<&Value>) -> String {
 /// Not the whole argument object: a row is one line and `{"lat":23.0386,...}` is
 /// not what anybody is trying to read. The name being looked up, or the point
 /// being flown to.
-fn detail_of(name: &str, args: Option<&Value>) -> String {
+///
+/// The session's token comes in because for some of these the argument on its
+/// own is not the interesting half. `show_diagram` is handed a draft number,
+/// which is an internal counter; `preview_diagram` is handed a whole scene, and
+/// the sixth one in a row differs from the fifth in ways only the board knows.
+fn detail_of(token: &str, name: &str, args: Option<&Value>) -> String {
     let str_of = |k: &str| {
         args.and_then(|a| a.get(k))
             .and_then(|v| v.as_str())
@@ -1835,17 +1867,20 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
     };
     let num_of = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_f64());
     match name {
-        "locate_place" => str_of("name").to_string(),
+        // With the town, when there is one. "Zen Cafe" and "Zen Cafe, in
+        // Ahmedabad" are different lookups and the second is the one that
+        // explains why the answer landed where it did.
+        "locate_place" => match (str_of("name"), str_of("near")) {
+            (want, "") => want.to_string(),
+            (want, near) => format!("{want}, in {near}"),
+        },
         // The question, and the address. Both are the whole point of the row:
         // a visitor watching `search_web` with nothing beside it cannot tell
         // whether it went looking for what they asked about.
         "search_web" => str_of("query").to_string(),
-        "show_project" => str_of("name").to_string(),
-        "preview_diagram" => str_of("title").to_string(),
-        "show_diagram" => num_of("draft_id")
-            .filter(|id| id.fract() == 0.0)
-            .map(|id| format!("draft {id:.0}"))
-            .unwrap_or_default(),
+        "show_project" => project_detail(str_of("name"), args),
+        "preview_diagram" => preview_detail(token, args),
+        "show_diagram" => published_detail(token, num_of("draft_id")),
         "fetch_page" => str_of("url").to_string(),
         "show_map" if args.and_then(|a| a.get("from")).is_some() => {
             let label = str_of("label");
@@ -1876,6 +1911,239 @@ fn detail_of(name: &str, args: Option<&Value>) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Which project, under the name the projects section calls it.
+///
+/// The agent asks by whatever the visitor said -- `vcs`, `watch party` -- and a
+/// row echoing that back says only what was typed. Resolving here says which
+/// project it actually landed on, and says so when it landed on none: a name
+/// nothing matches is a `found:false` the agent will recover from quietly, and
+/// the row is the only place a visitor can see it happened at all.
+fn project_detail(want: &str, args: Option<&Value>) -> String {
+    let want = want.trim();
+    if want.is_empty() {
+        return String::new();
+    }
+    let Some(project) = project_named(want) else {
+        return format!("{want} -- no project by that name");
+    };
+    let parts: Vec<&str> = args
+        .and_then(|a| a.get("show"))
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let (mark, diagram) = (parts.contains(&"mark"), parts.contains(&"diagram"));
+    match (mark, diagram) {
+        (true, true) => format!("{}, mark and diagram", project.name),
+        (true, false) => format!("{}, its mark", project.name),
+        (false, true) => format!("{}, its diagram", project.name),
+        (false, false) => project.name.clone(),
+    }
+}
+
+/// The scene as counted, or -- from the second draft on -- what moved in it.
+///
+/// Composing a diagram is half a dozen `preview_diagram` calls in a row, and
+/// every one of them wrote the same title under the same label: four identical
+/// lines that told a visitor the agent was busy and nothing else. The first
+/// draft is worth describing by its shape; after that what is worth reading is
+/// the edit, so the previous draft on the board is what this is measured
+/// against.
+fn preview_detail(token: &str, args: Option<&Value>) -> String {
+    let next = Shape::of_args(args);
+    let table = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let previous = table
+        .get(token)
+        .and_then(|b| b.draft.as_ref())
+        .map(|draft| Shape::of_spec(&draft.spec));
+    drop(table);
+    match previous {
+        None => next.said(),
+        Some(previous) => next.changed_from(&previous),
+    }
+}
+
+/// What is going on the page, rather than the number the draft was filed under.
+///
+/// `draft 4294967297` is the board's counter with the session id in the top
+/// half of it. It is the right thing to send the agent and the wrong thing
+/// entirely to show a person, who wants to know which picture this is.
+fn published_detail(token: &str, asked: Option<f64>) -> String {
+    let table = boards().lock().unwrap_or_else(|e| e.into_inner());
+    let draft = table.get(token).and_then(|b| b.draft.as_ref());
+    match draft {
+        // Only the latest draft can be published, so a mismatch is a call that
+        // is about to be refused. Say which one it asked for; the refusal will
+        // arrive on the same row.
+        Some(draft) if asked.is_none_or(|id| id as u64 == draft.id) => {
+            Shape::of_spec(&draft.spec).said()
+        }
+        _ => match asked {
+            Some(id) if id.fract() == 0.0 => format!("draft {id:.0}, which is not the latest"),
+            _ => String::new(),
+        },
+    }
+}
+
+/// A scene measured coarsely enough to describe in one line, and to subtract.
+///
+/// Ids rather than counts, because two drafts of the same size are not the same
+/// draft: swapping a box for a plot leaves every total where it was, and that is
+/// exactly the edit a visitor watching a diagram get composed wants to see.
+struct Shape {
+    title: String,
+    parts: Vec<String>,
+    links: Vec<String>,
+    beats: usize,
+}
+
+impl Shape {
+    fn of_args(args: Option<&Value>) -> Shape {
+        let list = |key: &str| -> Vec<&Value> {
+            args.and_then(|a| a.get(key))
+                .and_then(Value::as_array)
+                .map(|items| items.iter().collect())
+                .unwrap_or_default()
+        };
+        let field = |v: &Value, key: &str| {
+            v.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        Shape {
+            title: args
+                .and_then(|a| a.get("title"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            parts: list("elements")
+                .iter()
+                .map(|e| format!("{}:{}", field(e, "id"), field(e, "kind")))
+                .collect(),
+            links: list("connectors")
+                .iter()
+                .map(|c| format!("{}>{}", field(c, "from"), field(c, "to")))
+                .collect(),
+            beats: list("beats").len(),
+        }
+    }
+
+    fn of_spec(spec: &skysheet::diagram::Spec) -> Shape {
+        use skysheet::diagram::ElementKind;
+        Shape {
+            title: spec.title.trim().to_string(),
+            parts: spec
+                .elements
+                .iter()
+                .map(|e| {
+                    let kind = match e.kind {
+                        ElementKind::Group { .. } => "group",
+                        ElementKind::Box { .. } => "box",
+                        ElementKind::Text { .. } => "text",
+                        ElementKind::Meter { .. } => "meter",
+                        ElementKind::Buffer { .. } => "buffer",
+                        ElementKind::Plot { .. } => "plot",
+                        ElementKind::Timeline { .. } => "timeline",
+                        ElementKind::Status { .. } => "status",
+                    };
+                    format!("{}:{kind}", e.id)
+                })
+                .collect(),
+            links: spec
+                .connectors
+                .iter()
+                .map(|c| format!("{}>{}", c.from, c.to))
+                .collect(),
+            beats: spec.beats.len(),
+        }
+    }
+
+    /// The whole scene, for the draft there is nothing to compare against.
+    fn said(&self) -> String {
+        let shape = [
+            count(self.parts.len(), "part", "parts"),
+            count(self.links.len(), "link", "links"),
+            count(self.beats, "beat", "beats"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join(", ");
+        match (self.title.is_empty(), shape.is_empty()) {
+            (true, _) => shape,
+            (false, true) => self.title.clone(),
+            (false, false) => format!("{}  \u{b7}  {shape}", self.title),
+        }
+    }
+
+    /// The edit, in the terms somebody watching would describe it.
+    fn changed_from(&self, was: &Shape) -> String {
+        // Unless it is not an edit. A draft survives the answer it was made
+        // for, so the first preview of the next question would otherwise be
+        // measured against a picture of something else entirely -- `+2 parts,
+        // -5 parts` about two diagrams that have nothing to do with each other.
+        // Sharing no ids at all is what a new scene looks like.
+        let before: HashSet<&String> = was.parts.iter().collect();
+        if !self.parts.iter().any(|id| before.contains(id)) {
+            return self.said();
+        }
+        let mut said = Vec::new();
+        if self.title != was.title && !self.title.is_empty() {
+            said.push(format!("retitled \u{201c}{}\u{201d}", self.title));
+        }
+        said.extend(moved(&was.parts, &self.parts, "part", "parts"));
+        said.extend(moved(&was.links, &self.links, "link", "links"));
+        // Beats have no ids, so they are counted rather than matched. A caption
+        // rewritten in place goes unremarked; a beat added or dropped does not.
+        match self.beats.cmp(&was.beats) {
+            std::cmp::Ordering::Greater => said.push(more(self.beats - was.beats)),
+            std::cmp::Ordering::Less => said.push(fewer(was.beats - self.beats)),
+            std::cmp::Ordering::Equal => {}
+        }
+        match said.is_empty() {
+            // Same ids, same links, same beats: the agent rewrote what is
+            // inside them. There is no honest count for that, and "the same
+            // again" would be a lie -- something did change.
+            true => "the same parts, redrawn".to_string(),
+            false => said.join(", "),
+        }
+    }
+}
+
+/// What came and went between two lists of ids.
+fn moved(was: &[String], now: &[String], one: &str, many: &str) -> Vec<String> {
+    let before: HashSet<&String> = was.iter().collect();
+    let after: HashSet<&String> = now.iter().collect();
+    let added = after.difference(&before).count();
+    let gone = before.difference(&after).count();
+    let mut said = Vec::new();
+    if added > 0 {
+        said.push(format!("+{added} {}", if added == 1 { one } else { many }));
+    }
+    if gone > 0 {
+        said.push(format!("-{gone} {}", if gone == 1 { one } else { many }));
+    }
+    said
+}
+
+fn more(n: usize) -> String {
+    format!("+{n} {}", if n == 1 { "beat" } else { "beats" })
+}
+
+fn fewer(n: usize) -> String {
+    format!("-{n} {}", if n == 1 { "beat" } else { "beats" })
+}
+
+/// `1 part`, `9 parts`, and nothing at all for none of them.
+fn count(n: usize, one: &str, many: &str) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        _ => Some(format!("{n} {many}")),
     }
 }
 
@@ -2306,8 +2574,203 @@ mod tests {
     fn a_web_call_says_what_it_went_looking_for() {
         let args =
             crate::json::parse(r#"{"query":"acp schema","url":"https://x.test/a"}"#).unwrap();
-        assert_eq!(detail_of("search_web", Some(&args)), "acp schema");
-        assert_eq!(detail_of("fetch_page", Some(&args)), "https://x.test/a");
+        assert_eq!(detail_of("", "search_web", Some(&args)), "acp schema");
+        assert_eq!(detail_of("", "fetch_page", Some(&args)), "https://x.test/a");
+    }
+
+    /// A place looked up inside a town is a different lookup from the same name
+    /// on its own, and the row is where a wrong `near` becomes visible.
+    #[test]
+    fn a_place_lookup_says_where_it_looked() {
+        let plain = crate::json::parse(r#"{"name":"Jaipur"}"#).unwrap();
+        let inside = crate::json::parse(r#"{"name":"Zen Cafe","near":"Ahmedabad"}"#).unwrap();
+        assert_eq!(detail_of("", "locate_place", Some(&plain)), "Jaipur");
+        assert_eq!(
+            detail_of("", "locate_place", Some(&inside)),
+            "Zen Cafe, in Ahmedabad"
+        );
+    }
+
+    /// The row names the project, not the word the visitor happened to use --
+    /// and says plainly when there is no project by that word at all.
+    #[test]
+    fn a_project_row_names_the_project_it_found() {
+        let known = projects().first().expect("no projects to test with");
+        let asked = crate::json::parse(&format!(
+            r#"{{"name":{},"show":["mark","diagram"]}}"#,
+            json::quote(&known.id)
+        ))
+        .unwrap();
+        assert_eq!(
+            detail_of("", "show_project", Some(&asked)),
+            format!("{}, mark and diagram", known.name)
+        );
+
+        let facts = crate::json::parse(&format!(r#"{{"name":{}}}"#, json::quote(&known.id)))
+            .unwrap();
+        assert_eq!(detail_of("", "show_project", Some(&facts)), known.name);
+
+        let missing = crate::json::parse(r#"{"name":"kubernetes"}"#).unwrap();
+        assert_eq!(
+            detail_of("", "show_project", Some(&missing)),
+            "kubernetes -- no project by that name"
+        );
+    }
+
+    /// A refused call is not a call that worked.
+    ///
+    /// The row goes up before the work starts, so every one of them was a tick
+    /// -- including the drafts the renderer turned down, which is why a visitor
+    /// watching six of them could not tell why there were six.
+    #[test]
+    fn a_call_that_came_back_an_error_says_so_on_its_row() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"preview_diagram","arguments":{"elements":[{"id":"wide","rect":{"x":90,"y":10,"width":40,"height":20},"kind":"box","title":"Off the canvas"}]}}}"#,
+        )
+        .unwrap();
+        let seen: Vec<Directive> = rx.try_iter().collect();
+        assert!(
+            seen.iter()
+                .any(|d| matches!(d, Directive::Called { tool, .. } if tool == "preview_diagram")),
+            "no row for the call at all: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|d| matches!(d, Directive::Failed { tool } if tool == "preview_diagram")),
+            "a refused draft still reads as a success: {seen:?}"
+        );
+
+        // And a call that works says nothing further.
+        handle(
+            &token,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"preview_diagram","arguments":{"elements":[{"id":"fits","rect":{"x":10,"y":10,"width":40,"height":20},"kind":"box","title":"On it"}]}}}"#,
+        )
+        .unwrap();
+        let seen: Vec<Directive> = rx.try_iter().collect();
+        assert!(
+            !seen.iter().any(|d| matches!(d, Directive::Failed { .. })),
+            "a draft that rendered was marked failed: {seen:?}"
+        );
+        forget(&token);
+    }
+
+    /// The rows a visitor watches while a diagram is composed.
+    ///
+    /// Six previews of one picture used to write the same title six times. The
+    /// first draft is described by its shape; every one after it by the edit,
+    /// because that is the part that is new.
+    #[test]
+    fn each_draft_of_a_diagram_says_what_moved_in_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let token = register(tx, None);
+        let said = |rx: &std::sync::mpsc::Receiver<Directive>| {
+            rx.try_iter()
+                .filter_map(|d| match d {
+                    Directive::Called { detail, .. } => Some(detail),
+                    _ => None,
+                })
+                .last()
+                .expect("no row for the call")
+        };
+        let preview = |elements: &str, connectors: &str, beats: &str, title: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"preview_diagram","arguments":{{"title":"{title}","elements":[{elements}],"connectors":[{connectors}],"beats":[{beats}]}}}}}}"#
+            )
+        };
+        let ingress =
+            r#"{"id":"ingress","rect":{"x":2,"y":2,"width":30,"height":20},"kind":"box","title":"Ingress"}"#;
+        let queue =
+            r#"{"id":"queue","rect":{"x":40,"y":2,"width":30,"height":20},"kind":"buffer","label":"Queue","cells":["ready","done"]}"#;
+        let health =
+            r#"{"id":"health","rect":{"x":2,"y":40,"width":30,"height":16},"kind":"status","label":"Gateway","state":"warn","detail":"slow"}"#;
+        let link = r#"{"id":"admit","from":"ingress","to":"queue"}"#;
+        let beat = r#"{"caption":"in","duration":1}"#;
+
+        // First draft: nothing to compare it against, so the shape of it.
+        handle(
+            &token,
+            &preview(&format!("{ingress},{queue}"), link, beat, "Backpressure"),
+        )
+        .unwrap();
+        assert_eq!(said(&rx), "Backpressure  \u{b7}  2 parts, 1 link, 1 beat");
+
+        // A part and a beat added, and the title left alone.
+        handle(
+            &token,
+            &preview(
+                &format!("{ingress},{queue},{health}"),
+                link,
+                &format!("{beat},{beat}"),
+                "Backpressure",
+            ),
+        )
+        .unwrap();
+        assert_eq!(said(&rx), "+1 part, +1 beat");
+
+        // The same ids, a new name over them.
+        handle(
+            &token,
+            &preview(
+                &format!("{ingress},{queue},{health}"),
+                link,
+                &format!("{beat},{beat}"),
+                "Backpressure, end to end",
+            ),
+        )
+        .unwrap();
+        assert_eq!(said(&rx), "retitled \u{201c}Backpressure, end to end\u{201d}");
+
+        // Nothing structural at all: the agent rewrote what is inside.
+        handle(
+            &token,
+            &preview(
+                &format!("{ingress},{queue},{health}"),
+                link,
+                &format!("{beat},{beat}"),
+                "Backpressure, end to end",
+            ),
+        )
+        .unwrap();
+        assert_eq!(said(&rx), "the same parts, redrawn");
+
+        // Publishing says which picture, not which counter.
+        let draft = handle(
+            &token,
+            &preview(
+                &format!("{ingress},{queue},{health}"),
+                link,
+                beat,
+                "Backpressure, end to end",
+            ),
+        )
+        .unwrap();
+        let id = answer(&draft)
+            .get("draft_id")
+            .and_then(Value::as_f64)
+            .expect("no draft id") as u64;
+        let _ = said(&rx);
+        handle(
+            &token,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"show_diagram","arguments":{{"draft_id":{id}}}}}}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            said(&rx),
+            "Backpressure, end to end  \u{b7}  3 parts, 1 link, 1 beat"
+        );
+
+        // A scene with nothing in common with the last one is a new scene, not
+        // an edit of it. The draft outlives the answer it was drawn for.
+        let other =
+            r#"{"id":"clock","rect":{"x":10,"y":10,"width":40,"height":20},"kind":"meter","label":"Clock","value":0.4}"#;
+        handle(&token, &preview(other, "", "", "Something else")).unwrap();
+        assert_eq!(said(&rx), "Something else  \u{b7}  1 part");
+        forget(&token);
     }
 
     /// The facts always come back; the picture is optional and separate.

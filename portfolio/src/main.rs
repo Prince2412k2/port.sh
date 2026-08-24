@@ -186,6 +186,9 @@ fn main() -> io::Result<()> {
                         mcp::Directive::Called { tool, detail } => {
                             println!("  called  {tool}  {detail}")
                         }
+                        mcp::Directive::Failed { tool } => {
+                            println!("  failed  {tool}")
+                        }
                         mcp::Directive::Map { stops } => {
                             for s in stops {
                                 println!(

@@ -1015,6 +1015,21 @@ impl Ask {
                     });
                 }
             }
+            // The row is already up. This is its outcome arriving, so it lands
+            // on the call it belongs to rather than adding a second row saying
+            // the same tool went wrong.
+            Directive::Failed { tool } => {
+                if let Some(t) = self.turns.last_mut() {
+                    if let Some(call) = t
+                        .calls
+                        .iter_mut()
+                        .rev()
+                        .find(|c| c.title == tool && c.status == Status::Done)
+                    {
+                        call.status = Status::Failed;
+                    }
+                }
+            }
             Directive::Work { id, mark, diagram } => {
                 // Nothing to draw is a directive too: the agent asked for the
                 // facts and no picture, and whatever is showing should still go
@@ -2448,6 +2463,12 @@ struct ToolWords {
     done: &'static str,
     failed: &'static str,
     refused: &'static str,
+    /// What a run of these counts, for the number on the right of the row.
+    ///
+    /// `4 calls` is true of every tool there is and says nothing about any of
+    /// them. Six attempts at one picture are six drafts; eight lookups are
+    /// eight places.
+    unit: &'static str,
 }
 
 fn tool_words(title: &str, count: usize) -> ToolWords {
@@ -2462,6 +2483,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "searched the web",
             failed: "web search failed",
             refused: "web search refused",
+            unit: "searches",
         }
     } else if name.contains("fetchpage") || name.contains("webfetch") {
         ToolWords {
@@ -2469,6 +2491,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "read the page",
             failed: "page read failed",
             refused: "page read refused",
+            unit: "pages",
         }
     } else if name.contains("locateplace") {
         match count > 1 {
@@ -2477,12 +2500,14 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
                 done: "found places",
                 failed: "place lookup failed",
                 refused: "place lookup refused",
+                unit: "places",
             },
             false => ToolWords {
                 running: "finding a place",
                 done: "found a place",
                 failed: "place lookup failed",
                 refused: "place lookup refused",
+                unit: "places",
             },
         }
     } else if name.contains("locatevisitor") {
@@ -2491,6 +2516,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "located your connection",
             failed: "location lookup failed",
             refused: "location lookup refused",
+            unit: "lookups",
         }
     } else if name.contains("showmap") {
         ToolWords {
@@ -2498,13 +2524,27 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "drew the map",
             failed: "map didn't render",
             refused: "map drawing refused",
+            unit: "maps",
         }
     } else if name.contains("previewdiagram") {
-        ToolWords {
-            running: "previewing the diagram",
-            done: "previewed the diagram",
-            failed: "diagram preview failed",
-            refused: "diagram preview refused",
+        // One preview is a preview. Six in a row is the picture being composed,
+        // and calling that "previewing the diagram" six times over described
+        // the call rather than the work.
+        match count > 1 {
+            true => ToolWords {
+                running: "working the diagram up",
+                done: "worked the diagram up",
+                failed: "diagram preview failed",
+                refused: "diagram preview refused",
+                unit: "drafts",
+            },
+            false => ToolWords {
+                running: "previewing the diagram",
+                done: "previewed the diagram",
+                failed: "diagram preview failed",
+                refused: "diagram preview refused",
+                unit: "drafts",
+            },
         }
     } else if name.contains("showdiagram") {
         ToolWords {
@@ -2512,6 +2552,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "drew the diagram",
             failed: "diagram didn't render",
             refused: "diagram drawing refused",
+            unit: "diagrams",
         }
     } else if name.contains("showproject") {
         ToolWords {
@@ -2519,6 +2560,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "opened the project",
             failed: "project didn't open",
             refused: "project view refused",
+            unit: "projects",
         }
     } else if name.contains("terminal") || name.contains("bash") || name == "shell" {
         ToolWords {
@@ -2526,6 +2568,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "ran a command",
             failed: "command failed",
             refused: "command refused",
+            unit: "commands",
         }
     } else if name.contains("write") || name.contains("edit") || name.contains("patch") {
         ToolWords {
@@ -2533,6 +2576,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "changed a file",
             failed: "file change failed",
             refused: "file change refused",
+            unit: "changes",
         }
     } else {
         ToolWords {
@@ -2540,6 +2584,7 @@ fn tool_words(title: &str, count: usize) -> ToolWords {
             done: "used a tool",
             failed: "tool failed",
             refused: "tool refused",
+            unit: "calls",
         }
     }
 }
@@ -2662,12 +2707,18 @@ fn transcript(
         } else {
             "\u{251c}"
         };
+        let words = tool_words(&group[0].title, group.len());
         let meta = if group.len() > 1 {
-            format!("{} calls", group.len())
+            format!("{} {}", group.len(), words.unit)
         } else {
             String::new()
         };
-        let label = tool_label(&group[0].title, status, group.len());
+        let label = match status {
+            Status::Running => words.running,
+            Status::Done => words.done,
+            Status::Failed => words.failed,
+            Status::Refused => words.refused,
+        };
         lines.push(tool_head(
             rail,
             glyph,
@@ -2678,15 +2729,32 @@ fn transcript(
             label_colour,
         ));
 
-        for (index, c) in named.iter().enumerate() {
-            let closes = last_group && !rendered && index + 1 == named.len();
+        // A run of calls that say the same thing says it once, with a count.
+        // Six attempts at one diagram wrote its title six times: a paragraph of
+        // one sentence, and the visitor still could not tell the attempts apart.
+        // Where the details do differ they all still show, which is the case
+        // this is protecting -- eight places found is eight lines worth reading.
+        let mut runs: Vec<(&str, usize)> = Vec::new();
+        for c in &named {
+            let detail = c.detail.trim();
+            match runs.last_mut() {
+                Some((seen, n)) if *seen == detail => *n += 1,
+                _ => runs.push((detail, 1)),
+            }
+        }
+        for (index, (detail, n)) in runs.iter().enumerate() {
+            let closes = last_group && !rendered && index + 1 == runs.len();
+            let said = match n {
+                1 => (*detail).to_string(),
+                n => format!("{detail}  \u{d7}{n}"),
+            };
             lines.push(vec![
                 Span::styled(
                     format!("{}   ", if closes { "\u{2570}" } else { "\u{2502}" }),
                     Style::default().fg(TOOL_RULE),
                 ),
                 Span::styled(
-                    ellipsis(&c.detail, w.saturating_sub(4) as usize),
+                    ellipsis(&said, w.saturating_sub(4) as usize),
                     Style::default().fg(DIM),
                 ),
             ]);
@@ -4640,8 +4708,8 @@ mod tests {
             "the run did not open:\n{out}"
         );
         assert!(
-            out.contains("4 calls"),
-            "the grouped count is missing:\n{out}"
+            out.contains("4 places"),
+            "the grouped count is missing, or does not count places:\n{out}"
         );
         for p in places {
             assert!(out.contains(p), "`{p}` is missing:\n{out}");
@@ -4657,6 +4725,95 @@ mod tests {
         assert!(
             !out.contains("locate_place") && !out.contains("show_map"),
             "machine names leaked:\n{out}"
+        );
+    }
+
+    /// The outcome lands on the row that is already up, not on a new one.
+    #[test]
+    fn a_refused_call_turns_its_own_row_rather_than_adding_another() {
+        let mut a = Ask::new();
+        a.turns.push(Turn {
+            q: "draw me git".into(),
+            ..Default::default()
+        });
+        a.obey(crate::mcp::Directive::Called {
+            tool: "preview_diagram".into(),
+            detail: "Git  \u{b7}  4 parts".into(),
+        });
+        a.obey(crate::mcp::Directive::Failed {
+            tool: "preview_diagram".into(),
+        });
+
+        let calls = &a.turns[0].calls;
+        assert_eq!(calls.len(), 1, "a second row appeared: {calls:?}");
+        assert_eq!(calls[0].status, Status::Failed, "{calls:?}");
+
+        // A second call of the same tool takes its own outcome, not the first
+        // one's -- these arrive in pairs and the pairs must not cross.
+        a.obey(crate::mcp::Directive::Called {
+            tool: "preview_diagram".into(),
+            detail: "+1 part".into(),
+        });
+        let calls = &a.turns[0].calls;
+        assert_eq!(calls[1].status, Status::Done, "{calls:?}");
+        assert_eq!(calls[0].status, Status::Failed, "{calls:?}");
+    }
+
+    /// Calls that say the same thing say it once.
+    ///
+    /// Composing a diagram is several previews of the same picture, and the
+    /// transcript was writing one sentence four times underneath a label that
+    /// already said what was happening.
+    #[test]
+    fn a_run_of_identical_rows_collapses_to_one_with_a_count() {
+        let mut a = Ask::new();
+        let mut calls: Vec<Call> = (0..3)
+            .map(|i| Call {
+                id: format!("d{i}"),
+                title: "preview_diagram".into(),
+                status: Status::Done,
+                detail: "the same parts, redrawn".into(),
+                rendered: false,
+            })
+            .collect();
+        // And one that differs, which must still get a line of its own.
+        calls.push(Call {
+            id: "d3".into(),
+            title: "preview_diagram".into(),
+            status: Status::Done,
+            detail: "+2 parts".into(),
+            rendered: false,
+        });
+        a.turns.push(Turn {
+            q: "draw me git".into(),
+            a: "Here.".into(),
+            calls,
+            done: true,
+            ..Default::default()
+        });
+        a.state = State::Ready;
+
+        let out = drawn(&a, 110, 30);
+        assert!(
+            out.contains("worked the diagram up"),
+            "a run of drafts is still described one call at a time:\n{out}"
+        );
+        assert!(
+            out.contains("4 drafts"),
+            "the count does not say what it counted:\n{out}"
+        );
+        assert!(
+            out.contains("the same parts, redrawn  \u{d7}3"),
+            "the repeats did not collapse:\n{out}"
+        );
+        assert_eq!(
+            out.matches("the same parts, redrawn").count(),
+            1,
+            "the same line is still written more than once:\n{out}"
+        );
+        assert!(
+            out.contains("+2 parts"),
+            "the draft that differed was swallowed:\n{out}"
         );
     }
 
