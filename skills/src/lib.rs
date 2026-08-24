@@ -8,6 +8,7 @@ pub mod app;
 pub mod canvas;
 pub mod cards;
 pub mod data;
+pub mod diagram;
 pub mod grid;
 pub mod logos;
 pub mod marks;
