@@ -55,7 +55,12 @@ impl Relief {
         let mut world = vec![[0.0f64; 2]; self.gw * self.gh];
         for gy in 0..self.gh {
             for gx in 0..self.gw {
-                let sx = (gx as f64 - 1.0) * STEP;
+                // Alternate rows by half a sample. A square grid turns every
+                // steep slope into aligned vertical ribbons at terminal
+                // resolution; this triangular grid has the same sample count
+                // and spacing but no screen-wide column alias.
+                let stagger = if gy & 1 == 0 { 0.0 } else { STEP * 0.5 };
+                let sx = (gx as f64 - 1.0) * STEP + stagger;
                 let sy = (gy as f64 - 1.0) * STEP * over - canvas.sh as f64 * (over - 1.0);
                 let w = vp.unproject([sx, sy]);
                 let (lon, lat) = world_to_lonlat(w[0], w[1]);
@@ -148,14 +153,32 @@ impl Relief {
 
                 let y0 = sp[1];
                 let y1 = sp_near[1].max(y0);
+                let span = (y1 - y0).max(1.0);
+                // Paint only a short hatch towards the nearer sample. Filling
+                // the entire occlusion ribbon produced screen-high columns on
+                // steep ground: correct geometry, but a curtain rather than a
+                // hill. A capped stroke keeps slope direction without the
+                // alias; the z-buffer still receives the complete ribbon below.
+                let paint_to = y0 + (y1 - y0).min(2.5);
+                let mut py = y0;
+                while py <= paint_to {
+                    let t = (py - y0) / span;
+                    let x = sp[0] + (sp_near[0] - sp[0]) * t;
+                    canvas.splat(x, py, alpha, &brush);
+                    py += 1.0;
+                }
                 let mut y = y0;
                 while y <= y1 {
-                    canvas.splat(sp[0], y, alpha, &brush);
+                    // Join the projected samples, not merely their y values.
+                    // With the stagger above, fixing x here would recreate the
+                    // vertical ribbons the sampling pattern exists to remove.
+                    let t = (y - y0) / span;
+                    let x = sp[0] + (sp_near[0] - sp[0]) * t;
                     // The ribbon is opaque ground whether or not the stipple
                     // happened to paint here, so claim both subpixel columns
                     // it spans. Otherwise roads behind a ridge leak through the
                     // gaps between dots.
-                    let xi = sp[0] as isize;
+                    let xi = x as isize;
                     canvas.occlude_at(xi, y as isize, depth);
                     canvas.occlude_at(xi + 1, y as isize, depth);
                     y += 1.0;
