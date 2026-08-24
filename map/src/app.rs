@@ -258,7 +258,8 @@ impl App {
     /// Point the camera somewhere else for one frame, and remember where it was.
     ///
     /// So a second view of the same world costs a viewport rather than a second
-    /// `App` -- which would be a second copy of the terrain, and that is 111 MB.
+    /// `App` -- which would be a second tile cache, and that is most of what a
+    /// map session costs.
     /// The pending flags go with it: the tour's opening descent is framed
     /// against whatever the viewport was the first time it is drawn, and a
     /// thumbnail is the wrong size to frame a country against.
