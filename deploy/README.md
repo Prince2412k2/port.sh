@@ -458,238 +458,88 @@ built into the binary, and the compose file mounts all three. Edit, then
 
 ## The chat section
 
-`ask` runs `opencode acp` inside the container. The binary is in the image; what
-it needs from you is a provider key. Put one in a `.env` file beside
-`docker-compose.yml`:
+`ask` runs `envoy`, which is in the image. What it needs from you is a
+credential, and **it will not go and get one**: `parley::auth` opens with
+"credentials, read rather than obtained", and means it. Logging in is an
+operator's job. A browser callback on localhost means nothing to somebody
+reached over SSH, and a visitor to a portfolio is not going to be handed an
+OAuth prompt — so nothing in the running program opens a browser or waits on a
+device code. It reads what is already on disk and keeps it fresh.
+
+With nothing on disk the section says the agent would not start and every
+other section carries on working. That is the intended failure: a missing
+credential should cost one tab, not the site.
+
+Two tiers, in `ai-sdk/envoy.json`, tried in order. They sign up differently.
+
+### Ollama Cloud — the one to do first
+
+An API key from [ollama.com](https://ollama.com), and nothing else:
 
 ```
-OPENCODE_API_KEY=...
-```
-
-With no key the section reports that the agent would not start and every other
-section carries on working. That is the intended failure: a missing key should
-cost one tab, not the site.
-
-**Which tier.** `portfolio/data/models.txt` holds tiers, not a flat list, and
-they are tried in order:
-
-1. **github copilot** — a seat that is already paid for.
-2. **opencode zen** — free, and free means a daily allowance rather than a
-   guarantee.
-3. **ollama cloud** — the backstop, slower and still an answer.
-
-A background check runs once an hour and settles which tier sessions start on,
-so nobody has to discover a dead one mid-question. Within the chosen tier the
-lazy fallback still applies: a model that fails is dropped and the next is
-asked the same question. Both layers exist because a tier can go down between
-checks and the visitor should not pay for that either.
-
-The check is one real one-word question to one model — the only thing that
-distinguishes *configured* from *answering*, since a listed model can be out of
-quota, unauthenticated, or withdrawn and all of those look fine until you ask.
-The walk stops at the first tier that answers, so a normal hour costs a single
-`ping`. Change the interval with `PORTFOLIO_PROBE_SECS`.
-
-To see the current state, without waiting an hour:
-
-```bash
-docker compose exec portfolio portfolio --probe
-```
-
-That prints the tiers, runs one check, and says which one it would use. It is
-the same code the server runs on its timer.
-
-**Logging Copilot in.** The Copilot tier runs Copilot's own ACP server
-(`copilot --acp`) rather than opencode's Copilot provider, so it authenticates
-Copilot's way, not opencode's. It will not open a session until it has: it
-answers `session/new` with `Authentication required` and advertises
-`copilot-login` in the handshake. Two ways in, and either is enough.
-
-A token, which needs no login step and no interactive terminal:
-
-```bash
-# .env beside docker-compose.yml — compose reads it, git does not get it
-GH_TOKEN=github_pat_...
-```
-
-A fine-grained PAT with the **Copilot Requests** permission. `GH_TOKEN` wins
-over `GITHUB_TOKEN` if both are set.
-
-Or interactively, once:
-
-```bash
-docker compose exec -it portfolio copilot login
-```
-
-That credential lands in the `agent` volume via `COPILOT_HOME=/app/agent/copilot`,
-and both services share it. Keep that volume, and keep `COPILOT_HOME` pointed
-into it: Copilot defaults its config directory to `~/.copilot`, and `HOME` here
-is the tmpfs — where a login works perfectly until the first restart and then
-silently drops the whole tier. The opencode credential learned this the same way.
-
-To check which way it went, and whether it took:
-
-```bash
-docker compose exec -T portfolio portfolio --probe
-```
-
-**Copilot unpacks itself, and needs somewhere real to do it.** `copilot` is a
-Node single-executable: on first run it extracts ~209 MB to
-`$XDG_CACHE_HOME/copilot/pkg/…`. The tmpfs fails that twice over — 64 MB is far
-too small, and even given room the tmpfs is `noexec`, so loading the native
-`runtime.node` fails with `failed to map segment from shared object`. Raising
-the tmpfs size fixes only the first half, and costs RAM against a 512 MB limit.
-
-So `XDG_CACHE_HOME` is on the `agent` volume. If you ever move it back to
-scratch, Copilot fails at spawn with a wall of
-`TAR_ENTRY_ERROR(ENOSPC): no space left on device` — which reads like a full
-disk and is not one. Check the *mount*, not `df` on the host.
-
-The unpacking happens once per volume, not per restart. The very first run pays
-for it, so a probe against a freshly created volume can time out and report the
-tier down; the next one will not.
-
-**Our own agent is the first tier.** `envoy`, from `ai-sdk/` in this
-repository: it speaks the same ACP over stdio as the others, and the turn loop,
-the tool calls and the compaction are all code somebody here can fix. It is
-built into the image by its own `cargo build` -- a separate workspace, so a
-broken experiment in there cannot stop the portfolio compiling.
-
-Two things about it are unlike the other tiers, and both are lines in
-`models.txt`:
-
-- `pin flag --model` -- it takes the model as a flag and refuses to start when
-  no tier in its own catalogue matches, which is a loud failure rather than a
-  quiet fall back to something else.
-- `tools env ENVOY_MCP_HTTP` -- it does not advertise `mcpCapabilities.http`, so
-  it cannot be handed our tool server in `session/new` the way opencode and
-  Copilot are. It reads the address out of that variable instead. **Without that
-  line the map and web tools do not exist on this tier and nothing says so** --
-  the agent simply never mentions a map.
-
-Its model catalogue is `ai-sdk/envoy.json`, mounted at `/app/data/envoy.json`
-and pointed at by `ENVOY_CONFIG`. That file is the only place endpoints, context
-windows and credentials live; `models.txt` says which tiers to try and in what
-order. Two catalogues that can disagree about which models exist would be worse
-than one in a second file.
-
-Its credential is the **opencode login already on the volume** -- the catalogue
-names it `$XDG_DATA_HOME/opencode/auth.json`, which resolves to
-`/app/agent/opencode/auth.json` here and to `~/.local/share/opencode/auth.json`
-on a laptop. So `opencode auth login` (pick openai) is the one step, and it
-serves both this tier and the one below it. Nothing needs to go in `.env`, and
-the tier declares `secrets none`: a key it does not use is a key it should not
-see.
-
-**It keeps no transcripts.** Its catalogue leaves `sessionDir` unset, so
-`loadSession`, `resume` and `fork` are advertised as absent -- honestly, which is
-the point: with a store configured, every anonymous visitor's conversation would
-be written into one directory in the container, and its `session/list` would
-enumerate all of them to whoever asked next. A directory per visitor would be the
-fix, and until there is one the answer is not to keep them. Visits are still
-logged, as they always were -- see *Who came*.
-
-To check it end to end rather than by reading:
-
-```bash
-portfolio --probe                 # says which tier is answering, and via what
-portfolio --tools                 # prints a tool server URL and names every call
-```
-
-`--tools` is the one that answers "can that agent actually use them". Point an
-agent at the URL it prints; every call arrives named, with its arguments.
-
-**Keys for the other tiers.** Everything below Copilot is reached through
-opencode, which takes credentials two ways — an environment variable, or its own
-login. Either is enough.
-
-| tier | provider | variable |
-|---|---|---|
-| opencode zen | `opencode` | `OPENCODE_API_KEY` |
-| ollama cloud | `ollama-cloud` | `OLLAMA_API_KEY` |
-
-Put them in a `.env` beside `docker-compose.yml` — compose reads it on its own,
-and it is not a file to commit:
-
-```bash
+# .env beside docker-compose.yml
 OLLAMA_API_KEY=...
-OPENCODE_API_KEY=...
-EXA_API_KEY=...          # search_web, below
-JINA_API_KEY=...         # fetch_page, below
 ```
 
-Or log in instead, which writes to `auth.json` on the `agent` volume and so
-survives a restart:
+`docker compose up -d` and the tier is live. This is the whole signup, it
+backs two models, and it is the difference between a working ask tab today and
+an empty one.
+
+### Codex — a ChatGPT account, not an API key
+
+The first tier talks to `https://chatgpt.com/backend-api/codex`, which is
+reached with a **ChatGPT subscription's OAuth tokens** and not with a platform
+API key. There is nothing to paste into `.env`: the credential is a token pair
+in the file the Codex CLI writes.
+
+So it is made elsewhere and brought here:
 
 ```bash
-docker compose exec -it portfolio opencode auth login -p ollama-cloud
-docker compose exec -T  portfolio opencode auth list      # what it has
+# on a machine with a browser -- the OAuth callback is localhost, which is
+# exactly why this cannot be done over ssh on the server
+codex login
+cat ~/.codex/auth.json          # {"tokens":{"access_token":…,"refresh_token":…}}
+
+# onto the agent volume, where envoy.json points: $HOME/codex/auth.json,
+# and HOME is /app/agent
+docker compose cp ~/.codex/auth.json portfolio:/app/agent/codex/auth.json
+docker compose restart portfolio portfolio-web
 ```
 
-**`ollama-cloud`, not `ollama`.** There is no plain `ollama` provider in the
-registry opencode reads: the local daemon and the hosted service are one name in
-Ollama's own tooling and two different things here. A key from ollama.com goes to
-`https://ollama.com/v1` directly, which is what `ollama-cloud` talks to. The
-`-cloud` suffix on model ids (`gpt-oss:120b-cloud`) belongs to the *local*
-daemon proxying hosted models, and means nothing here — this image has no daemon.
-Use the bare id, `ollama-cloud/gpt-oss:120b`.
+**A refresh token has one owner, and that is the issuer's rule rather than
+ours.** It is rotated the moment it is exchanged, so the copy that was not the
+one to exchange it is dead. Envoy only refreshes when the token is nearly
+expired — the point at which the other copy was about to stop working anyway —
+and takes whichever of the two was issued more recently, so it heals in both
+directions. What it cannot do is make one login serve two programs for ever. If
+you also use `codex` on your laptop against the same account, expect one of
+them to need signing in again; give the server its own login if that matters.
 
-opencode still serves the zen and ollama tiers underneath, and still has its own
-login (`opencode auth login <provider>`) if you ever point a tier at a provider
-that needs one.
+Its renewed copy goes to `$ENVOY_AUTH_STORE`, which the image points at
+`/app/agent/envoy` — on the volume, because a renewal written to scratch is a
+dead credential at the next restart. Never write back to the seed file: that
+one belongs to whoever made it, and they may be writing it at the same moment.
 
-**Its own web tools.** The section used to be able to look something up only
-when the answering server happened to bring web tools of its own: Copilot's seat
-does, most of the free models do not. So two of them are ours now, served from
-this process like the map tools — `search_web` (Exa) and `fetch_page` (Jina's
-reader) — and every tier has them.
+### Which one answered
 
-| what | variable | without it |
-|---|---|---|
-| search | `EXA_API_KEY` | `search_web` is not offered at all |
-| reading a page | `JINA_API_KEY` | `fetch_page` is not offered at all |
+```bash
+docker compose exec portfolio-web portfolio --probe
+```
 
-Both go in the same `.env`. Neither is handed to an agent: no tier declares them,
-so `spawn_command` strips them from every agent's environment, and the only thing
-that spends them is this binary. **A search costs about seven tenths of a cent,**
-and the box takes any username, so the ceiling is compiled in with the rest of
-the policy — `gates.rs: web_calls`, twelve a conversation, counted per session
-and reported back to the agent in every reply so it can spend them deliberately.
-An empty variable counts as absent, which is what compose passes when the host
-has not set one.
+That prints the tiers, runs one real one-word question, and says which would be
+used. It is the same code the server runs on its timer — the only thing that
+tells *configured* from *answering*, since a listed model can be out of quota,
+unauthenticated or withdrawn and all three look fine until something asks.
+`no agent tier answered` means neither of the above has been done.
 
-`portfolio --probe` prints whether each key is present, without printing it.
+A background check repeats it hourly so nobody discovers a dead tier mid-
+question, and within a tier a model that fails is dropped and the next is asked
+the same thing. Change the interval with `PORTFOLIO_PROBE_SECS`.
 
-**What it may do.** One table, `portfolio/src/gates.rs`, and everything else
-derives from it: the `clientCapabilities` in the ACP handshake, the server's own
-`tools` and `permission` blocks where it has them, and the check on every inbound
-request. It can fetch and search the web. It cannot run a shell, and that is not
-a close call: this box takes any username over SSH, so `bash` on it is arbitrary
-code execution for anyone who can type. Enforced three times over, because the
-first two layers are somebody else's code and one upstream rename from meaning
-nothing.
-
-A shut gate answers with a JSON-RPC error, not an empty result. Answering
-`terminal/create` with `{}` would tell the agent it has a terminal, and it would
-then read from it.
-
-`portfolio --probe` prints the gates the running binary was built with, along
-with which tier is answering.
-
-**Why compile time.** These gates decide whether a public server runs a shell for
-a stranger. A file on disk is one bad mount from being absent or empty — see the
-dangling-symlink incident — so turning one on is a rebuild and a redeploy. That
-is the right amount of friction for the question.
-
-**What it costs you.** Strangers' questions spend your tokens, and their
-searches spend real money. Three brakes, all in `gates.rs`: `turns` (twelve
-questions a connection), `tool_calls` (twenty-four a session) and `web_calls`
-(twelve searches or page reads a session). None of them stops a reconnect. If this gets found by something automated,
-the lever is `models.txt` — empty it and the section turns itself off.
-
-**Which server.** Any ACP server, not just opencode. A tier in `models.txt` may
-name a `command` and how the model is pinned; left out, it is `opencode acp`. The
-gates apply to all of them, so adding a server cannot widen what an agent may do.
+`portfolio/data/models.txt` is mounted, so the order of tiers and models can
+change without a rebuild. What a model *is* — endpoint, context window, which
+credential — lives in `ai-sdk/envoy.json`, also mounted, deliberately the only
+place that exists.
 
 ## Who came
 

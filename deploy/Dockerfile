@@ -63,7 +63,7 @@ RUN apt-get update \
 # A system account with no shell, purely so the process is not root. Nothing
 # ever logs into it -- there is no login path here at all any more.
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin portfolio \
- && mkdir -p /app/keys /app/messages /app/agent/codex \
+ && mkdir -p /app/keys /app/messages /app/agent/codex /app/agent/envoy \
  && chown -R portfolio:portfolio /app/keys /app/messages /app/agent
 
 WORKDIR /app
@@ -96,6 +96,20 @@ ENV PORTFOLIO_VISITS=/app/messages/visits.jsonl
 # silently drops the tier. This was set twice for a while, tmpfs first, and the
 # second one quietly winning is not a thing to leave lying around.
 ENV HOME=/app/agent
+
+# Where envoy keeps its own copy of a renewed token pair.
+#
+# It never writes back to the login it was seeded from -- that file belongs to
+# whoever made it -- so it needs one writable path of its own, and on this
+# image there is exactly one: the agent volume. Left unset it would work out at
+# `$HOME/.local/share/envoy`, which is also on the volume and also correct, and
+# is a hidden directory nobody would think to look in. This is the same place
+# `parley::auth::keep_for` is documented against.
+#
+# It has to persist. The issuer rotates a refresh token every time it is
+# exchanged, so a renewal that is written to scratch means the copy on disk is
+# dead at the next restart and the tier is gone with it.
+ENV ENVOY_AUTH_STORE=/app/agent/envoy
 ENV ENVOY_CONFIG=/app/data/envoy.json
 
 # The image is both services. ENTRYPOINT is the binary alone and the flags
