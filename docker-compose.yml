@@ -123,9 +123,9 @@ services:
     # `mem_limit` rather than `deploy.resources.limits`: the `deploy` key is a
     # Swarm construct and this Compose version reconciles it against
     # `pids_limit` at the top level, refusing to start when the two disagree.
-    cpus: 1.5
-    mem_limit: 512M
-    pids_limit: 256
+    cpus: 3
+    mem_limit: 9G
+    pids_limit: 512
 
     # No writable filesystem at all, and no added capabilities. There used to
     # be both -- sshd needed a privilege-separation directory and a handful of
@@ -220,7 +220,7 @@ services:
       # PORTFOLIO_DAILY_VISITS: "24"
 
     cpus: 1.5
-    mem_limit: 512M
+    mem_limit: 1G
     pids_limit: 256
 
     read_only: true
