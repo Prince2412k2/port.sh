@@ -7,7 +7,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::about::About;
@@ -235,57 +235,175 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     }
 }
 
-/// The practical key map, grouped by where each key works.
+/// The key map, grouped by where each key works.
+///
+/// Grouped rather than listed, because the question somebody opens this with is
+/// "what can I do *here*" and not "what keys exist". The first group is the one
+/// that works everywhere; the rest are named after the section they belong to.
+type Group = (&'static str, &'static [(&'static str, &'static str)]);
+
+const KEYS: [Group; 6] = [
+    (
+        "anywhere",
+        &[
+            ("1 – 6", "open a section"),
+            ("0", "home"),
+            ("esc", "back, then home"),
+            ("click", "the rail up top"),
+            ("/", "this list"),
+            ("q", "quit"),
+        ],
+    ),
+    (
+        "experience",
+        &[
+            ("drag / wheel", "pan / zoom"),
+            ("n / b", "next place / back"),
+            ("?", "find a place"),
+            ("p", "layers"),
+        ],
+    ),
+    (
+        "projects",
+        &[
+            ("← → / h l", "browse"),
+            ("↑ ↓ / j k", "read"),
+            ("space / m", "motion / monochrome"),
+        ],
+    ),
+    (
+        "skills",
+        &[("drag / wheel", "move"), ("hover", "inspects a tile")],
+    ),
+    ("taste", &[("← → / wheel", "browse the loop")]),
+    (
+        "ask",
+        &[
+            ("enter", "send"),
+            ("shift-enter", "a new line"),
+            ("tab", "complete a command"),
+            ("shift ← →", "walk the route"),
+        ],
+    ),
+];
+
+/// One group after another, and how wide that came out.
+///
+/// The key column is measured per column rather than across the whole panel:
+/// `shift-enter` is eleven characters and `/` is one, and one width for both
+/// pushes every short key in the list a finger's width away from what it does.
+fn column(groups: &[Group]) -> (Vec<Line<'static>>, u16) {
+    let keys = groups
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    let mut width = 0;
+    for (i, (head, rows)) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        width = width.max(head.chars().count());
+        lines.push(Line::from(Span::styled(
+            *head,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+        for (k, v) in rows.iter() {
+            width = width.max(2 + keys + 2 + v.chars().count());
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {k:<keys$}  "), Style::default().fg(FG)),
+                Span::styled(*v, Style::default().fg(DIM)),
+            ]));
+        }
+    }
+    (lines, width as u16)
+}
+
 pub fn help(f: &mut Frame, area: Rect) {
-    let rows: [(&str, &str); 19] = [
-        ("navigation", ""),
-        ("1 – 6", "open a section; 0 is home too"),
-        ("click / esc", "open rail / local back, then home"),
-        ("/", "this list outside Ask"),
-        ("", ""),
-        ("experience", "a map you can actually drive"),
-        ("n b / ?", "previous-next place / find one"),
-        ("drag / wheel", "pan / zoom; p opens layers"),
-        ("projects", ""),
-        ("← → / h l", "browse; ↑ ↓ / j k read"),
-        ("space / m", "motion / monochrome"),
-        ("skills", ""),
-        ("drag / wheel", "move; hover inspects a tile"),
-        ("", ""),
-        ("taste", ""),
-        ("← → / wheel", "browse the seamless loop"),
-        ("ask", ""),
-        ("enter / shift-enter", "send / new line"),
-        ("tab / ctrl-alt-⌫", "complete / delete word / menu"),
-    ];
-    let w = 52.min(area.width.saturating_sub(4));
-    let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
+    // Two columns where there is room, because one column is thirty-one rows
+    // and the terminal this has to fit is twenty-four. Where to split is a
+    // search over five places rather than a number written down here, which is
+    // the only version of it that survives someone adding a key.
+    //
+    // Both constraints, not just the width. Checking the width alone is what it
+    // did first, and the split that fit sideways was four groups against two --
+    // so the panel was taller than the screen and quietly lost the last three
+    // rows off the bottom, which is the failure the whole thing exists to fix.
+    let gutter = 3u16;
+    let room = area.width.saturating_sub(6);
+    let tallest = area.height.saturating_sub(4);
+    let mut fits: Option<(usize, u16)> = None;
+    let mut nearest: Option<(usize, u16)> = None;
+    for at in 1..KEYS.len() {
+        let (left, lw) = column(&KEYS[..at]);
+        let (right, rw) = column(&KEYS[at..]);
+        if lw + gutter + rw > room {
+            continue;
+        }
+        let tall = left.len().max(right.len()) as u16;
+        if nearest.is_none_or(|(_, t)| tall < t) {
+            nearest = Some((at, tall));
+        }
+        if tall <= tallest && fits.is_none_or(|(_, t)| tall < t) {
+            fits = Some((at, tall));
+        }
+    }
+
+    // Nothing that fits both ways gets the one that clips least, which is still
+    // better than a single column and much better than the widest one.
+    let (columns, inner_w, inner_h) = match fits.or(nearest) {
+        Some((at, tall)) => {
+            let (left, lw) = column(&KEYS[..at]);
+            let (right, rw) = column(&KEYS[at..]);
+            (vec![(left, lw), (right, rw)], lw + gutter + rw, tall)
+        }
+        None => {
+            let (only, w) = column(&KEYS);
+            let h = only.len() as u16;
+            (vec![(only, w)], w, h)
+        }
+    };
+
+    // The frame is two rows and two columns, and there is a row of air inside
+    // it: a list that starts on the border reads as a list that has been cut
+    // off at the top.
+    let w = (inner_w + 4).min(area.width);
+    let h = (inner_h + 4).min(area.height);
     let popup = Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
     };
     f.render_widget(Clear, popup);
-    f.render_widget(
-        Paragraph::new("").style(Style::default().bg(BG)),
-        popup,
-    );
 
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(k, v)| {
-            if v.is_empty() && !k.is_empty() {
-                Line::from(Span::styled(format!("  {k}"), Style::default().fg(ACCENT)))
-            } else {
-                Line::from(vec![
-                    Span::styled(format!("  {k:<18}"), Style::default().fg(FG)),
-                    Span::styled(v.to_string(), Style::default().fg(DIM)),
-                ])
-            }
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines), popup);
+    let frame = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(FAINT))
+        .style(Style::default().bg(BG))
+        .title(Span::styled(
+            " keys ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(
+            Line::from(Span::styled(" esc closes ", Style::default().fg(DIM))).right_aligned(),
+        );
+    let inside = frame.inner(popup);
+    f.render_widget(frame, popup);
+
+    let mut x = inside.x + 1;
+    for (lines, width) in columns {
+        let at = Rect {
+            x,
+            y: inside.y + 1,
+            width: width.min(inside.right().saturating_sub(x)),
+            height: inside.height.saturating_sub(1),
+        };
+        f.render_widget(Paragraph::new(lines), at);
+        x += width + gutter;
+    }
 }
 
 #[cfg(test)]
@@ -350,20 +468,47 @@ mod tests {
         assert_eq!(c.art, 0, "hung a portrait in 14 rows");
     }
 
+    /// Every key in the list is on the screen, at the size that has the least
+    /// screen to give.
+    ///
+    /// The panel lays itself out -- it picks a split, and the split decides how
+    /// tall it is -- so the way it fails is not an error but a missing row. It
+    /// chose a four-against-two split once because that was the only one narrow
+    /// enough, went five rows past the bottom of an eighty-by-twenty-four
+    /// terminal, and lost `hover`, `taste` and half of `ask` with nothing to say
+    /// so. Reading the keys back off the buffer is the only check that notices.
     #[test]
     fn the_key_map_fits_a_standard_terminal() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                help(frame, area);
-            })
-            .unwrap();
-        let plain = termap::snapshot::plain(terminal.backend().buffer());
-        assert!(plain.contains("1 – 6"));
-        assert!(plain.contains("complete / delete word / menu"));
+        for (w, h) in [(80, 24), (100, 30), (120, 40), (200, 56)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    help(frame, area);
+                })
+                .unwrap();
+            let plain = termap::snapshot::plain(terminal.backend().buffer());
+
+            for (head, rows) in KEYS {
+                assert!(plain.contains(head), "{w}x{h}: `{head}` is missing:\n{plain}");
+                for (key, what) in rows {
+                    assert!(plain.contains(key), "{w}x{h}: `{key}` is missing:\n{plain}");
+                    assert!(
+                        plain.contains(what),
+                        "{w}x{h}: `{key}` has lost `{what}`:\n{plain}"
+                    );
+                }
+            }
+
+            // And the frame closed, which is the other half of "it fits": a
+            // panel taller than the screen loses its bottom border first.
+            assert!(
+                plain.contains('╰') && plain.contains('╯'),
+                "{w}x{h}: the panel has no bottom:\n{plain}"
+            );
+        }
     }
 }
