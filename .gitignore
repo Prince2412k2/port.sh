@@ -3,6 +3,11 @@ target/
 __pycache__/
 .claude
 
+# The box's own compose overlay: which proxy network to join, which port to
+# publish. Belongs to the machine, not to the project, and reset --hard leaves
+# it alone the same way it leaves .env alone.
+docker-compose.override.yml
+
 # Credentials. The deployment reads GH_TOKEN, OLLAMA_API_KEY and friends from
 # here, so this file is the one thing in the tree that must never be committed.
 # It was untracked and unignored for a while, which is one `git add .` away from

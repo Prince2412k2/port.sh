@@ -7,7 +7,7 @@ docker compose up -d --build
 Two ways in, one program:
 
 ```bash
-ssh -p 2222 your-host          # terminal-native
+ssh -p 2222 your-host          # terminal-native; 22 in the deployment below
 open http://127.0.0.1:8222     # the same thing, in a browser
 ```
 
@@ -44,39 +44,80 @@ it up on its own.
 
 Only the web side is proxied. Caddy needs one block and no WebSocket
 configuration — it upgrades them itself, and it sets `X-Forwarded-For`, which
-is where the visitor log and the per-address limits get the address from:
+is where the visitor log and the per-address limits get the address from.
 
-```caddy
-prince.dev {
-        reverse_proxy 127.0.0.1:8222
-}
-```
-
-If your Caddy is itself in Docker, do not publish the port at all. Put both on
-one network and point it at the service:
+For a Caddy that is itself in Docker on a shared network — put this service on
+that network, publish nothing, and let Caddy reach it by name:
 
 ```yaml
-# docker-compose.override.yml
+# docker-compose.override.yml on the box, untracked like .env
 services:
-  web:
+  portfolio:
+    # Host 22 to the container's 2222. The process inside stays unprivileged;
+    # only the published port is the privileged one.
+    ports: !override ["22:2222"]
+  portfolio-web:
     ports: !reset []
-    networks: [caddy]
+    networks: [caddy-proxy]
 networks:
-  caddy:
+  caddy-proxy:
     external: true
 ```
 
 ```caddy
-prince.dev {
-        reverse_proxy terminal-web-1:8222
+port.sniffkin.tech {
+        reverse_proxy portfolio-web:8222
+
+        encode gzip zstd
+
+        header {
+                Strict-Transport-Security "max-age=31536000; includeSubDomains"
+                X-Content-Type-Options "nosniff"
+                X-Frame-Options "SAMEORIGIN"
+                Referrer-Policy "strict-origin-when-cross-origin"
+        }
+
+        log {
+                output stdout
+                format console
+        }
+}
+```
+
+For a Caddy on the host instead, leave the port published on loopback — which
+is the default — and point at that:
+
+```caddy
+port.sniffkin.tech {
+        reverse_proxy 127.0.0.1:8222
 }
 ```
 
 Either way the page notices it arrived over TLS and opens a `wss://` socket
 rather than a `ws://` one. There is nothing to configure for that.
 
-SSH is not proxied and cannot be. Open 2222 in the firewall, or move it with
-`SSH_BIND=0.0.0.0:22` if nothing else on the box wants 22.
+**The service is `portfolio-web`, not `web`.** A compose service name is a DNS
+alias on every network it joins, so two containers called `web` on one proxy
+network are two answers to the same question and Docker picks one per lookup.
+If something else on that network is already `web`, both sites break
+intermittently and neither log says why. Renaming ours was cheaper than
+debugging that once.
+
+### SSH cannot go through Caddy
+
+Caddy is an HTTP server. Publishing `22:22` on the Caddy container does
+nothing for this: stock `caddy:2` has no layer4 module, and a Caddyfile made
+of site blocks never listens on 22 at all. There is also nothing to gain —
+there is no TLS to terminate on an SSH stream and no hostname in it to route
+on.
+
+So SSH is published straight from this container, which is what the override
+above does, and the `22:22` line comes off the Caddy service.
+
+**Check what has 22 first.** `ss -lntp | grep :22` — if the host's own sshd is
+there, moving it is a thing to do carefully and from a second session you keep
+open, because getting it wrong is being locked out of the box. Nothing here
+needs 22: `ssh -p 2222` is a working answer and the default.
 
 ### Going live
 
@@ -86,7 +127,7 @@ In order, because two of these are one-way:
    fingerprint and publish the `SSHFP` line beside it. Do this before anybody
    connects: the alternative is asking people who already trusted a key to
    trust a different one. Never delete the `hostkey` volume.
-2. **`docker compose exec web /usr/local/bin/portfolio --probe`.** It prints
+2. **`docker compose exec portfolio-web /usr/local/bin/portfolio --probe`.** It prints
    which agent tier answered. `no agent tier answered` means the ask section
    will tell visitors so, politely, and everything else works — see **The chat
    section** for logging the agent in.
@@ -230,9 +271,10 @@ switch disables itself and everything else carries on. Turning the tube on
 also swaps xterm to its canvas renderer, because a WebGL drawing buffer is
 not reliably readable as a texture from another context.
 
-Published on **2222** rather than 22, so this never has to fight whatever the
-host's own sshd is doing. `SSH_BIND=0.0.0.0:22` moves it once nothing else on
-the box wants that port.
+Published on **2222** by default, so this never has to fight whatever the
+host's own sshd is doing. `SSH_BIND=0.0.0.0:22` — or the override in *Putting
+it on the internet* — moves it to 22 once nothing else on the box wants that
+port, which is worth checking rather than assuming.
 
 ## Why there is no OpenSSH here
 

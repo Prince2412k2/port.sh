@@ -86,7 +86,7 @@ jobs:
           # And say so only once it is answering, because "compose returned 0"
           # and "the site is up" are different claims.
           for i in $(seq 1 30); do
-            if docker compose exec -T web /usr/local/bin/portfolio --health >/dev/null 2>&1; then
+            if docker compose exec -T portfolio-web /usr/local/bin/portfolio --health >/dev/null 2>&1; then
               echo "up: $(git rev-parse --short HEAD)"
               exit 0
             fi

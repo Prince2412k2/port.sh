@@ -150,7 +150,7 @@ services:
   # The same binary and the same image, serving the same sessions to a
   # browser instead of an SSH client. No pty, no subprocess, no shell -- the
   # far end of that WebSocket is the identical `Shell` the SSH path drives.
-  web:
+  portfolio-web:
     build:
       context: .
       dockerfile: deploy/Dockerfile
