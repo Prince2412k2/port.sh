@@ -249,7 +249,15 @@ fn main() -> io::Result<()> {
             "--ssh-port" => ssh_port = args.next().and_then(|v| v.parse().ok()).unwrap_or(ssh_port),
             "--host-key" => host_key = args.next(),
             "--section" => start = args.next(),
-            _ => {}
+            // Not silently. An unrecognised flag used to fall through to
+            // starting the app, so `--visitors` on a binary too old to have it
+            // opened the portfolio instead -- which is the least informative
+            // way a program can tell you it does not know a word.
+            other => {
+                eprintln!("portfolio: no such option `{other}`");
+                eprintln!("portfolio: try --help");
+                std::process::exit(2);
+            }
         }
     }
 
@@ -404,6 +412,42 @@ fn plain_text() -> io::Result<()> {
     // stale instead of two that can quietly disagree.
     writeln!(out, "  {}", a.ssh.replacen("ssh ", "ssh -t ", 1))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every flag the deployment passes is one this binary knows.
+    ///
+    /// An unrecognised flag exits now rather than being ignored, which is the
+    /// right behaviour and turns a typo in `docker-compose.yml` into a
+    /// container that will not start. So the compose file and the help are
+    /// checked against each other here, where it costs nothing, rather than
+    /// there, where it costs the site.
+    #[test]
+    fn the_flags_the_deployment_passes_are_flags_this_understands() {
+        let compose = include_str!("../../docker-compose.yml");
+        let help = include_str!("main.rs");
+
+        let mut checked = 0;
+        for line in compose.lines() {
+            let line = line.trim();
+            if !line.starts_with("command:") && !line.starts_with("test:") {
+                continue;
+            }
+            for word in line.split(['"', ',', '[', ']']) {
+                let word = word.trim();
+                if !word.starts_with("--") {
+                    continue;
+                }
+                assert!(
+                    help.contains(&format!("\"{word}\"")),
+                    "docker-compose.yml passes `{word}`, which main.rs does not match on"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "found only {checked} flags to check; did the file move?");
+    }
 }
 
 fn setup() -> io::Result<Term> {
