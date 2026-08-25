@@ -354,15 +354,20 @@ const INDEX: &str = r##"<!doctype html>
      hover box on top of one looks like a browser that has landed on it. The
      brackets are the same idiom the rail uses two inches to the right. */
   #chrome {
-    position: absolute; top: 0; left: 0; z-index: 3;
-    display: flex; gap: 1ch;
+    position: absolute; top: 0; left: 0; height: 100%; z-index: 3;
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: flex-start; gap: .45em;
     /* Two columns in rather than hard against the edge. The tube bends the
-       corners away from the viewer, and the leftmost thing on the top row is
-       the thing that goes over the horizon first. */
+       edges away from the viewer, and the leftmost thing on the screen is the
+       first to go over the horizon. */
     padding: 0 1ch 0 2ch;
     font: 14px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
     line-height: 1.2;
+    /* The strip is as tall as the window so the switches can sit in the middle
+       of it, which would otherwise make the whole left edge unclickable. */
+    pointer-events: none;
   }
+  #chrome button { pointer-events: auto; }
   #chrome button {
     background: transparent; border: 0; padding: 0; margin: 0;
     font: inherit; cursor: pointer;
@@ -469,10 +474,92 @@ let gutter = -1;
 const sendGutter = () => {
   if (ws.readyState !== WebSocket.OPEN || !term.cols) return;
   const cell = screen.clientWidth / term.cols;
-  const cols = cell > 0 ? Math.ceil(switches.getBoundingClientRect().width / cell) : 0;
+  // `offsetWidth` rather than a measured rect, because the switches carry a
+  // transform of their own -- see `place` -- and what the app needs is the
+  // column they were laid out in, not the one the glass shows them in.
+  const cols = cell > 0 ? Math.ceil(switches.offsetWidth / cell) : 0;
   if (cols === gutter) return;
   gutter = cols;
   ws.send(`g${cols}`);
+};
+
+// ---------------------------------------------------------------------------
+// Where the switches are, and where they end up.
+//
+// They are painted into the frame and the frame is then bent, so the label a
+// visitor is looking at is not where the element that answers the click is.
+// Near the middle that is nothing; down the left edge, which is exactly where
+// these live, it is most of a character -- a subtle offset, and the kind that
+// makes a control feel broken without anybody being able to say why.
+//
+// So the paint and the hit-target are separated. `laidOut` is where each switch
+// was laid out, which is where it is painted; `place` then moves the element
+// itself to wherever that paint comes out on the glass.
+
+const laidOut = [];
+
+/// The shader reads the frame through `bend`: the fragment at `uv` shows the
+/// picture from `bend(uv)`. So something painted at `p` is *seen* at whichever
+/// uv bends to p -- the other direction, which has no closed form and does not
+/// need one. `bend` is barely more than the identity, so walking toward it four
+/// times lands well inside a pixel.
+const unbend = (u, v) => {
+  const s = tube.live();
+  const flags = Object.assign({}, SCREEN_BASE.flags, s.flags || {});
+  if (!flags.CURVE) return [u, v];
+  const n = Object.assign({}, SCREEN_BASE.nums, s.nums || {});
+  const bend = (x, y) => {
+    let px = x * 2 - 1;
+    let py = y * 2 - 1;
+    const kx = Math.abs(py) / n.CURVE_X;
+    const ky = Math.abs(px) / n.CURVE_Y;
+    px += px * kx * kx;
+    py += py * ky * ky;
+    return [px * 0.5 + 0.5, py * 0.5 + 0.5];
+  };
+  let x = u;
+  let y = v;
+  for (let i = 0; i < 4; i++) {
+    const [bx, by] = bend(x, y);
+    x += u - bx;
+    y += v - by;
+  }
+  return [x, y];
+};
+
+const place = () => {
+  const bent = tube.on && glass.clientWidth > 0 && glass.clientHeight > 0;
+  for (const it of laidOut) {
+    if (!bent) {
+      it.el.style.transform = 'none';
+      continue;
+    }
+    // The centre of the label, because a run of text does not bend uniformly
+    // and these are four characters wide. At that size the difference across
+    // one is under a tenth of a pixel.
+    const cx = (it.x + it.w / 2) / glass.clientWidth;
+    const cy = (it.y + it.h / 2) / glass.clientHeight;
+    const [ux, uy] = unbend(cx, cy);
+    const dx = (ux - cx) * glass.clientWidth;
+    const dy = (uy - cy) * glass.clientHeight;
+    it.el.style.transform = `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px)`;
+  }
+};
+
+/// Read the layout back, with the transforms off so it is the layout that is
+/// read and not the last answer this gave.
+const measure = () => {
+  laidOut.length = 0;
+  for (const el of switches.children) {
+    el.style.transform = 'none';
+  }
+  for (const el of switches.children) {
+    if (el.hidden) continue;
+    const at = el.getBoundingClientRect();
+    laidOut.push({ el, x: at.left, y: at.top, w: at.width, h: at.height });
+  }
+  place();
+  sendGutter();
 };
 
 // An id this browser keeps, so a returning visitor is recognised as one. Made
@@ -492,7 +579,7 @@ ws.onopen = () => {
   if (visitorId) ws.send('i' + visitorId);
   if (reducedMotion) ws.send('m1');
   sendSize();                       // the session waits for this one
-  sendGutter();
+  measure();
   term.focus();
 };
 ws.onmessage = (e) => term.write(new Uint8Array(e.data));
@@ -554,7 +641,12 @@ addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   // Debounced: dragging a window edge fires this continuously, and each one
   // costs a full redraw of a full-screen TUI.
-  resizeTimer = setTimeout(() => { fit.fit(); sendSize(); sendGutter(); tube.resize(); }, 120);
+  resizeTimer = setTimeout(() => {
+    fit.fit();
+    sendSize();
+    tube.resize();
+    measure();
+  }, 120);
 });
 
 // ---------------------------------------------------------------------------
@@ -603,8 +695,8 @@ const toggleFull = () => {
 const refit = () => {
   fit.fit();
   sendSize();
-  sendGutter();
   tube.resize();
+  measure();
   fullButton.setAttribute('aria-pressed', isFull() ? 'true' : 'false');
   term.focus();
 };
@@ -1511,18 +1603,14 @@ const tube = {
   // of their state. There is one arrangement of these words and one set of
   // rules for what colour they are, and both of them are in the stylesheet.
   switches() {
-    const box = switches.getBoundingClientRect();
-    if (!box.width || !glass.clientWidth) return;
+    if (!glass.clientWidth) return;
     const scale = this.size.w / glass.clientWidth;
     const ctx = this.sctx;
     ctx.textBaseline = 'top';
     ctx.font = `${14 * scale}px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
-    for (let i = 0; i < switches.children.length; i++) {
-      const el = switches.children[i];
-      if (el.hidden) continue;
-      const at = el.getBoundingClientRect();
-      ctx.fillStyle = getComputedStyle(el).getPropertyValue('--ink').trim() || '#3a3e46';
-      ctx.fillText(`[${el.textContent}]`, at.left * scale, at.top * scale);
+    for (const it of laidOut) {
+      ctx.fillStyle = getComputedStyle(it.el).getPropertyValue('--ink').trim() || '#3a3e46';
+      ctx.fillText(`[${it.el.textContent}]`, it.x * scale, it.y * scale);
     }
   },
 
@@ -1618,8 +1706,9 @@ const showScreen = () => {
   picker.textContent = s.id;
   picker.title = s.hint;
   // `one-piece` is six columns wider than `p22`, and the app is keeping that
-  // many columns clear for it.
-  sendGutter();
+  // many columns clear for it. The glass may bend differently too -- an
+  // aperture grille is flatter than a television and a panel is flat.
+  measure();
 };
 
 const setScreen = (id) => {
@@ -1646,8 +1735,11 @@ const setCrt = (on) => {
   button.setAttribute('aria-pressed', on ? 'true' : 'false');
   picker.hidden = !on;
   // The switch appears with the tube and goes with it, so the room it needs
-  // does too.
-  sendGutter();
+  // does too. `place` comes after the branch below rather than here, because
+  // whether these are being bent at all is `tube.on`, and that has not moved
+  // yet -- on the way out it does not move until the picture has finished
+  // going.
+  measure();
   try { localStorage.setItem('crt', on ? '1' : '0'); } catch (e) { /* private mode */ }
   if (on) {
     tube.on = true;
@@ -1661,6 +1753,7 @@ const setCrt = (on) => {
     // The renderer just changed under it, and a screen nobody has typed on
     // has nothing to repaint on its own.
     term.refresh(0, term.rows - 1);
+    place();
     tube.schedule();
   } else {
     // Going out is an animation, so everything it is drawn from has to stay
@@ -1672,6 +1765,7 @@ const setCrt = (on) => {
       glass.classList.remove('on');
       screen.classList.remove('shaded');
       switches.classList.remove('shaded');
+      place();
       useRenderer('webgl');
     };
     tube.wake();
