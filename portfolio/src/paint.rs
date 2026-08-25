@@ -58,7 +58,9 @@ pub const LIVELY: f64 = 9.0;
 
 /// Short of this a loop is over before it has registered as motion, so a plate
 /// too large to afford its share of the budget gets this much anyway and costs
-/// what it costs. At 6 fps it is eighteen frames: one whole pass.
+/// what it costs. At 6 fps it is eighteen frames, which is one whole pass of
+/// every animated plate in the file -- and `lively_for` will not go below one
+/// pass regardless, so this is the floor on the budget rather than on the loop.
 const LIVELY_MIN: f64 = 3.0;
 
 /// The plate the budget was set against, in cells: 64x24 for `LIVELY` seconds.
@@ -84,20 +86,38 @@ const LIVELY_CELLS: f64 = 64.0 * 24.0;
 /// — which keeps the megabyte-per-arrival figure roughly flat across the tiers
 /// instead of letting it scale with whatever size terminal somebody turned up
 /// with.
+///
+/// Rounded down to whole passes, which is the part that was wrong. The budget
+/// is a number of seconds and a loop is a number of frames, and they do not
+/// divide: every animated plate here is eighteen frames at 6 fps, so a pass is
+/// three seconds, and the budgets came out at 3.32, 3.98 and 7.11. Each of
+/// those stops the loop part of the way through a pass — and what `portrait_loop`
+/// does then is cut to the last frame, so the motion ran, jumped eleven frames
+/// in one step and froze. It read as a picture that was not looping at all,
+/// which is the truest thing anyone said about it.
+///
+/// Ending on the boundary means the frame it holds is the frame it was already
+/// showing, so there is nothing to see at the seam. Down rather than to the
+/// nearest, because the numbers above are a measurement of what an arrival
+/// costs and rounding up would spend more than was measured.
 pub fn lively_for(p: &portraits::Portrait) -> f64 {
-    if p.frames.len() <= 1 {
+    let n = p.frames.len();
+    if n <= 1 {
         return 0.0;
     }
     let cells = p.cols as f64 * p.rows as f64;
-    (LIVELY * LIVELY_CELLS / cells.max(1.0)).clamp(LIVELY_MIN, LIVELY)
+    let budget = (LIVELY * LIVELY_CELLS / cells.max(1.0)).clamp(LIVELY_MIN, LIVELY);
+    let pass = n as f64 / PORTRAIT_FPS;
+    pass * (budget / pass).floor().max(1.0)
 }
 
 /// Which frame is showing at `t`, looping while `alive` and holding after.
 ///
 /// The museum wants a loop for as long as somebody has just arrived at a work
-/// and then silence, which is neither "play once" nor "loop for ever". Holding
-/// the frame it happened to be on would stop mid-gesture, so it settles on the
-/// last one — the same place `portrait_frame` ends up.
+/// and then silence, which is neither "play once" nor "loop for ever". It holds
+/// the last frame afterwards, and `lively_for` only ever stops it at the end of
+/// a pass — so that is the frame it was on anyway, and the loop settles instead
+/// of snapping.
 pub fn portrait_loop(p: &portraits::Portrait, t: f64, alive: bool) -> &'static [portraits::Cell] {
     let n = p.frames.len();
     if n <= 1 {
@@ -338,7 +358,56 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
+    /// A loop that stops stops where a loop ends.
+    ///
+    /// The bug: the budget is seconds and a pass is frames, and they did not
+    /// divide. Every animated plate here is eighteen frames at 6 fps -- three
+    /// seconds -- and the budgets came out at 3.32, 3.98 and 7.11. So the loop
+    /// was cut a third of the way through a pass and `portrait_loop` held the
+    /// last frame, which meant eleven frames of movement in one step and then
+    /// nothing. It read as a picture that never looped at all.
+    #[test]
+    fn a_plate_stops_at_the_end_of_a_pass_and_not_part_way_through_one() {
+        for p in &portraits::PORTRAITS {
+            let n = p.frames.len();
+            if n <= 1 {
+                assert_eq!(lively_for(p), 0.0, "{}: a photograph is looping", p.id);
+                continue;
+            }
+            let pass = n as f64 / PORTRAIT_FPS;
+            let lively = lively_for(p);
+
+            // A whole number of passes, and at least one of them.
+            let passes = lively / pass;
+            assert!(
+                (passes - passes.round()).abs() < 1e-9 && passes >= 1.0,
+                "{} at {}x{}: {lively}s is {passes} passes of {pass}s",
+                p.id,
+                p.cols,
+                p.rows
+            );
+
+            // Which is to say: the frame it holds is the frame it was showing.
+            // A step before the end and a step after it are the same picture.
+            let last = portrait_loop(p, lively - 0.5 / PORTRAIT_FPS, true);
+            assert!(
+                std::ptr::eq(last, portrait_loop(p, lively, false)),
+                "{} jumps at the seam instead of settling",
+                p.id
+            );
+
+            // And it never spends more than the budget it was given.
+            let cells = p.cols as f64 * p.rows as f64;
+            let budget = (LIVELY * LIVELY_CELLS / cells).clamp(LIVELY_MIN, LIVELY);
+            assert!(
+                lively <= budget || passes == 1.0,
+                "{}: {lively}s is over the {budget}s budget",
+                p.id
+            );
+        }
+    }
 
     /// The panel has no edge to catch the eye on.
     ///
@@ -423,7 +492,6 @@ mod tests {
             .map_or(0u16, |(r, g, b)| r as u16 + g as u16 + b as u16);
         assert!(mid < 60, "an invisible panel still drew: {mid}");
     }
-    use super::*;
 
     /// portraits.rs is written by a Python script, so nothing but this checks
     /// that what it emitted is the shape the blitter indexes into. A frame
