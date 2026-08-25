@@ -8,8 +8,14 @@ Two ways in, one program:
 
 ```bash
 ssh -p 2222 your-host          # terminal-native
-open http://your-host:8080     # the same thing, in a browser
+open http://127.0.0.1:8080     # the same thing, in a browser
 ```
+
+That address is loopback on purpose. The web service speaks plain HTTP, so
+the only thing that should be able to reach it is whatever is terminating TLS
+in front of it — see **Putting it on the internet** below. SSH is published
+to the world, because there is no proxying an ssh session through a web
+server.
 
 No username needed for ssh. There is no OS account to name — the binary
 speaks SSH itself, so a login name is just a string in the handshake, and any
@@ -18,6 +24,108 @@ one (or none at all) is accepted.
 Two containers from one image, started with different flags. Separate on
 purpose: a crash or restart on one transport does not take the other down,
 and each gets its own resource ceiling.
+
+## Putting it on the internet
+
+The box needs Docker, a domain pointed at it, and something terminating TLS.
+It does not need a toolchain: the image builds itself.
+
+```bash
+git clone <this> /srv/terminal && cd /srv/terminal
+printf 'OLLAMA_API_KEY=...\nEXA_API_KEY=...\nJINA_API_KEY=...\n' > .env
+chmod 600 .env
+PMTILES=/srv/tiles/vector.pmtiles docker compose up -d --build
+```
+
+Put `PMTILES` in the `.env` too and every later `docker compose up -d` picks
+it up on its own.
+
+### In front of it
+
+Only the web side is proxied. Caddy needs one block and no WebSocket
+configuration — it upgrades them itself, and it sets `X-Forwarded-For`, which
+is where the visitor log and the per-address limits get the address from:
+
+```caddy
+prince.dev {
+        reverse_proxy 127.0.0.1:8080
+}
+```
+
+If your Caddy is itself in Docker, do not publish the port at all. Put both on
+one network and point it at the service:
+
+```yaml
+# docker-compose.override.yml
+services:
+  web:
+    ports: !reset []
+    networks: [caddy]
+networks:
+  caddy:
+    external: true
+```
+
+```caddy
+prince.dev {
+        reverse_proxy terminal-web-1:8080
+}
+```
+
+Either way the page notices it arrived over TLS and opens a `wss://` socket
+rather than a `ws://` one. There is nothing to configure for that.
+
+SSH is not proxied and cannot be. Open 2222 in the firewall, or move it with
+`SSH_BIND=0.0.0.0:22` if nothing else on the box wants 22.
+
+### Going live
+
+In order, because two of these are one-way:
+
+1. **`docker compose logs portfolio | grep ssh_host_key`.** Record the
+   fingerprint and publish the `SSHFP` line beside it. Do this before anybody
+   connects: the alternative is asking people who already trusted a key to
+   trust a different one. Never delete the `hostkey` volume.
+2. **`docker compose exec web /usr/local/bin/portfolio --probe`.** It prints
+   which agent tier answered. `no agent tier answered` means the ask section
+   will tell visitors so, politely, and everything else works — see **The chat
+   section** for logging the agent in.
+3. **Check the limits.** `--probe` prints them too. The defaults cap a day at
+   $10 of model spend and 24 visits an address; both are `.env` settings and
+   both matter the moment the URL is somewhere public.
+4. **`curl -sI https://prince.dev`** and then open it. Then
+   `ssh -p 2222 prince.dev`. Both paths run the same program, and either can
+   be broken while the other is fine.
+
+### Updating
+
+```bash
+git pull && docker compose up -d --build
+```
+
+The data, the host key, the messages and the agent's login are all volumes or
+binds, so none of them are touched. Text in `about.txt`, `taste.txt` and
+`places.txt` needs no build at all — see below.
+
+### One thing still outside
+
+The browser fetches xterm from `cdn.jsdelivr.net`, which is the only thing on
+the page that comes from anywhere but this box. If it does not arrive the page
+says so and points at the ssh line rather than showing a black rectangle, but
+that is a fallback and not a fix. Two ways to close it, whenever it is worth
+doing: pin what is fetched, which is a one-time job per version --
+
+```bash
+for f in xterm@5.3.0/lib/xterm.js xterm-addon-fit@0.8.0/lib/addon-fit.js; do
+  curl -sL "https://cdn.jsdelivr.net/npm/$f" |
+    openssl dgst -sha384 -binary | openssl base64 -A | sed "s|^|$f sha384-|"
+done
+```
+
+-- and put each hash in an `integrity=` on its tag, so a compromised CDN is a
+page that does not load rather than a page that runs somebody else's code. Or
+vendor the four files into the image and serve them from here, which ends the
+question but means tracking their releases by hand.
 
 ## The web terminal
 
@@ -63,9 +171,9 @@ switch disables itself and everything else carries on. Turning the tube on
 also swaps xterm to its canvas renderer, because a WebGL drawing buffer is
 not reliably readable as a texture from another context.
 
-Published on **2222** for now rather than 22, so this never has to fight
-whatever the host's own sshd is doing. Move it to 22 later by changing the
-left side of the `"2222:2222"` line in `docker-compose.yml`.
+Published on **2222** rather than 22, so this never has to fight whatever the
+host's own sshd is doing. `SSH_BIND=0.0.0.0:22` moves it once nothing else on
+the box wants that port.
 
 ## Why there is no OpenSSH here
 
@@ -150,8 +258,17 @@ bind-mounts them:
 | `india.tmhg` | terrain | flat ground, no relief |
 | `states.tmap` | state borders and names | search finds no states |
 
-If yours live elsewhere, edit the left-hand side of those three lines. The
-container reads them through `TERMAP_DATA`.
+`india.pmtiles` is the big one and the compose file takes its path from
+`$PMTILES`, so a box that already has that archive for something else does
+not need a second copy:
+
+```bash
+PMTILES=/srv/tiles/vector.pmtiles docker compose up -d
+```
+
+The other two are small enough to live in the checkout. If yours do not, edit
+the left-hand side of those lines. The container reads all of them through
+`TERMAP_DATA`.
 
 ## Editing the text without rebuilding
 

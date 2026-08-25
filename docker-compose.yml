@@ -23,7 +23,10 @@ services:
     command: ["--serve", "--ssh-addr", "0.0.0.0", "--ssh-port", "2222",
               "--host-key", "/app/keys/host_key"]
     ports:
-      - "2222:2222"
+      # Straight at the internet, because there is no proxying an ssh session
+      # through a web server. `SSH_BIND` is here for a box that already has
+      # something on 2222.
+      - "${SSH_BIND:-0.0.0.0:2222}:2222"
 
     volumes:
       # The host key, generated on first run. Keep this volume: it is what
@@ -34,12 +37,16 @@ services:
       # in the image; without them the map section says so rather than drawing
       # the wrong city.
       #
-      # The basemap is bound straight from map-data/ rather than through the
+      # The basemap is bound straight from a real file rather than through the
       # symlink that used to sit at map/data/india.pmtiles. A bind source is
       # resolved by the daemon, so when that symlink's target went away Docker
       # tried to *create* the path and the whole stack refused to start:
       # `mkdir ...india.pmtiles: file exists`. A real file cannot fail that way.
-      - ./map-data/vector.pmtiles:/app/data/india.pmtiles:ro
+      #
+      # Overridable because the archive is 1.7 GB and a box that already has
+      # one for something else should not be made to keep two. Point `PMTILES`
+      # at wherever it lives; the default is the checkout, for working locally.
+      - ${PMTILES:-./map-data/vector.pmtiles}:/app/data/india.pmtiles:ro
       - ./map/data/india.tmhg:/app/data/india.tmhg:ro
       - ./map/data/states.tmap:/app/data/states.tmap:ro
 
@@ -150,12 +157,20 @@ services:
     restart: unless-stopped
     command: ["--web", "--web-addr", "0.0.0.0", "--web-port", "8080"]
     ports:
-      - "8080:8080"
+      # Loopback by default: this speaks plain HTTP, so the only thing that
+      # should be able to reach it is the thing terminating TLS in front of it.
+      # Published on 0.0.0.0 it is a way around that proxy, and the page tells
+      # a browser to open `ws://` rather than `wss://` when it is reached that
+      # way, which is a downgrade nobody asked for.
+      #
+      # A proxy that runs in Docker rather than on the host does not need this
+      # published at all -- put both on one network and point it at `web:8080`.
+      - "${WEB_BIND:-127.0.0.1:8080}:8080"
 
     volumes:
       # No host key here: nothing on this path is authenticated, so there is
       # nothing to persist between restarts.
-      - ./map-data/vector.pmtiles:/app/data/india.pmtiles:ro
+      - ${PMTILES:-./map-data/vector.pmtiles}:/app/data/india.pmtiles:ro
       - ./map/data/india.tmhg:/app/data/india.tmhg:ro
       - ./map/data/states.tmap:/app/data/states.tmap:ro
       - ./portfolio/data/about.txt:/app/data/about.txt:ro

@@ -408,6 +408,33 @@ const INDEX: &str = r##"<!doctype html>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js"></script>
 <script>
+// The one thing on this page that comes from somewhere else.
+//
+// If it did not arrive there is no terminal, and every line below this throws
+// on the first one -- which leaves a black rectangle and no explanation, and
+// the failure is not the visitor's to debug. jsdelivr is blocked outright in
+// some countries and merely down in the rest, so this is a state the page
+// reaches in production and not a theoretical one.
+//
+// The ssh line is the point: the same program is a connection away, and unlike
+// this one it depends on nothing but a socket.
+if (typeof Terminal === 'undefined') {
+  document.getElementById('hint').remove();
+  document.getElementById('chrome').remove();
+  const said = document.createElement('pre');
+  said.style.cssText =
+    'position:absolute;inset:0;display:flex;align-items:center;' +
+    'justify-content:center;margin:0;text-align:center;color:#c4c8ce;' +
+    'font:14px "DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
+  said.textContent =
+    'the terminal emulator this page needs did not load.\n\n' +
+    'it comes from cdn.jsdelivr.net, which is either blocked here or down.\n\n' +
+    'the same program, without the browser in the way:\n\n' +
+    '    ssh -p 2222 ' + location.hostname;
+  document.body.appendChild(said);
+  throw new Error('xterm did not load');
+}
+
 const term = new Terminal({
   allowProposedApi: true,
   cursorBlink: false,
@@ -1885,6 +1912,31 @@ mod tests {
         for sequence in [r"\x1b[13;2u", r"\x1b[127;5u", r"\x1b[127;3u"] {
             assert!(INDEX.contains(sequence), "browser does not send {sequence}");
         }
+    }
+
+    /// The page says something when the one thing it fetches does not arrive.
+    ///
+    /// xterm comes off a CDN, and a CDN is a thing that is blocked in some
+    /// countries and down in the rest. Every line of the client is written
+    /// against `Terminal` existing, so without it the first one throws and the
+    /// visitor gets a black rectangle and no reason for it -- and the reason is
+    /// not theirs to go and find. The check has to come before that first line,
+    /// which is what this pins.
+    #[test]
+    fn a_page_whose_terminal_did_not_arrive_says_so() {
+        let script = part("<script>\n// The one thing on this page", "</script>");
+        let guard = script
+            .find("typeof Terminal === 'undefined'")
+            .expect("nothing checks whether the terminal loaded");
+        let first_use = script
+            .find("new Terminal(")
+            .expect("the client stopped making a terminal");
+        assert!(
+            guard < first_use,
+            "the check for a missing terminal comes after the code that needs one"
+        );
+        // And it points at the way in that does not depend on a CDN at all.
+        assert!(script.contains("ssh -p 2222"), "the fallback offers no way in");
     }
 
     /// The text channel carries statements about the window and nothing else.
