@@ -43,6 +43,22 @@ SORTS = [
 ]
 
 
+def settle(s):
+    """Every question once, however it ended.
+
+    A question is logged when it is sent and again when it comes back, so the
+    ones that came back are already in `chat` with their answer or their
+    status. What is left in `sent` never returned at all, which is the
+    interesting kind and the kind that used to be invisible.
+    """
+    seen = {q for q, _, _ in s["chat"]}
+    for q in s["sent"]:
+        if q not in seen:
+            s["chat"].append((q, "", "unanswered"))
+            seen.add(q)
+    return s
+
+
 def read_log(path):
     """Every event, grouped into sessions. Bad lines are skipped."""
     sessions = {}
@@ -65,7 +81,7 @@ def read_log(path):
             s = sessions.setdefault(
                 sid,
                 {"at": 0, "name": "", "ident": "", "via": "", "ip": "", "client": "",
-                 "where": "", "secs": 0, "turns": 0, "chat": []},
+                 "where": "", "secs": 0, "turns": 0, "chat": [], "sent": []},
             )
             ev = e.get("event")
             if ev == "arrive":
@@ -77,14 +93,23 @@ def read_log(path):
                 s["client"] = e.get("client") or ""
             elif ev == "where":
                 s["where"] = ", ".join(
-                    x for x in (e.get("city"), e.get("region"), e.get("country")) if x
+                    dict.fromkeys(
+                        x for x in (e.get("city"), e.get("region"), e.get("country")) if x
+                    )
                 )
             elif ev == "ask":
-                s["chat"].append((e.get("q", ""), e.get("a", "")))
+                s["chat"].append((e.get("q", ""), e.get("a", ""), ""))
+            # Sent and returned are two lines. `ask` alone is only the ones
+            # that finished, so a session of cancelled questions would read as
+            # a session where nobody asked anything.
+            elif ev == "question_status":
+                s["chat"].append((e.get("q", ""), "", e.get("status", "")))
+            elif ev == "question":
+                s["sent"].append(e.get("q", ""))
             elif ev == "leave":
                 s["secs"] = e.get("secs", 0)
                 s["turns"] = e.get("turns", 0)
-    return [s for s in sessions.values() if s["at"]]
+    return [settle(s) for s in sessions.values() if s["at"]]
 
 
 def fold(sessions):
@@ -101,7 +126,7 @@ def fold(sessions):
         key = s["ident"] or f'anon:{s["ip"]}:{s["via"]}'
         p = people[key]
         p["visits"] += 1
-        p["asked"] += s["turns"] or len(s["chat"])
+        p["asked"] += len(s["chat"])
         p["secs"] += s["secs"]
         p["last"] = max(p["last"], s["at"])
         p["first"] = min(p["first"] or s["at"], s["at"])
@@ -173,7 +198,7 @@ class Reader:
                 hay = " ".join([
                     p["name"], p["ident"], p["via"], p["client"],
                     " ".join(sorted(p["wheres"])),
-                    " ".join(q for s in p["sessions"] for q, _ in s["chat"]),
+                    " ".join(q for s in p["sessions"] for q, _, _ in s["chat"]),
                 ]).lower()
                 return q in hay
             out = [p for p in out if hit(p)]
@@ -255,8 +280,10 @@ class Reader:
         lines.append(("", 0))
         for s in p["sessions"]:
             lines.append((f'{when(s["at"])}   {howlong(s["secs"])}   '
-                          f'{s["turns"] or len(s["chat"])} question(s)', 2))
-            for q, a in s["chat"]:
+                          f'{len(s["chat"])} question(s)', 2))
+            for q, a, status in s["chat"]:
+                if status:
+                    q = f"{q}  [{status}]"
                 lines.append((f"  > {q}", curses.A_BOLD))
                 for para in str(a).split("\n"):
                     para = para.rstrip()

@@ -544,33 +544,24 @@ place that exists.
 ## Who came
 
 Visits are logged, so there is an answer to the question a portfolio exists to
-ask: is anybody looking, and from where.
+ask: is anybody looking, and from where. Two readers, both in `bin/`:
 
 ```bash
-docker compose exec portfolio-web portfolio --visitors
+bin/visitors --docker      # interactive, folded by person
+bin/visits   --chats       # the conversations, in full
+bin/visits   --who alice   # one person, every visit and every question
+bin/visits   --places      # where they came from
 ```
 
-```text
-2026-08-24 19:33  ssh  prince  ·  203.0.113.7  ·  Ahmedabad, Gujarat, India  ·  8m14s  ·  3 questions  ·  visit 4
-      SSH-2.0-OpenSSH_9.6
-      how does the map actually work
-      why did you write your own ssh server   [cancelled]
-      what is netjail for   [unanswered]
+`--docker` copies the log out of the running container first, so neither tool
+needs to be in the image and the image needs no python.
 
-2026-08-24 19:43  web  w-mf3k2p-a91  ·  198.51.100.4  ·  Berlin, Germany  ·  1m02s  ·  no questions  ·  first time
-      Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Firefox/141.0
-
-3 visits  ·  1 returning  ·  4 questions  ·  2026-08-24 19:33 to 2026-08-24 19:48
-```
-
-A question appears once whatever became of it. Both halves are logged — when it
-is sent and when it comes back — so the plain read of the file shows every
-answered question twice, and `[cancelled]`, `[failed]` and `[unanswered]` are
-the three ways one does not finish. `open` in place of a duration is a visit
-still going, or one whose process was killed under it.
+A question appears once whatever became of it, marked `[cancelled]`,
+`[failed]` or `[unanswered]` when it did not finish. `[unanswered]` is the one
+that was sent and never came back at all.
 
 Underneath is append-only JSONL, beside the messages on the same volume, for
-anything the report does not answer:
+anything the readers do not answer:
 
 ```bash
 docker compose exec portfolio-web cat /app/messages/visits.jsonl | jq

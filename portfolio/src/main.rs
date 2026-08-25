@@ -69,7 +69,6 @@ fn main() -> io::Result<()> {
                 println!("  --at SECONDS     how far into the section's animation to draw");
                 println!("  --probe          check which agent tier is answering, and exit");
                 println!("  --health         process health check; prints ok and exits");
-                println!("  --visitors       who came, when, for how long and what they asked");
                 println!("  --tools          serve our tools and print what an agent calls, and");
                 println!("                   exit on ctrl-c. For pointing an agent at by hand");
                 println!();
@@ -108,10 +107,6 @@ fn main() -> io::Result<()> {
             }
             "--health" => {
                 println!("ok");
-                return Ok(());
-            }
-            "--visitors" => {
-                print!("{}", visits::report());
                 return Ok(());
             }
             "--plain" => {

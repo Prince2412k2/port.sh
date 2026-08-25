@@ -58,6 +58,22 @@ def find_log(explicit):
     )
 
 
+def settle(s):
+    """Every question once, however it ended.
+
+    A question is logged when it is sent and again when it comes back, so the
+    ones that came back are already in `chat` with their answer or their
+    status. What is left in `sent` never returned at all, which is the
+    interesting kind and the kind that used to be invisible.
+    """
+    seen = {q for q, _, _ in s["chat"]}
+    for q in s["sent"]:
+        if q not in seen:
+            s["chat"].append((q, "", "unanswered"))
+            seen.add(q)
+    return s
+
+
 def load(path, days):
     """Group every event by session. Bad lines are skipped, not fatal."""
     cutoff = time.time() - days * 86400 if days else 0
@@ -77,6 +93,7 @@ def load(path, days):
             sid,
             {"id": sid, "at": 0, "who": "", "ident": "", "via": "", "ip": "",
              "client": "", "where": "", "secs": 0, "turns": 0, "chat": [],
+             "sent": [],
              "returning": False, "seen_before": 0},
         )
         ev = e.get("event")
@@ -91,15 +108,25 @@ def load(path, days):
             s["seen_before"] = e.get("seen_before") or 0
         elif ev == "where":
             s["where"] = ", ".join(
-                x for x in (e.get("city"), e.get("region"), e.get("country")) if x
+                dict.fromkeys(
+                    x for x in (e.get("city"), e.get("region"), e.get("country")) if x
+                )
             )
         elif ev == "ask":
-            s["chat"].append((e.get("q", ""), e.get("a", "")))
+            s["chat"].append((e.get("q", ""), e.get("a", ""), ""))
+        # A question is logged when it is sent and again when it comes back, so
+        # `ask` alone is only the ones that finished. Without these, a session
+        # where every question was cancelled reads as a session where nobody
+        # asked anything -- which is the opposite of what happened.
+        elif ev == "question_status":
+            s["chat"].append((e.get("q", ""), "", e.get("status", "")))
+        elif ev == "question":
+            s["sent"].append(e.get("q", ""))
         elif ev == "leave":
             s["secs"] = e.get("secs", 0)
             s["turns"] = e.get("turns", 0)
 
-    out = [s for s in sessions.values() if s["at"] >= cutoff]
+    out = [settle(s) for s in sessions.values() if s["at"] >= cutoff]
     out.sort(key=lambda s: s["at"], reverse=True)
     return out
 
@@ -146,12 +173,12 @@ def table(sessions):
             f"{s['via']:<5}"
             f"{cut(s['where'] or s['ip'] or '?', 25):<26}"
             f"{howlong(s['secs']):<8}"
-            f"{s['turns'] or len(s['chat']):<6}"
+            f"{len(s['chat']):<6}"
         )
         print(row + (WARM(back) if back else ""))
 
     people = {s["ident"] for s in sessions if s["ident"]}
-    asked = sum(s["turns"] or len(s["chat"]) for s in sessions)
+    asked = sum(len(s["chat"]) for s in sessions)
     print(DIM("─" * 83))
     print(
         f"{len(sessions)} visit(s), "
@@ -185,8 +212,9 @@ def chats(sessions, who):
         print(BOLD(head))
         if s["ident"]:
             print(DIM(f"  {s['ident']}"))
-        for q, a in s["chat"]:
-            print(f"  {CYAN('>')} {q}")
+        for q, a, status in s["chat"]:
+            mark = f"  {DIM('[' + status + ']')}" if status else ""
+            print(f"  {CYAN('>')} {q}{mark}")
             for para in str(a).split("\n"):
                 if para.strip():
                     print(f"    {para}")
@@ -206,7 +234,7 @@ def person(sessions, who):
         return
     first, last = mine[-1], mine[0]
     total = sum(s["secs"] for s in mine)
-    asked = sum(s["turns"] or len(s["chat"]) for s in mine)
+    asked = sum(len(s["chat"]) for s in mine)
     print(BOLD(name_of(last)))
     for label, value in [
         ("identity", last["ident"] or "(none offered)"),
