@@ -414,42 +414,6 @@ fn plain_text() -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    /// Every flag the deployment passes is one this binary knows.
-    ///
-    /// An unrecognised flag exits now rather than being ignored, which is the
-    /// right behaviour and turns a typo in `docker-compose.yml` into a
-    /// container that will not start. So the compose file and the help are
-    /// checked against each other here, where it costs nothing, rather than
-    /// there, where it costs the site.
-    #[test]
-    fn the_flags_the_deployment_passes_are_flags_this_understands() {
-        let compose = include_str!("../../docker-compose.yml");
-        let help = include_str!("main.rs");
-
-        let mut checked = 0;
-        for line in compose.lines() {
-            let line = line.trim();
-            if !line.starts_with("command:") && !line.starts_with("test:") {
-                continue;
-            }
-            for word in line.split(['"', ',', '[', ']']) {
-                let word = word.trim();
-                if !word.starts_with("--") {
-                    continue;
-                }
-                assert!(
-                    help.contains(&format!("\"{word}\"")),
-                    "docker-compose.yml passes `{word}`, which main.rs does not match on"
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked >= 6, "found only {checked} flags to check; did the file move?");
-    }
-}
-
 fn setup() -> io::Result<Term> {
     enable_raw_mode()?;
     let mut out = io::stdout();
@@ -489,4 +453,40 @@ fn install_panic_hook() {
         let _ = disable_raw_mode();
         prev(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every flag the deployment passes is one this binary knows.
+    ///
+    /// An unrecognised flag exits now rather than being ignored, which is the
+    /// right behaviour and turns a typo in `docker-compose.yml` into a
+    /// container that will not start. So the compose file and the help are
+    /// checked against each other here, where it costs nothing, rather than
+    /// there, where it costs the site.
+    #[test]
+    fn the_flags_the_deployment_passes_are_flags_this_understands() {
+        let compose = include_str!("../../docker-compose.yml");
+        let help = include_str!("main.rs");
+
+        let mut checked = 0;
+        for line in compose.lines() {
+            let line = line.trim();
+            if !line.starts_with("command:") && !line.starts_with("test:") {
+                continue;
+            }
+            for word in line.split(['"', ',', '[', ']']) {
+                let word = word.trim();
+                if !word.starts_with("--") {
+                    continue;
+                }
+                assert!(
+                    help.contains(&format!("\"{word}\"")),
+                    "docker-compose.yml passes `{word}`, which main.rs does not match on"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "found only {checked} flags to check; did the file move?");
+    }
 }
