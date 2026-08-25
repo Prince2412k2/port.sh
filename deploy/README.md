@@ -31,7 +31,7 @@ The box needs Docker, a domain pointed at it, and something terminating TLS.
 It does not need a toolchain: the image builds itself.
 
 ```bash
-git clone <this> /srv/terminal && cd /srv/terminal
+git clone <this> /opt/port.sh && cd /opt/port.sh
 printf 'OLLAMA_API_KEY=...\nEXA_API_KEY=...\nJINA_API_KEY=...\n' > .env
 chmod 600 .env
 PMTILES=/srv/tiles/vector.pmtiles docker compose up -d --build
@@ -159,44 +159,61 @@ runs in, and a runner is two Ubuntu releases ahead of that. A binary built
 against a newer glibc than its runtime does not start, and that is a thing you
 find out in production or not at all.
 
-Six secrets, in **Settings → Secrets and variables → Actions**:
-
-It runs `ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST <command>`, and every
-part of that is a secret:
+In **Settings → Secrets and variables → Actions**. It runs
+`ssh -p $PORT $USER@$HOST <command>`, from these:
 
 | secret | what |
 |---|---|
-| `DEPLOY_HOST` | the box, by name or address |
-| `DEPLOY_USER` | the account the checkout belongs to |
-| `DEPLOY_PORT` | **the box's own sshd.** No default — see below |
-| `DEPLOY_KEY` | the private half of a key made only for this |
-| `DEPLOY_KNOWN_HOSTS` | the box's *host* key, so the runner can tell it apart |
-| `DEPLOY_PATH` | the checkout. Optional; `/srv/terminal` if unset |
+| `HOST` | the box, by name or address |
+| `PORT` | **the box's own sshd.** No default — see below |
+| `USER` | the account the checkout belongs to |
+| `SSH_KEY` | the private half of a key made only for this. Not the `.pub` |
+| `KNOWN_HOSTS` | optional, and the only one about trust — see below |
 
-**`DEPLOY_PORT` has no default and that is deliberate.** It used to fall back
-to 22 — which, once this app is deployed on 22, is this app. An unset secret
-would have pointed the deploy at the portfolio's own ssh server rather than at
-the box. It refuses the command and the job fails, so nothing bad happens; it
-just happens for a reason nobody can read. Missing secrets are now named
-before the connection is attempted at all.
+The checkout path is not a secret and is not one of them: it is
+`DEPLOY_PATH: /opt/port.sh` at the top of the workflow, where it can be read
+without opening the settings page.
+
+**`PORT` has no default and that is deliberate.** It used to fall back to 22 —
+which, once this app is deployed on 22, is this app. An unset secret would
+have pointed the deploy at the portfolio's own ssh server rather than at the
+box. It refuses any command it does not recognise so the job fails, which is
+the right outcome reached by a route nobody can read. Every missing secret is
+now named before a connection is attempted at all.
 
 ```bash
 # on your machine: a key that does nothing else
 ssh-keygen -t ed25519 -f deploy -C 'github actions -> port.sh' -N ''
 
-# on the box: let it in, and let it do nothing but this
-echo "restrict $(cat deploy.pub)" >> ~/.ssh/authorized_keys
+# SSH_KEY is the private half -- the file with no extension
+cat deploy
 
-# the host key, so the deploy is not trusting whoever answers on that address
-ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST"
+# on the box: let the public half in, and let it do nothing but this
+echo "restrict $(cat deploy.pub)" >> ~/.ssh/authorized_keys
 ```
 
-Run that `ssh-keyscan` with **the same host and port the secrets hold**. A
-known_hosts entry is keyed by exactly what was typed: an address and a name
-for the same machine are two different entries, and a non-default port is
-recorded as `[host]:port`. Scanned one way and connected the other, the deploy
-fails on a host key it has never seen — which is the check working, and reads
-like the check being broken.
+### Pinning the box, or not
+
+`KNOWN_HOSTS` is the answer to "which machine is allowed to be that address".
+Set it and the runner talks to that host key and no other:
+
+```bash
+ssh-keyscan -p "$PORT" "$HOST"
+```
+
+Run that with **the same host and port the secrets hold**. A known_hosts entry
+is keyed by exactly what was typed: an address and a name for one machine are
+two different entries, and a non-default port is recorded as `[host]:port`.
+Scanned one way and connected the other, the deploy fails on a host key it has
+never seen — the check working, and reading exactly like the check being
+broken.
+
+Leave it unset and the deploy asks the address who it is and believes the
+answer, which is not a check. That is a real gap and the workflow says so in
+the log rather than hiding it behind `StrictHostKeyChecking=no`. It is also
+smaller than it sounds: ssh signs a challenge belonging to the session it is
+in, so an impostor cannot replay it against the real box or learn the key from
+it. What it would get is this command, and your deploy not happening.
 
 `restrict` turns off port forwarding, agent forwarding, X11 and pty allocation
 for that key. The deploy needs none of them.

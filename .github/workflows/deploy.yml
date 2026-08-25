@@ -27,6 +27,11 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
+env:
+  # Where the checkout is. Not a secret -- a path is not one, and keeping it
+  # here means the workflow can be read without opening the settings page.
+  DEPLOY_PATH: /opt/port.sh
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -35,19 +40,20 @@ jobs:
     steps:
       - name: Build and swap over, on the box
         env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.HOST }}
+          PORT: ${{ secrets.PORT }}
+          USER: ${{ secrets.USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          # Optional, and the only one of these that is about trust rather
+          # than address. See below.
+          KNOWN_HOSTS: ${{ secrets.KNOWN_HOSTS }}
         run: |
           set -euo pipefail
 
           # Named, so a missing one is a sentence rather than `ssh: Could not
           # resolve hostname : Name or service not known` three lines later.
           missing=
-          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_KEY DEPLOY_KNOWN_HOSTS; do
+          for v in HOST PORT USER SSH_KEY; do
             if [ -z "${!v:-}" ]; then
               echo "secret $v is not set" >&2
               missing=yes
@@ -59,23 +65,42 @@ jobs:
           fi
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy
           chmod 600 ~/.ssh/deploy
-          # Pinned, not disabled. `StrictHostKeyChecking=no` on a deploy is
-          # trusting whoever answers on that address to run a command as the
-          # deploy user -- and this project publishes an SSHFP record for its
-          # own host key precisely because that is not a thing to wave through.
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
 
-          # `DEPLOY_PORT` has no default on purpose. It used to fall back to 22,
-          # which is where this app's own ssh server now is -- so an unset
-          # secret would have pointed the deploy at the portfolio instead of at
-          # the box. It refuses the command and the job fails, which is the
+          # Who the box is allowed to be.
+          #
+          # With `KNOWN_HOSTS` set this is a pin: the runner talks to that host
+          # key and no other. Without it there is nothing to compare against,
+          # so the alternative is asking the address who it is and believing
+          # the answer -- which is not a check, and is said out loud here
+          # rather than hidden behind `StrictHostKeyChecking=no`.
+          #
+          # It matters less than it looks: ssh public-key auth signs a
+          # challenge for the session it is in, so an impostor cannot replay it
+          # against the real box or learn the key from it. What it would get is
+          # this command, and your deploy not happening. One secret closes it.
+          if [ -n "${KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "note: KNOWN_HOSTS is not set, so the box's identity is not" >&2
+            echo "      checked -- see deploy/README.md to pin it" >&2
+            ssh-keyscan -p "$PORT" "$HOST" > ~/.ssh/known_hosts 2>/dev/null || true
+          fi
+          chmod 600 ~/.ssh/known_hosts
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "no host key for $HOST port $PORT -- is the box reachable?" >&2
+            exit 1
+          fi
+
+          # `PORT` is the box's own sshd, and has no default on purpose: 22 is
+          # where this app's ssh server is once it is deployed, so a fallback
+          # would have pointed the deploy at the portfolio rather than at the
+          # machine. It refuses the command and the job fails, which is the
           # right outcome reached by an unreadable route.
           #
           # BatchMode so nothing can stop and wait for an answer nobody is
-          # there to give, and a timeout so an unreachable box is a minute
+          # there to give, and a timeout so an unreachable box costs a minute
           # rather than the job's whole budget.
           ssh -i ~/.ssh/deploy \
               -o IdentitiesOnly=yes \
@@ -83,9 +108,9 @@ jobs:
               -o UserKnownHostsFile=~/.ssh/known_hosts \
               -o BatchMode=yes \
               -o ConnectTimeout=15 \
-              -p "$DEPLOY_PORT" \
-              "$DEPLOY_USER@$DEPLOY_HOST" \
-              "DEPLOY_PATH='${DEPLOY_PATH:-/srv/terminal}' SHA='${{ github.sha }}' bash -s" <<'REMOTE'
+              -p "$PORT" \
+              "$USER@$HOST" \
+              "DEPLOY_PATH='${{ env.DEPLOY_PATH }}' SHA='${{ github.sha }}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           cd "$DEPLOY_PATH" || {
@@ -98,9 +123,9 @@ jobs:
           # mirror of main and not somewhere work happens, and a merge conflict
           # there is a deploy that hangs waiting for an editor nobody is at.
           #
-          # Deliberately no `git clean`: .env and anything else untracked on
-          # that box is configuration, and reset leaves it alone where clean
-          # would take the credentials with it.
+          # Deliberately no `git clean`: .env, docker-compose.override.yml and
+          # anything else untracked on that box is configuration, and reset
+          # leaves it alone where clean would take the credentials with it.
           git fetch --prune origin main
           git reset --hard "$SHA"
 
