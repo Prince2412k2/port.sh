@@ -9,6 +9,7 @@ mod browse;
 mod cert;
 mod coffee;
 mod context;
+mod crowd;
 mod emblems;
 mod gates;
 mod health;
@@ -52,7 +53,7 @@ fn main() -> io::Result<()> {
     let mut serve = false;
     let mut web = false;
     let mut web_addr = "0.0.0.0".to_string();
-    let mut web_port: u16 = 8080;
+    let mut web_port: u16 = 8222;
     let mut ssh_addr = "0.0.0.0".to_string();
     let mut ssh_port: u16 = 2222;
     let mut host_key: Option<String> = None;
@@ -79,7 +80,7 @@ fn main() -> io::Result<()> {
                 println!();
                 println!("  --web                    run the web terminal instead (same app, no shell)");
                 println!("  --web-addr ADDR          bind address for --web (default 0.0.0.0)");
-                println!("  --web-port PORT          bind port for --web (default 8080)");
+                println!("  --web-port PORT          bind port for --web (default 8222)");
                 println!();
                 println!("Environment:");
                 println!("  TERMAP_DATA              where the basemap and heightmap live");

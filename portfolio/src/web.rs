@@ -12,16 +12,19 @@
 //! A visitor cannot run a command here for the same reason they cannot run one
 //! over SSH -- the code path does not exist.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::http::HeaderMap;
-use axum::response::{Html, IntoResponse};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+
+use crate::crowd::{self, Crowd, Meter, Seat};
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::session;
@@ -30,13 +33,50 @@ use crate::session;
 /// sockets should not be a free way to grow the process without bound.
 const MAX_SESSIONS: usize = 128;
 
+/// And how many of those one address may hold.
+///
+/// This was missing, and a global ceiling on its own is not a limit: one
+/// address could hold all hundred and twenty-eight and the box would be full
+/// while being read by nobody.
+///
+/// Three rather than the ssh side's one. A browser is a thing people have two
+/// of -- a tab left on the map and another in the chat is a real way to read
+/// this -- and refusing the second is a bug from where the visitor is standing.
+/// Not many more than that: each one is a `Shell` and a tile cache.
+const PER_ADDRESS_SESSIONS: usize = 3;
+
+/// How often one address may start a session, and ask for the page.
+///
+/// A different question from the one above, and neither answers the other.
+/// Concurrency is what a visitor is holding and is given back when they leave;
+/// a rate is how often they turn up and is not. Something that connects and
+/// disconnects in a loop never holds two sessions and is still a load.
+///
+/// The page is its own reason: it is 62 KB of HTML, shaders included, and
+/// serving it is the cheapest thing here to ask for and not the cheapest to
+/// answer. Sixty a minute is far more than reading it takes and far less than
+/// a loop costs.
+const NEW_SESSIONS: usize = 12;
+const PAGE_READS: usize = 60;
+const WINDOW: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 struct Web {
     sessions: Arc<AtomicUsize>,
+    /// Who is here, by address.
+    here: Arc<Crowd>,
+    /// How fast they are arriving, by address.
+    starting: Arc<Meter>,
+    reading: Arc<Meter>,
 }
 
 pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
-    let state = Web { sessions: Arc::new(AtomicUsize::new(0)) };
+    let state = Web {
+        sessions: Arc::new(AtomicUsize::new(0)),
+        here: Arc::new(Crowd::default()),
+        starting: Arc::new(Meter::new(NEW_SESSIONS, WINDOW)),
+        reading: Arc::new(Meter::new(PAGE_READS, WINDOW)),
+    };
     let app = Router::new()
         .route("/", get(page))
         .route("/ws", get(upgrade))
@@ -54,8 +94,33 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn page() -> impl IntoResponse {
-    Html(INDEX)
+async fn page(
+    State(state): State<Web>,
+    ConnectInfo(socket): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    match crowd::key(client_ip(&headers, socket)) {
+        Some(key) if !state.reading.allow(&key, Instant::now()) => {
+            crate::visits::operational("warn", "web_page_refused", &key);
+            too_many()
+        }
+        _ => Html(INDEX).into_response(),
+    }
+}
+
+/// What a visitor over their limit is told.
+///
+/// A number rather than a closed door: `Retry-After` is the difference between
+/// a limit and a fault, and the one thing that lets a well-behaved client back
+/// off instead of retrying into it. Plain text because whoever reads this is
+/// either a script or somebody looking at a terminal.
+fn too_many() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("retry-after", "60")],
+        "too many requests from your address. try again in a minute.\n",
+    )
+        .into_response()
 }
 
 /// The visitor's address, preferring what a reverse proxy says over the socket.
@@ -64,7 +129,12 @@ async fn page() -> impl IntoResponse {
 /// would look like they came from the same machine. `X-Forwarded-For` is the
 /// first hop and is what the proxy was asked to pass along; it is trusted here
 /// because the only thing in front of this is one we put there.
-fn client_ip(headers: &HeaderMap, socket: SocketAddr) -> String {
+///
+/// An address rather than a string, so a header carrying something that is not
+/// one falls back to the socket instead of becoming a limit key of its own.
+/// Every unparseable value being its own key is every unparseable value having
+/// its own allowance.
+fn client_ip(headers: &HeaderMap, socket: SocketAddr) -> IpAddr {
     let trusted_proxy = match socket.ip() {
         std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
         std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
@@ -73,15 +143,14 @@ fn client_ip(headers: &HeaderMap, socket: SocketAddr) -> String {
         for h in ["x-forwarded-for", "x-real-ip"] {
             if let Some(v) = headers.get(h).and_then(|v| v.to_str().ok()) {
                 if let Some(first) = v.split(',').next() {
-                    let first = first.trim();
-                    if !first.is_empty() {
-                        return first.to_string();
+                    if let Ok(ip) = first.trim().parse() {
+                        return ip;
                     }
                 }
             }
         }
     }
-    socket.ip().to_string()
+    socket.ip()
 }
 
 async fn upgrade(
@@ -89,7 +158,26 @@ async fn upgrade(
     State(state): State<Web>,
     ConnectInfo(socket): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> Response {
+    let ip = client_ip(&headers, socket);
+    let key = crowd::key(ip);
+
+    // Both checks happen out here, before the handshake, so a refusal is an
+    // HTTP status a client can read rather than a socket that opens and shuts
+    // with no reason given. Refusing inside `on_upgrade` -- which is what the
+    // ceiling below used to do on its own -- looks identical to a crash from
+    // the other end.
+    if let Some(key) = &key {
+        if !state.starting.allow(key, Instant::now()) {
+            crate::visits::operational("warn", "web_session_refused", key);
+            return too_many();
+        }
+    }
+    let Some(seat) = Seat::take(&state.here, key.clone(), PER_ADDRESS_SESSIONS) else {
+        crate::visits::operational("warn", "web_session_crowded", key.as_deref().unwrap_or(""));
+        return too_many();
+    };
+
     let who = crate::visits::Who {
         via: "web",
         // A browser has no username to offer and no key to be known by. The
@@ -97,7 +185,7 @@ async fn upgrade(
         // visitor is simply new, which is the honest default.
         user: String::new(),
         id: String::new(),
-        ip: client_ip(&headers, socket),
+        ip: ip.to_string(),
         client: headers
             .get("user-agent")
             .and_then(|v| v.to_str().ok())
@@ -105,6 +193,9 @@ async fn upgrade(
             .to_string(),
     };
     ws.on_upgrade(move |socket| async move {
+        // Held for the life of the session and given back on the way out,
+        // whichever way that happens -- including a panic in the middle of it.
+        let _seat = seat;
         if state.sessions.fetch_add(1, Ordering::SeqCst) >= MAX_SESSIONS {
             state.sessions.fetch_sub(1, Ordering::SeqCst);
             return;
@@ -112,6 +203,7 @@ async fn upgrade(
         drive(socket, who).await;
         state.sessions.fetch_sub(1, Ordering::SeqCst);
     })
+    .into_response()
 }
 
 /// Bridge one WebSocket to one session.
@@ -1957,10 +2049,17 @@ mod tests {
     fn public_clients_cannot_spoof_forwarded_addresses() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "198.51.100.8".parse().unwrap());
-        let public = "203.0.113.7:1234".parse().unwrap();
-        let proxy = "127.0.0.1:1234".parse().unwrap();
-        assert_eq!(client_ip(&headers, public), "203.0.113.7");
-        assert_eq!(client_ip(&headers, proxy), "198.51.100.8");
+        let public: SocketAddr = "203.0.113.7:1234".parse().unwrap();
+        let proxy: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        assert_eq!(client_ip(&headers, public).to_string(), "203.0.113.7");
+        assert_eq!(client_ip(&headers, proxy).to_string(), "198.51.100.8");
+
+        // A proxy we trust, saying something that is not an address. It falls
+        // back to the socket rather than becoming a key nobody else shares --
+        // which would be an allowance per made-up value.
+        let mut junk = HeaderMap::new();
+        junk.insert("x-forwarded-for", "not-an-address".parse().unwrap());
+        assert_eq!(client_ip(&junk, proxy).to_string(), "127.0.0.1");
     }
 
     /// The client between two markers, for reading one declaration out of it.

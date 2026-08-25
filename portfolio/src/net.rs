@@ -15,12 +15,11 @@
 //! solves the identical problem — a ratatui TUI served to many SSH sessions
 //! at once — and is already proven there.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Server as _, Session};
@@ -29,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::Duration;
 
+use crate::crowd::{key as crowd_key, Crowd};
 use crate::session;
 
 /// Concurrent sessions. Without a ceiling, opening connections is a free way
@@ -52,43 +52,6 @@ const PER_ADDRESS_CONNECTIONS: usize = 4;
 /// reading of a lot of refusals -- that they are all arriving from one place --
 /// is visible rather than mysterious.
 const PER_ADDRESS: usize = 1;
-
-/// Who is connected, by address.
-///
-/// Separate from the `MAX_SESSIONS` counter because they answer different
-/// questions: that one is "is this box full", this one is "is this visitor
-/// already here". A seat holds both, so neither can be released without the
-/// other.
-#[derive(Default)]
-struct Crowd {
-    held: Mutex<HashMap<String, usize>>,
-}
-
-impl Crowd {
-    /// Take a seat for this address, or say no.
-    fn take(&self, key: &str, limit: usize) -> bool {
-        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
-        let n = held.entry(key.to_string()).or_insert(0);
-        if *n >= limit {
-            return false;
-        }
-        *n += 1;
-        true
-    }
-
-    fn give_back(&self, key: &str) {
-        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = held.get_mut(key) {
-            *n = n.saturating_sub(1);
-            // Removed at zero rather than left behind. The map is keyed by
-            // something a stranger chooses, so entries that are never cleaned
-            // up are a slow leak somebody else decides the size of.
-            if *n == 0 {
-                held.remove(key);
-            }
-        }
-    }
-}
 
 /// What a session holds while it runs: one of the box's slots, and one of its
 /// address's.
@@ -127,31 +90,6 @@ impl Drop for Seat {
             self.crowd.give_back(key);
         }
     }
-}
-
-/// How an address is counted.
-///
-/// A v4 address is the address. A v6 address is its **/64**, because a visitor
-/// is not given one v6 address, they are given a whole /64 -- counting single
-/// addresses there would mean a limit anybody can step around by picking the
-/// next number in their own subnet, which is a rule that inconveniences only
-/// the people not trying to get around it.
-///
-/// Loopback is exempt, and returns `None`: it is the operator, the health
-/// check and the smoke test, and a rule that locks you out of your own box
-/// halfway through a deploy is a rule that gets switched off at the worst
-/// possible moment.
-fn crowd_key(ip: IpAddr) -> Option<String> {
-    if ip.is_loopback() {
-        return None;
-    }
-    Some(match ip {
-        IpAddr::V4(v4) => v4.to_string(),
-        IpAddr::V6(v6) => {
-            let s = v6.segments();
-            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
-        }
-    })
 }
 
 pub async fn serve(addr: &str, port: u16, host_key: &Path) -> anyhow::Result<()> {

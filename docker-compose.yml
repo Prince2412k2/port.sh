@@ -1,7 +1,7 @@
 # Two ways in, one program:
 #
 #   ssh -p 2222 <your-host>     the terminal-native version
-#   http://<your-host>:8080     the same thing in a browser
+#   http://<your-host>:8222     the same thing in a browser
 #
 #   docker compose up -d --build
 #
@@ -155,7 +155,7 @@ services:
       context: .
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
-    command: ["--web", "--web-addr", "0.0.0.0", "--web-port", "8080"]
+    command: ["--web", "--web-addr", "0.0.0.0", "--web-port", "8222"]
     ports:
       # Loopback by default: this speaks plain HTTP, so the only thing that
       # should be able to reach it is the thing terminating TLS in front of it.
@@ -164,8 +164,8 @@ services:
       # way, which is a downgrade nobody asked for.
       #
       # A proxy that runs in Docker rather than on the host does not need this
-      # published at all -- put both on one network and point it at `web:8080`.
-      - "${WEB_BIND:-127.0.0.1:8080}:8080"
+      # published at all -- put both on one network and point it at `web:8222`.
+      - "${WEB_BIND:-127.0.0.1:8222}:8222"
 
     volumes:
       # No host key here: nothing on this path is authenticated, so there is

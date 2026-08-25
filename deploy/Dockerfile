@@ -102,7 +102,7 @@ ENV ENVOY_CONFIG=/app/data/envoy.json
 # come from `command:` in docker-compose.yml, so the ssh and web containers
 # are the same image started two different ways -- rather than two images, or
 # one image with a wrapper script branching on an environment variable.
-EXPOSE 2222 8080
+EXPOSE 2222 8222
 ENTRYPOINT ["/usr/local/bin/portfolio"]
 CMD ["--serve", "--ssh-addr", "0.0.0.0", "--ssh-port", "2222", \
      "--host-key", "/app/keys/host_key"]

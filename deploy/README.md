@@ -8,7 +8,7 @@ Two ways in, one program:
 
 ```bash
 ssh -p 2222 your-host          # terminal-native
-open http://127.0.0.1:8080     # the same thing, in a browser
+open http://127.0.0.1:8222     # the same thing, in a browser
 ```
 
 That address is loopback on purpose. The web service speaks plain HTTP, so
@@ -48,7 +48,7 @@ is where the visitor log and the per-address limits get the address from:
 
 ```caddy
 prince.dev {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy 127.0.0.1:8222
 }
 ```
 
@@ -68,7 +68,7 @@ networks:
 
 ```caddy
 prince.dev {
-        reverse_proxy terminal-web-1:8080
+        reverse_proxy terminal-web-1:8222
 }
 ```
 
@@ -297,13 +297,31 @@ A stranger's session should not be able to take the box down or run forever:
 
 | | |
 |---|---|
-| concurrent sessions | 128 (`MAX_SESSIONS` in `net.rs`) |
-| concurrent SSH connections | 192 globally, 4 per address |
+| concurrent sessions | 128 each transport (`MAX_SESSIONS`) |
+| concurrent SSH connections | 192 globally, 4 per address; 1 session per address |
+| concurrent browser sessions | 3 per address — a browser is a thing people have two of |
+| new browser sessions | 12 a minute per address |
+| page requests | 60 a minute per address; it is 62 KB of HTML |
 | idle timeout | 15 minutes with no keystroke (`PORTFOLIO_IDLE_SECS`, `0` disables it) |
 | maximum session | 1 hour (`PORTFOLIO_MAX_SESSION_SECS`, `0` disables it) |
 | daily visits | 24 per key/id and address (`PORTFOLIO_DAILY_VISITS`) |
 | daily AI allocation | $10, reserving $0.25 per provider attempt (`PORTFOLIO_DAILY_AI_USD`, `PORTFOLIO_AI_REQUEST_USD`) |
 | container | 1.5 CPUs, 512 MB, 256 pids (`docker-compose.yml`) |
+
+An address is a v4 address or a v6 **/64**, because a visitor is given a whole
+/64 and counting single addresses there is a rule only the honest obey. The
+browser limits are per address and not per browser id: an id is something the
+client chooses and can throw away, which makes it useful for recognising a
+returning visitor and useless for refusing one. Loopback is exempt throughout
+— it is the health check and you, mid-deploy.
+
+Refusals answer `429` with a `Retry-After`, and each one is logged with the
+address, so a lot of them arriving from one place is visible rather than
+mysterious:
+
+```bash
+docker compose logs web | grep -E 'web_(page|session)_(refused|crowded)'
+```
 
 ## The map data
 
