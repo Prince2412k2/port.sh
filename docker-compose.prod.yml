@@ -1,0 +1,14 @@
+services:
+  portfolio:
+    ports: !override
+      - "22:2222"
+      - "1234:2222"
+
+  portfolio-web:
+    ports: !reset []
+    networks:
+      - caddy-proxy
+
+networks:
+  caddy-proxy:
+    external: true

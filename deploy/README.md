@@ -7,7 +7,7 @@ docker compose up -d --build
 Two ways in, one program:
 
 ```bash
-ssh -p 2222 your-host          # terminal-native; 22 in the deployment below
+ssh -p 2222 your-host          # terminal-native; 22 and 1234 in production
 open http://127.0.0.1:8222     # the same thing, in a browser
 ```
 
@@ -46,23 +46,25 @@ Only the web side is proxied. Caddy needs one block and no WebSocket
 configuration — it upgrades them itself, and it sets `X-Forwarded-For`, which
 is where the visitor log and the per-address limits get the address from.
 
-For a Caddy that is itself in Docker on a shared network — put this service on
-that network, publish nothing, and let Caddy reach it by name:
+For a Caddy that is itself in Docker on a shared network, that is
+`docker-compose.prod.yml` — ssh on 22 and 1234, the web publishing nothing and
+reachable by name on the proxy's network:
 
-```yaml
-# docker-compose.override.yml on the box, untracked like .env
-services:
-  portfolio:
-    # Host 22 to the container's 2222. The process inside stays unprivileged;
-    # only the published port is the privileged one.
-    ports: !override ["22:2222"]
-  portfolio-web:
-    ports: !reset []
-    networks: [caddy-proxy]
-networks:
-  caddy-proxy:
-    external: true
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
+
+The deploy names both files rather than relying on either being picked up. To
+make plain `docker compose` mean the same thing in a shell on that box, put
+this in its `.env`:
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+```
+
+The process inside stays unprivileged either way: 22 and 1234 are published
+host ports mapped to the container's 2222, and nothing in it binds a
+privileged port.
 
 ```caddy
 port.sniffkin.tech {
@@ -111,8 +113,9 @@ of site blocks never listens on 22 at all. There is also nothing to gain —
 there is no TLS to terminate on an SSH stream and no hostname in it to route
 on.
 
-So SSH is published straight from this container, which is what the override
-above does, and the `22:22` line comes off the Caddy service.
+So SSH is published straight from this container, which is what
+`docker-compose.prod.yml` does, and the `22:22` line comes off the Caddy
+service.
 
 **Check what has 22 first.** `ss -lntp | grep :22` — if the host's own sshd is
 there, moving it is a thing to do carefully and from a second session you keep

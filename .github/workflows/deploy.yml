@@ -129,15 +129,21 @@ jobs:
           git fetch --prune origin main
           git reset --hard "$SHA"
 
+          # Both files, named rather than inherited. The prod overlay is what
+          # puts ssh on 22 and the web on the proxy's network, and a deploy
+          # that quietly left it out would come up on the dev ports and look
+          # like it had worked.
+          compose='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
+
           # The old containers keep serving until this succeeds. A build that
           # fails leaves the site exactly as it was, which is the reason the
           # build comes before the swap and not after it.
-          docker compose up -d --build
+          $compose up -d --build
 
           # And say so only once it is answering, because "compose returned 0"
           # and "the site is up" are different claims.
           for i in $(seq 1 30); do
-            if docker compose exec -T portfolio-web /usr/local/bin/portfolio --health >/dev/null 2>&1; then
+            if $compose exec -T portfolio-web /usr/local/bin/portfolio --health >/dev/null 2>&1; then
               echo "up: $(git rev-parse --short HEAD)"
               exit 0
             fi
@@ -145,7 +151,7 @@ jobs:
           done
 
           echo "built and started, but it never answered --health" >&2
-          docker compose ps >&2
-          docker compose logs --tail=40 >&2
+          $compose ps >&2
+          $compose logs --tail=40 >&2
           exit 1
           REMOTE
