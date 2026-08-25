@@ -88,6 +88,14 @@ impl Section {
 /// How long the cross-dissolve between sections takes.
 const SWITCH: f64 = 0.28;
 
+/// Between two entries on the section rail.
+///
+/// Shared by the drawing and the hit-testing, which is the whole reason it is
+/// a constant: the rail is centred, so every entry's position depends on the
+/// total width, and a gap that two places disagree about puts the click one
+/// section off at one end and two off at the other.
+const RAIL_GAP: &str = "   ";
+
 pub struct Shell {
     pub section: Section,
     pub about: About,
@@ -682,8 +690,8 @@ impl Shell {
         // later. A key that means different things in different places is not
         // navigation.
         //
-        // The map wanted them too, for its layer toggles, and lost: `1`-`5` are
-        // sections everywhere and `6`-`9` are reserved for sections that do not
+        // The map wanted them too, for its layer toggles, and lost: `1`-`6` are
+        // sections everywhere and `7`-`9` are reserved for sections that do not
         // exist yet. Its toggles are Shift and a digit now -- `!` through `*`,
         // see `termap::app::LAYER_KEYS` -- which is punctuation and falls
         // straight through this to the section below.
@@ -698,6 +706,12 @@ impl Shell {
                 // sent, which is a different thing from the tour's own stops.
                 KeyCode::Char('n') => return self.ask.walk(1),
                 KeyCode::Char('b') => return self.ask.walk(-1),
+                KeyCode::Right if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                    return self.ask.walk(1)
+                }
+                KeyCode::Left if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                    return self.ask.walk(-1)
+                }
                 // Search is the one thing that stays behind. It opens a mode
                 // inside a mode, and the place to drive a map with a search box
                 // is the section built around one.
@@ -708,6 +722,24 @@ impl Shell {
             }
         }
         if self.section == Section::Ask {
+            // The route keys that survive a browser.
+            //
+            // Ctrl-n is New Window in every browser there is, and it is one of
+            // the handful a page is not allowed to take back -- `preventDefault`
+            // on it does nothing, because the key never reaches the page at all.
+            // So the pair below is the one that has to work: nothing claims a
+            // shifted arrow, and both halves of it behave the same way, which
+            // ctrl-n and ctrl-b stopped doing the moment either was in a tab.
+            //
+            // Ctrl-n and ctrl-b stay bound because over ssh they are fine and
+            // they are what the map itself uses.
+            if k.modifiers.contains(KeyModifiers::SHIFT) && self.ask.panel.is_some() {
+                match k.code {
+                    KeyCode::Right => return self.ask.walk(1),
+                    KeyCode::Left => return self.ask.walk(-1),
+                    _ => {}
+                }
+            }
             // The map's own camera, before the chat gets the key. Ctrl because
             // every bare key here is a letter somebody is typing, and these have
             // to work mid-question like the route keys do.
@@ -747,10 +779,13 @@ impl Shell {
         }
         match k.code {
             KeyCode::Char('/') => self.show_help = true,
+            // One-based, because the rail says `[1] home` and a key that is not
+            // the number printed beside the thing it opens is not a shortcut.
+            // `0` stays a way home for the fingers that learned it here.
             KeyCode::Char('0') => self.go(Section::Home),
             KeyCode::Char(c @ '1'..='9') => {
                 let i = c as usize - '1' as usize;
-                if let Some(s) = Section::ALL.get(i + 1) {
+                if let Some(s) = Section::ALL.get(i) {
                     self.go(*s);
                 }
             }
@@ -1107,9 +1142,15 @@ impl Shell {
     }
 
     fn rail(&self, f: &mut Frame, area: Rect) {
+        let start = self.rail_spans().map(|spans| spans[0].1);
+
         // Not on Home: the landing screen sets the name as its headline three
         // rows down, and the same words twice on one screen reads as a mistake.
-        if self.section != Section::Home {
+        //
+        // And not when the rail has had to come far enough left to sit on it.
+        // A window that narrow has to give something up, and half a name is a
+        // worse thing to keep than the navigation.
+        if self.section != Section::Home && start.is_none_or(|x| x >= self.rail_clear()) {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
@@ -1122,41 +1163,91 @@ impl Shell {
             );
         }
 
-        let mut spans = Vec::new();
+        let Some(start) = start else { return };
+        // Drawn into its own slice of the row rather than padded out to it. A
+        // paragraph paints the whole width it is given, and the leading spaces
+        // that would have positioned it landed on top of the name.
+        let area = Rect {
+            x: start,
+            width: area.right() - start,
+            ..area
+        };
+        let mut line = Vec::new();
         for (index, s) in Section::ALL.into_iter().enumerate() {
             let on = s == self.section;
-            spans.push(Span::styled(
-                if on { "● " } else { "· " },
+            // The number is the key that gets you there, so it is written the
+            // way it is typed rather than the way the array is indexed.
+            line.push(Span::styled(
+                format!("[{}] ", index + 1),
                 Style::default().fg(if on { ACCENT } else { FAINT }),
             ));
-            spans.push(Span::styled(
-                format!("{index} {}   ", s.label()),
-                Style::default().fg(if on { FG } else { FAINT }),
+            line.push(Span::styled(
+                s.label(),
+                match on {
+                    true => Style::default().fg(FG).add_modifier(Modifier::BOLD),
+                    false => Style::default().fg(DIM),
+                },
             ));
+            if index + 1 < Section::ALL.len() {
+                line.push(Span::raw(RAIL_GAP));
+            }
         }
-        f.render_widget(Paragraph::new(Line::from(spans)).right_aligned(), area);
+        f.render_widget(Paragraph::new(Line::from(line)), area);
     }
 
-    fn rail_at(&self, column: u16) -> Option<Section> {
-        let width: u16 = Section::ALL
-            .into_iter()
-            .enumerate()
-            .map(|(index, section)| {
-                2 + format!("{index} {}   ", section.label()).chars().count() as u16
-            })
-            .sum();
+    /// The first column the rail may use without sitting on the name.
+    ///
+    /// One expression, read by the thing that places the rail and the thing
+    /// that decides whether the name is drawn at all. Two of them differing by
+    /// a column meant that at exactly ninety wide the rail stopped one short of
+    /// clearing the name and the name was dropped to make room it was not
+    /// using.
+    fn rail_clear(&self) -> u16 {
+        match self.section {
+            // Nothing to the left of it there: Home puts the name in its own
+            // headline three rows down rather than up here.
+            Section::Home => self.body.x,
+            _ => self.body.x + 2 + self.about.name.chars().count() as u16 + 2,
+        }
+    }
+
+    /// Where each entry sits, so a click and the drawing agree.
+    ///
+    /// One layout, used by both. The rail is centred, so where any single entry
+    /// starts depends on the total width -- which is exactly the arrangement
+    /// where two places measuring separately drift apart and a click lands one
+    /// section over.
+    ///
+    /// Centred, except when centring would run it through the name on the left.
+    /// Then it sits as far left as it can without touching, which on a narrow
+    /// terminal is roughly where it used to be anyway. `None` when it does not
+    /// fit at all, which is also the answer to "what did that click hit".
+    fn rail_spans(&self) -> Option<Vec<(Section, u16, u16)>> {
+        let cell = |s: Section| 4 + s.label().chars().count() as u16;
+        let gap = RAIL_GAP.chars().count() as u16;
+        let width: u16 = Section::ALL.into_iter().map(cell).sum::<u16>()
+            + gap * (Section::ALL.len() as u16 - 1);
         if width > self.body.width {
             return None;
         }
-        let mut x = self.body.right().saturating_sub(width);
-        for (index, section) in Section::ALL.into_iter().enumerate() {
-            let span = 2 + format!("{index} {}   ", section.label()).chars().count() as u16;
-            if column >= x && column < x + span {
-                return Some(section);
-            }
-            x += span;
+        let centred = self.body.x + (self.body.width - width) / 2;
+        let mut x = centred
+            .max(self.rail_clear())
+            .min(self.body.right() - width);
+        let mut out = Vec::new();
+        for section in Section::ALL {
+            let span = cell(section);
+            out.push((section, x, span));
+            x += span + gap;
         }
-        None
+        Some(out)
+    }
+
+    fn rail_at(&self, column: u16) -> Option<Section> {
+        self.rail_spans()?
+            .into_iter()
+            .find(|&(_, x, span)| column >= x && column < x + span)
+            .map(|(section, _, _)| section)
     }
 
     fn footer(&self, f: &mut Frame, area: Rect) {
@@ -2091,6 +2182,20 @@ mod tests {
             s.ask.input, "and what about",
             "walking the route typed into the line"
         );
+
+        // And the pair that survives a browser. Ctrl-n is New Window and is one
+        // of the few a page is not permitted to intercept -- it never arrives,
+        // so `preventDefault` cannot save it and the route needs a key that
+        // nothing upstream has already spoken for.
+        let shift = |code| KeyEvent::new(code, KeyModifiers::SHIFT);
+        s.on_key(shift(KeyCode::Right));
+        assert_eq!(names(&s).0, "Ayodhya", "shift-right did not walk the route");
+        s.on_key(shift(KeyCode::Left));
+        assert_eq!(names(&s).0, "Varanasi", "shift-left did not go back");
+        assert_eq!(
+            s.ask.input, "and what about",
+            "walking the route edited the line"
+        );
     }
 
     /// A second `show_map` flies rather than cuts.
@@ -2322,7 +2427,7 @@ mod tests {
         s.go(Section::Experience);
         let before = s.map.layers;
         s.on_key(press('3'));
-        assert_eq!(s.section, Section::Skills, "`3` stopped navigating");
+        assert_eq!(s.section, Section::Projects, "`3` stopped navigating");
         assert_eq!(before, s.map.layers, "`3` toggled a layer on its way out");
     }
 
@@ -2334,11 +2439,14 @@ mod tests {
     #[test]
     fn a_number_key_means_the_same_thing_from_every_section() {
         let want = [
+            ('1', Section::Home),
+            ('2', Section::Experience),
+            ('3', Section::Projects),
+            ('4', Section::Skills),
+            ('5', Section::Taste),
+            // And the one the rail does not number, kept for the fingers that
+            // learned it when home was `0`.
             ('0', Section::Home),
-            ('1', Section::Experience),
-            ('2', Section::Projects),
-            ('3', Section::Skills),
-            ('4', Section::Taste),
         ];
         // Ask is left out as a starting point on purpose: it spawns an agent,
         // and it is the one place digits are text. That case is below.
@@ -2375,7 +2483,7 @@ mod tests {
     fn the_first_key_skips_the_opening_without_being_swallowed() {
         let mut s = Shell::new();
         assert!(s.booting());
-        s.on_key(press('1'));
+        s.on_key(press('2'));
         assert!(!s.booting());
         assert_eq!(s.section, Section::Experience);
     }
@@ -2427,10 +2535,12 @@ mod tests {
         assert_eq!(s.section, Section::Home);
     }
 
+    /// The last section answers to the last number on the rail, which is what
+    /// the rail prints beside it.
     #[test]
-    fn five_opens_ask() {
+    fn six_opens_ask() {
         let mut s = shell();
-        s.on_key(press('5'));
+        s.on_key(press('6'));
         assert_eq!(s.section, Section::Ask);
     }
 
@@ -2458,6 +2568,49 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(s.section, Section::Taste);
+    }
+
+    /// A click lands on the entry that is drawn under it.
+    ///
+    /// Read off the rendered row rather than off `rail_spans`, which is what
+    /// makes it a check rather than a restatement: the drawing and the
+    /// hit-testing both come from that function, so asking it where things are
+    /// would agree with itself no matter how wrong it was. The rail is centred,
+    /// so every entry's column depends on the total width -- the arrangement
+    /// where a stale gap or a miscounted bracket puts the click one section
+    /// over at one end and two over at the other.
+    #[test]
+    fn every_rail_entry_is_clickable_where_it_is_drawn() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for width in [80, 91, 100, 120, 160, 240] {
+            let mut s = shell();
+            s.go(Section::Projects);
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal.draw(|f| s.render(f)).unwrap();
+            let row = termap::snapshot::plain(terminal.backend().buffer())
+                .lines()
+                .next()
+                .expect("no rail row")
+                .to_string();
+
+            for (index, section) in Section::ALL.into_iter().enumerate() {
+                let tag = format!("[{}] {}", index + 1, section.label());
+                let at = row
+                    .find(&tag)
+                    .unwrap_or_else(|| panic!("{width}: `{tag}` is not on the rail:\n{row}"));
+                // Both ends of what was drawn, so a span that is too short or
+                // has drifted sideways is caught rather than merely overlapped.
+                for column in [at, at + tag.chars().count() - 1] {
+                    assert_eq!(
+                        s.rail_at(column as u16),
+                        Some(section),
+                        "{width}: column {column} draws `{tag}` and clicks elsewhere:\n{row}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

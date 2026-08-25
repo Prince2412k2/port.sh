@@ -1427,7 +1427,8 @@ impl Ask {
                         the experience section knows works here: hjkl and the\n\
                         arrows pan, + and - zoom, u and o tilt, , and . turn it,\n\
                         the layer keys toggle. esc gives the keys back.\n\
-                        n / b   next place and back, driving or not\n\
+                        shift-left / shift-right   next place and back\n\
+                        n / b   the same two, while driving\n\
                         ctrl and the wheel zooms without driving at all"
                 .into(),
             "/whoami" => {

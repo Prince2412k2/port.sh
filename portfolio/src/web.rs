@@ -461,6 +461,22 @@ term.onBinary((d) => {
 // same KeyEvent instead of collapsing these chords to their plain keys.
 term.attachCustomKeyEventHandler((e) => {
   if (e.type !== 'keydown') return true;
+
+  // Keys this app owns that the browser also has a use for. xterm sends them
+  // either way; what this stops is the browser *also* acting on them, which is
+  // how ctrl-u ended up opening view-source over the top of a cleared input and
+  // ctrl-b moved the bookmarks bar instead of the route.
+  //
+  // Not a list of everything the app binds -- only the overlap. Ctrl-c, ctrl-v
+  // and ctrl-x stay the browser's, because a terminal somebody cannot copy out
+  // of is a worse thing to be right about. And ctrl-n, ctrl-t and ctrl-w are
+  // not on it because they cannot be: those never reach the page, which is why
+  // the route also answers to shift-left and shift-right.
+  if (e.ctrlKey && !e.altKey && !e.metaKey && 'beu'.indexOf(e.key) >= 0) {
+    e.preventDefault();
+    return true;
+  }
+
   let sequence = null;
   if (e.key === 'Enter' && e.shiftKey && !e.ctrlKey && !e.altKey) {
     sequence = '\x1b[13;2u';
