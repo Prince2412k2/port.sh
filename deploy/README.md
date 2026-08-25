@@ -159,10 +159,10 @@ was last brought up by hand across the rename. `web` became `portfolio-web` in
 this repo, so a deployment older than that needs it once.
 
 Anything on the `messages` volume can be read from either container, and they
-both mount it — so while one is down the other will still answer:
+both mount it — so while one is down the other still has it:
 
 ```bash
-docker compose exec portfolio portfolio --visitors
+bin/visitors --docker --service portfolio-web
 ```
 
 ### Updating
