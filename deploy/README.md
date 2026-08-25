@@ -99,6 +99,8 @@ In order, because two of these are one-way:
 
 ### Updating
 
+By hand:
+
 ```bash
 git pull && docker compose up -d --build
 ```
@@ -106,6 +108,63 @@ git pull && docker compose up -d --build
 The data, the host key, the messages and the agent's login are all volumes or
 binds, so none of them are touched. Text in `about.txt`, `taste.txt` and
 `places.txt` needs no build at all — see below.
+
+### On push to main
+
+`.github/workflows/deploy.yml` does the same two commands over ssh. GitHub
+holds the key and says when; the box does the work. Nothing is compiled on the
+runner, deliberately — the binary is linked inside the same bookworm image it
+runs in, and a runner is two Ubuntu releases ahead of that. A binary built
+against a newer glibc than its runtime does not start, and that is a thing you
+find out in production or not at all.
+
+Six secrets, in **Settings → Secrets and variables → Actions**:
+
+| secret | what |
+|---|---|
+| `DEPLOY_HOST` | the box |
+| `DEPLOY_USER` | the account the checkout belongs to |
+| `DEPLOY_PORT` | the real sshd, if it is not 22. Not 2222 — that is this app |
+| `DEPLOY_PATH` | the checkout, e.g. `/srv/terminal`. Defaults to that |
+| `DEPLOY_KEY` | the private half of a key made only for this |
+| `DEPLOY_KNOWN_HOSTS` | the box's *host* key, so the runner can tell it apart |
+
+```bash
+# on your machine: a key that does nothing else
+ssh-keygen -t ed25519 -f deploy -C 'github actions -> port.sh' -N ''
+
+# on the box: let it in, and let it do nothing but this
+echo "restrict $(cat deploy.pub)" >> ~/.ssh/authorized_keys
+
+# the host key, so the deploy is not trusting whoever answers on that address
+ssh-keyscan -p 22 your-host
+```
+
+`restrict` turns off port forwarding, agent forwarding, X11 and pty allocation
+for that key. The deploy needs none of them.
+
+The deploy user must be in the `docker` group and own the checkout. The box
+also needs to reach GitHub itself for the `git fetch` — a read-only deploy key
+on the repo if it is private, or an `https://` remote if it is not.
+
+What it does, in order: fetch, `reset --hard` to the pushed commit, build, and
+only then swap the containers over. Two consequences worth knowing:
+
+- **A failed build changes nothing.** `docker compose up` never gets there, so
+  the containers that are serving keep serving. The site cannot be taken down
+  by a commit that does not compile.
+- **`reset --hard`, never `git clean`.** Reset moves the tracked files and
+  leaves everything else alone, which is what keeps `.env` on the box. Clean
+  would delete it along with the credentials in it.
+
+It waits for `--health` to answer before reporting success, because "compose
+exited 0" and "the site is up" are not the same claim. If it never answers,
+the job fails and prints `docker compose ps` and the last forty log lines.
+
+The build caches — the cargo registry and both target directories — are
+BuildKit caches on the box, which is what keeps a one-line change from
+recompiling four hundred crates. They grow. `docker builder prune` when the
+disk starts to matter; the next deploy is slow once and then fast again.
 
 ### One thing still outside
 

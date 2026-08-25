@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # The portfolio, serving itself over SSH.
 #
 # No OpenSSH here. The first version used it behind ForceCommand, and it got
@@ -17,13 +18,39 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY . .
-# Only the one binary; map and skills build as libraries under it.
-RUN cargo build --release -p portfolio
-# The agent, from its own workspace. Separate on purpose -- see ai-sdk/Cargo.toml
-# -- so a broken experiment in there cannot stop the portfolio compiling, and
-# two lockfiles are not held hostage to each other. Two invocations rather than
-# one for exactly that reason.
-RUN cargo build --release --manifest-path ai-sdk/Cargo.toml -p envoy
+
+# Both binaries in one step, against caches that outlive the layer.
+#
+# The build stage is a Debian one version for version with the stage below it,
+# which is the whole reason the compiling happens in here rather than on
+# whatever machine is driving the build. A binary linked against a newer glibc
+# than the image it lands in does not start, and the runners this is likely to
+# be built on have moved further ahead of bookworm every year. Matching them by
+# hand is a thing to get wrong once, quietly, in the one environment nobody
+# tests in.
+#
+# The cache mounts are what make that affordable. `COPY . .` is invalidated by
+# any edit at all, so without them every push recompiles four hundred crates to
+# change a line of a shader. The registry and both target directories live in
+# BuildKit caches instead -- which means they are not in the layer either, so
+# the binaries are copied somewhere that is, in the same step, before the mount
+# goes away.
+#
+# `--locked` because a lockfile that is quietly updated mid-build is a
+# different program from the one that was tested.
+#
+# Two cargo invocations: the agent is its own workspace -- see
+# ai-sdk/Cargo.toml -- so a broken experiment in there cannot stop the
+# portfolio compiling, and two lockfiles are not held hostage to each other.
+# Only the one portfolio binary; map and skills build as libraries under it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    --mount=type=cache,target=/src/ai-sdk/target,sharing=locked \
+    cargo build --release --locked -p portfolio \
+ && cargo build --release --locked --manifest-path ai-sdk/Cargo.toml -p envoy \
+ && mkdir -p /out \
+ && cp target/release/portfolio /out/portfolio \
+ && cp ai-sdk/target/release/envoy /out/envoy
 
 FROM debian:bookworm-slim
 
@@ -40,11 +67,11 @@ RUN useradd --system --no-create-home --shell /usr/sbin/nologin portfolio \
  && chown -R portfolio:portfolio /app/keys /app/messages /app/agent
 
 WORKDIR /app
-COPY --from=build /src/target/release/portfolio /usr/local/bin/portfolio
+COPY --from=build /out/portfolio /usr/local/bin/portfolio
 # `envoy`, the first tier in models.txt. `ENVOY_CONFIG` below says where its
 # model catalogue is; without it, it looks for ./envoy.json and the tier is
 # skipped with a line on stderr rather than taking the section down.
-COPY --from=build /src/ai-sdk/target/release/envoy /usr/local/bin/envoy
+COPY --from=build /out/envoy /usr/local/bin/envoy
 COPY ai-sdk/envoy.json /app/data/envoy.json
 COPY portfolio/data/ /app/data/
 COPY map/data/places.txt /app/data/places.txt
@@ -64,9 +91,12 @@ ENV PORTFOLIO_MESSAGES=/app/messages/messages.jsonl
 # next month and neither belongs in an image layer.
 ENV PORTFOLIO_VISITS=/app/messages/visits.jsonl
 
-ENV HOME=/tmp
-ENV ENVOY_CONFIG=/app/data/envoy.json
+# The agent volume, not the tmpfs: envoy keeps its Codex credential under
+# `$HOME`, and on scratch that works perfectly until the first restart and then
+# silently drops the tier. This was set twice for a while, tmpfs first, and the
+# second one quietly winning is not a thing to leave lying around.
 ENV HOME=/app/agent
+ENV ENVOY_CONFIG=/app/data/envoy.json
 
 # The image is both services. ENTRYPOINT is the binary alone and the flags
 # come from `command:` in docker-compose.yml, so the ssh and web containers

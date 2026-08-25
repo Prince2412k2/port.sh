@@ -1,0 +1,100 @@
+# Push to main, and the box that serves this builds it and swaps itself over.
+#
+# Nothing is compiled here. GitHub's part is to hold the key and say when --
+# the build happens on the server, in Docker, against the caches in
+# deploy/Dockerfile. That keeps the one thing that matters true for free: the
+# binary is linked on bookworm because it is linked *in* the bookworm image it
+# will run in. A runner is two Ubuntu releases ahead of that, and a binary
+# built against a newer glibc than its runtime does not start -- which is the
+# sort of thing that is discovered in production and nowhere else.
+#
+# The cost is that the server compiles. It is bounded: the registry and both
+# target directories are BuildKit caches, so a push that changes one file
+# rebuilds one crate, and a push that changes nothing rebuilds nothing.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  # So a deploy can be re-run without an empty commit to hang it on.
+  workflow_dispatch:
+
+# One at a time, and never cancelled half way. Two of these racing would have
+# two `git reset --hard` and two `docker compose up` interleaving in the same
+# directory, and the loser decides what is running.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # No `actions/checkout`: this job never reads the source. It opens one ssh
+    # connection and the far end does the rest.
+    steps:
+      - name: Build and swap over, on the box
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          # Pinned, not disabled. `StrictHostKeyChecking=no` on a deploy is
+          # trusting whoever answers on that address to run a command as the
+          # deploy user -- and this project publishes an SSHFP record for its
+          # own host key precisely because that is not a thing to wave through.
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/deploy \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile=~/.ssh/known_hosts \
+              -p "${DEPLOY_PORT:-22}" \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "DEPLOY_PATH='${DEPLOY_PATH:-/srv/terminal}' SHA='${{ github.sha }}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH" || {
+            echo "no checkout at $DEPLOY_PATH -- the first one is by hand," >&2
+            echo "see 'Putting it on the internet' in deploy/README.md" >&2
+            exit 1
+          }
+
+          # Fetch then reset, rather than pull: the checkout on a server is a
+          # mirror of main and not somewhere work happens, and a merge conflict
+          # there is a deploy that hangs waiting for an editor nobody is at.
+          #
+          # Deliberately no `git clean`: .env and anything else untracked on
+          # that box is configuration, and reset leaves it alone where clean
+          # would take the credentials with it.
+          git fetch --prune origin main
+          git reset --hard "$SHA"
+
+          # The old containers keep serving until this succeeds. A build that
+          # fails leaves the site exactly as it was, which is the reason the
+          # build comes before the swap and not after it.
+          docker compose up -d --build
+
+          # And say so only once it is answering, because "compose returned 0"
+          # and "the site is up" are different claims.
+          for i in $(seq 1 30); do
+            if docker compose exec -T web /usr/local/bin/portfolio --health >/dev/null 2>&1; then
+              echo "up: $(git rev-parse --short HEAD)"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "built and started, but it never answered --health" >&2
+          docker compose ps >&2
+          docker compose logs --tail=40 >&2
+          exit 1
+          REMOTE
