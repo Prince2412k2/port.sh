@@ -506,8 +506,15 @@ const laidOut = [];
 const unbend = (u, v) => {
   const s = tube.live();
   const flags = Object.assign({}, SCREEN_BASE.flags, s.flags || {});
-  if (!flags.CURVE) return [u, v];
   const n = Object.assign({}, SCREEN_BASE.nums, s.nums || {});
+
+  // Undo the underscan first, because it is the last thing the shader does on
+  // the way in. Every screen has some, including the flat one -- so this is
+  // where a panel stops being a no-op even though nothing about it curves.
+  const k = underscan(n);
+  const t = [0.5 + (u - 0.5) / k, 0.5 + (v - 0.5) / k];
+  if (!flags.CURVE) return t;
+
   const bend = (x, y) => {
     let px = x * 2 - 1;
     let py = y * 2 - 1;
@@ -517,12 +524,12 @@ const unbend = (u, v) => {
     py += py * ky * ky;
     return [px * 0.5 + 0.5, py * 0.5 + 0.5];
   };
-  let x = u;
-  let y = v;
+  let x = t[0];
+  let y = t[1];
   for (let i = 0; i < 4; i++) {
     const [bx, by] = bend(x, y);
-    x += u - bx;
-    y += v - by;
+    x += t[0] - bx;
+    y += t[1] - by;
   }
   return [x, y];
 };
@@ -1077,7 +1084,19 @@ void main() {
   // window opening rather than a picture arriving.
   float openX = smoothstep(0.00, 0.42, warm);
   float openY = smoothstep(0.30, 1.00, warm);
-  vec2 p = (b - 0.5) / vec2(max(openX, 0.0012), max(openY, 0.0012)) + 0.5;
+
+  // Underscan: the picture drawn a little smaller than the glass it is in.
+  //
+  // The rim is a rounded rectangle, and a rounded corner takes a bite out of
+  // whatever is behind it -- measured on the curviest screen here, a column and
+  // a row along each edge and two or three cells diagonally into each corner.
+  // Broadcast solved this the other way round, with an overscanned picture and
+  // a title-safe area nobody put anything outside of; there is no such margin
+  // in a terminal, where the corners are exactly where the name, the key hints
+  // and the clock go. So the raster shrinks instead until all of it clears the
+  // rim. How much comes from the radius of that rim -- see 'underscan' in
+  // the script below.
+  vec2 p = (b - 0.5) * (UNDERSCAN / vec2(max(openX, 0.0012), max(openY, 0.0012))) + 0.5;
 
   // The rim, as a rounded rectangle with a soft edge rather than a reject.
   // Derivatives are an extension in this version of GL and one device pixel is
@@ -1308,6 +1327,19 @@ const SCREENS = [
 
 const screenById = (id) => SCREENS.filter((s) => s.id === id)[0] || SCREENS[0];
 
+/// How much smaller than the glass the picture has to be drawn.
+///
+/// The rim is a rounded rectangle of half-size `1 - ROUND` grown by a disc of
+/// radius `ROUND`, so along the axes it reaches exactly the edge and on the
+/// diagonal it stops short at `1 - ROUND(1 - 1/sqrt2)`. The corner of the
+/// picture is the point that has to clear that, and the scale which puts it
+/// there is one over that number.
+///
+/// Plus a little, for the half-pixel the rim is feathered over. Both terms are
+/// small: at the radius these screens use it is a shade over two percent, which
+/// is about a column and a half at each edge -- which is what was being lost.
+const underscan = (nums) => 1.0 / (1.0 - nums.ROUND * (1.0 - Math.SQRT1_2)) + 0.004;
+
 // `#define`s, not uniforms. A screen is chosen a handful of times in a session
 // and read a few million times a frame, so the numbers belong in the compile.
 const preamble = (s) => {
@@ -1320,6 +1352,7 @@ const preamble = (s) => {
   // rounding error.
   for (const k in nums) out.push(`#define ${k} ${nums[k].toFixed(6)}`);
   out.push(`#define SIG_MID ${((nums.SIG_MIN + nums.SIG_MAX) * 0.5).toFixed(6)}`);
+  out.push(`#define UNDERSCAN ${underscan(nums).toFixed(6)}`);
   return out.join('\n') + '\n';
 };
 
@@ -1957,9 +1990,11 @@ mod tests {
     fn every_constant_a_shader_reads_is_one_a_screen_defines() {
         let base = part("const SCREEN_BASE = {", "\n};");
         let mut known = declared(base);
-        // Emitted by `preamble` from the two it sits between, so it is defined
-        // for every screen without appearing in the table.
+        // Emitted by `preamble` rather than written in the table: one is the
+        // midpoint of two that are, the other is worked out from the radius of
+        // the rim.
         known.push("SIG_MID".to_string());
+        known.push("UNDERSCAN".to_string());
 
         for (what, src) in [
             ("the tube", part("const FRAG_TUBE = `", "\n`;")),
@@ -1971,6 +2006,39 @@ mod tests {
                     "{what} shader reads `{name}`, which no screen defines"
                 );
             }
+        }
+    }
+
+    /// No shader contains the character that ends a shader.
+    ///
+    /// They are template literals, so a backtick anywhere inside one closes it
+    /// early and the rest of the file becomes whatever the parser makes of the
+    /// remains. Which is nothing: the page throws on load and every switch on
+    /// it is dead. It got in through a comment -- prose about a function, in
+    /// the punctuation prose about a function is written in.
+    ///
+    /// The name check below does not catch it. A stray backtick still leaves
+    /// the real closing one where it was, so the slice it reads is intact and
+    /// says nothing is wrong.
+    #[test]
+    fn no_shader_ends_itself_early() {
+        for (what, from) in [
+            ("VERT", "const VERT = `"),
+            ("persist", "const FRAG_PERSIST = `"),
+            ("blur", "const FRAG_BLUR = `"),
+            ("signal", "const FRAG_NTSC = `"),
+            ("tube", "const FRAG_TUBE = `"),
+        ] {
+            let body = part(from, "\n`;");
+            assert!(
+                !body.contains('`'),
+                "the {what} shader has a backtick in it, which ends it here:\n{}",
+                body.split('`').next().unwrap_or("").lines().last().unwrap_or("")
+            );
+            assert!(
+                body.contains("void main"),
+                "the {what} shader has no main; it was cut short"
+            );
         }
     }
 
