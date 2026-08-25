@@ -26,6 +26,11 @@ use tokio::time::{interval, Duration, Instant};
 use crate::shell::Shell;
 use crate::wire::{Decoder, DISABLE_KEYS, DISABLE_MOUSE, ENABLE_KEYS, ENABLE_MOUSE};
 
+// A remote SSH client may need more than one round trip to answer the initial
+// terminal capability query. Falling back too quickly makes higher-latency
+// production connections render the portfolio as ASCII permanently.
+const TERMINAL_PROBE_WINDOW: Duration = Duration::from_secs(2);
+
 /// What a transport sends *to* a session.
 pub enum In {
     Bytes(Vec<u8>),
@@ -324,7 +329,7 @@ async fn pump(
     ascii: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let mut decoder = Decoder::default();
-    let probe_until = Instant::now() + Duration::from_millis(250);
+    let probe_until = Instant::now() + TERMINAL_PROBE_WINDOW;
     let idle_after = idle_limit();
     let max_after = max_limit();
     let started = Instant::now();
