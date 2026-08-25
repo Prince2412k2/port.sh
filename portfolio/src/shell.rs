@@ -158,6 +158,9 @@ pub struct Shell {
     /// exactly alike. Now one of them says what it did.
     chord: Option<(String, f64)>,
     reduced_motion: bool,
+    /// Columns the client has taken at the start of the header row. See
+    /// `set_gutter`; zero everywhere except a browser tab.
+    gutter: u16,
 }
 
 /// How long a chord's report stays up.
@@ -359,6 +362,7 @@ impl Shell {
             boot: 0.0,
             clock: 0.0,
             since: 0.0,
+            gutter: 0,
             locator: None,
             manual: None,
             chord: None,
@@ -498,6 +502,21 @@ impl Shell {
     /// Skip the rest of the opening.
     pub fn skip_boot(&mut self) {
         self.boot = boot::SECS;
+    }
+
+    /// Keep the header row's first `cols` columns clear.
+    ///
+    /// The web client draws its own switches over the top of the terminal --
+    /// the tube, which screen, full screen -- and they have to live somewhere.
+    /// The app cannot see them, so it is told how much room they take rather
+    /// than guessing, and the number comes from the client measuring its own
+    /// chrome against its own cell width. Over ssh nothing sends this and the
+    /// header row starts where it always did.
+    ///
+    /// Capped, because it arrives over the wire: a client claiming the whole
+    /// width would leave the rail nowhere to go.
+    pub fn set_gutter(&mut self, cols: u16) {
+        self.gutter = cols.min(40);
     }
 
     pub fn set_reduced_motion(&mut self, reduced: bool) {
@@ -1153,13 +1172,16 @@ impl Shell {
         if self.section != Section::Home && start.is_none_or(|x| x >= self.rail_clear()) {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("  ", Style::default()),
                     Span::styled(
                         self.about.name.to_uppercase(),
                         Style::default().fg(FG).add_modifier(Modifier::BOLD),
                     ),
                 ])),
-                area,
+                Rect {
+                    x: area.x + self.gutter + 2,
+                    width: area.width.saturating_sub(self.gutter + 2),
+                    ..area
+                },
             );
         }
 
@@ -1203,11 +1225,14 @@ impl Shell {
     /// clearing the name and the name was dropped to make room it was not
     /// using.
     fn rail_clear(&self) -> u16 {
+        let after = self.body.x + self.gutter;
         match self.section {
             // Nothing to the left of it there: Home puts the name in its own
-            // headline three rows down rather than up here.
-            Section::Home => self.body.x,
-            _ => self.body.x + 2 + self.about.name.chars().count() as u16 + 2,
+            // headline three rows down rather than up here. The gutter is still
+            // in the way, though -- whatever the client has drawn over the top
+            // is there on every section.
+            Section::Home => after,
+            _ => after + 2 + self.about.name.chars().count() as u16 + 2,
         }
     }
 
@@ -2568,6 +2593,49 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(s.section, Section::Taste);
+    }
+
+    /// The header row keeps out of the way of the client's own switches.
+    ///
+    /// The browser draws `[crt]` and its neighbours over the top left of the
+    /// terminal, and the app cannot see them -- it is told how many columns
+    /// they cover. Nothing else on that row may start before then, or the name
+    /// is underneath the switches and the rail slides beneath them on a narrow
+    /// window.
+    #[test]
+    fn a_client_that_claims_the_corner_gets_it() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for width in [100, 120, 160, 240] {
+            let mut s = shell();
+            s.go(Section::Projects);
+            s.set_gutter(16);
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            terminal.draw(|f| s.render(f)).unwrap();
+            let row = termap::snapshot::plain(terminal.backend().buffer())
+                .lines()
+                .next()
+                .expect("no header row")
+                .to_string();
+
+            let first = row.find(|c: char| !c.is_whitespace());
+            assert!(
+                first.is_none_or(|at| at >= 16),
+                "{width}: the header row starts at {first:?}, inside the client's 16:\n{row}"
+            );
+            // The name yields to the rail when the two cannot both clear the
+            // gutter, which at a hundred columns they cannot. Where there is
+            // room for it, it is still there.
+            if width >= 120 {
+                assert!(row.contains("PRINCE PATEL"), "{width}: the name went:\n{row}");
+            }
+        }
+
+        // And a client cannot claim the whole window out from under the rail.
+        let mut s = shell();
+        s.set_gutter(9_000);
+        assert!(s.gutter <= 40, "an absurd gutter was taken at face value");
     }
 
     /// A click lands on the entry that is drawn under it.

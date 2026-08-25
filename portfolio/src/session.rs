@@ -31,6 +31,12 @@ pub enum In {
     Bytes(Vec<u8>),
     Resize(u16, u16),
     ReducedMotion(bool),
+    /// Columns at the start of the header row that the client is using for
+    /// chrome of its own, and that the app must not draw into.
+    ///
+    /// Only the browser ever sends one. Over ssh there is nothing on top of the
+    /// terminal, so the answer is zero and stays zero.
+    Gutter(u16),
     Hangup,
 }
 
@@ -374,6 +380,7 @@ async fn pump(
                     terminal.clear()?;
                 }
                 Some(In::ReducedMotion(reduced)) => shell.set_reduced_motion(reduced),
+                Some(In::Gutter(cols)) => shell.set_gutter(cols),
                 Some(In::Hangup) | None => break,
             },
             _ = ticker.tick() => {}

@@ -186,8 +186,8 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
                 // Text is only ever a resize. Anything else is ignored rather
                 // than fed to the decoder: the input path takes bytes from one
                 // place only, and that is the binary channel.
-                Message::Text(t) => match parse_resize(&t) {
-                    Some((c, r)) => reader_tx.send(session::In::Resize(c, r)),
+                Message::Text(t) => match parse_text(&t) {
+                    Some(message) => reader_tx.send(message),
                     None => Ok(()),
                 },
                 Message::Close(_) => break,
@@ -257,6 +257,19 @@ fn parse_resize(s: &str) -> Option<(u16, u16)> {
     let body = s.strip_prefix('r')?;
     let (c, r) = body.split_once('x')?;
     Some((c.trim().parse().ok()?, r.trim().parse().ok()?))
+}
+
+/// The whole text channel: a size, or the width of the client's own chrome.
+///
+/// Bytes typed at the terminal come in on the binary channel and nowhere else,
+/// so anything arriving here is a statement about the window rather than input.
+/// Anything that is neither of these two is dropped rather than guessed at.
+fn parse_text(s: &str) -> Option<session::In> {
+    if let Some((c, r)) = parse_resize(s) {
+        return Some(session::In::Resize(c, r));
+    }
+    let cols = s.strip_prefix('g')?.trim().parse().ok()?;
+    Some(session::In::Gutter(cols))
 }
 
 /// The whole client. One file, no build step, no npm.
@@ -330,26 +343,47 @@ const INDEX: &str = r##"<!doctype html>
   #hint.gone { opacity: 0; }
   /* Floats over the top rather than sitting above it: a bar with its own row
      would take that row off the terminal, and the app lays out to the rows it
-     is given. */
+     is given. The app is told how many columns this covers -- see `sendGutter`
+     -- so it keeps the start of that row clear rather than drawing underneath.
+
+     Top left, on the same row as the section rail, because these are chrome and
+     that row is where this app keeps its chrome.
+
+     Written as `[crt]` in the terminal's own font and palette rather than as
+     buttons: they sit on a terminal, and a rounded pill with a border and a
+     hover box on top of one looks like a browser that has landed on it. The
+     brackets are the same idiom the rail uses two inches to the right. */
   #chrome {
-    position: absolute; top: 0; right: 0; z-index: 3;
-    padding: .55rem .7rem; font: 12px ui-monospace, monospace;
+    position: absolute; top: 0; left: 0; z-index: 3;
+    display: flex; gap: 1ch;
+    /* Two columns in rather than hard against the edge. The tube bends the
+       corners away from the viewer, and the leftmost thing on the top row is
+       the thing that goes over the horizon first. */
+    padding: 0 1ch 0 2ch;
+    font: 14px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
+    line-height: 1.2;
   }
   #chrome button {
-    background: transparent; color: #3a3e46; cursor: pointer;
-    border: 1px solid #23262c; border-radius: 3px;
-    padding: .18rem .5rem; font: inherit; letter-spacing: .06em;
-    transition: color .2s ease, border-color .2s ease;
+    background: transparent; border: 0; padding: 0; margin: 0;
+    font: inherit; cursor: pointer;
+    --ink: #3a3e46; color: var(--ink);
+    transition: color .2s ease;
   }
-  #chrome button + button { margin-left: .35rem; }
-  #chrome button:hover { color: #60666f; border-color: #33373f; }
-  #chrome button[aria-pressed="true"] { color: #ffb040; border-color: #6b4d1c; }
+  #chrome button::before { content: "["; }
+  #chrome button::after { content: "]"; }
+  #chrome button:hover { --ink: #c4c8ce; }
+  #chrome button[aria-pressed="true"] { --ink: #ffb040; }
   #chrome button[disabled] { opacity: .35; cursor: default; }
   /* Which screen, rather than whether. It carries no pressed state because it
      is not a switch -- it is a dial with seven positions, and it is only there
      at all while there is a tube to point it at. */
-  #chrome #screen { color: #4d5560; letter-spacing: .1em; }
-  #chrome #screen:hover { color: #7d8d8f; }
+  #chrome #screen { --ink: #606670; }
+  #chrome #screen:hover { --ink: #c4c8ce; }
+  /* With the tube on, these give up their paint and keep their clicks: the
+     same three words are drawn into the picture instead, so they arrive
+     through the glass with everything else. The colour still resolves here --
+     that is what `--ink` is for -- it is only the ink that goes. */
+  #chrome.shaded button { color: transparent; }
   @media (prefers-reduced-motion: reduce) {
     #hint, #chrome button { transition: none; }
   }
@@ -384,6 +418,7 @@ const term = new Terminal({
   scrollback: 0,
 });
 const screen = document.getElementById('term');
+const switches = document.getElementById('chrome');
 const fit = new FitAddon.FitAddon();
 term.open(screen);
 term.loadAddon(fit);
@@ -419,6 +454,27 @@ const sendSize = () => {
   if (ws.readyState === WebSocket.OPEN) ws.send(`r${term.cols}x${term.rows}`);
 };
 
+// How many columns the switches in the corner cover, so the app can keep the
+// start of the header row clear instead of drawing the name underneath them.
+//
+// Measured rather than declared: the label on the screen switch is whichever
+// screen is selected, so this is four columns wider on `one-piece` than on
+// `p22`, and it disappears entirely when the tube is off. A number written down
+// here would be wrong most of the time.
+//
+// The cell width comes from the terminal's own measurement of itself -- its
+// width in pixels over its width in columns -- because that is the same
+// division the app's layout is on the other side of.
+let gutter = -1;
+const sendGutter = () => {
+  if (ws.readyState !== WebSocket.OPEN || !term.cols) return;
+  const cell = screen.clientWidth / term.cols;
+  const cols = cell > 0 ? Math.ceil(switches.getBoundingClientRect().width / cell) : 0;
+  if (cols === gutter) return;
+  gutter = cols;
+  ws.send(`g${cols}`);
+};
+
 // An id this browser keeps, so a returning visitor is recognised as one. Made
 // here rather than handed out by the server: it never leaves this machine
 // except to say "the same browser as last time", and clearing site data is a
@@ -436,6 +492,7 @@ ws.onopen = () => {
   if (visitorId) ws.send('i' + visitorId);
   if (reducedMotion) ws.send('m1');
   sendSize();                       // the session waits for this one
+  sendGutter();
   term.focus();
 };
 ws.onmessage = (e) => term.write(new Uint8Array(e.data));
@@ -497,7 +554,7 @@ addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   // Debounced: dragging a window edge fires this continuously, and each one
   // costs a full redraw of a full-screen TUI.
-  resizeTimer = setTimeout(() => { fit.fit(); sendSize(); tube.resize(); }, 120);
+  resizeTimer = setTimeout(() => { fit.fit(); sendSize(); sendGutter(); tube.resize(); }, 120);
 });
 
 // ---------------------------------------------------------------------------
@@ -546,6 +603,7 @@ const toggleFull = () => {
 const refit = () => {
   fit.fit();
   sendSize();
+  sendGutter();
   tube.resize();
   fullButton.setAttribute('aria-pressed', isFull() ? 'true' : 'false');
   term.focus();
@@ -1439,6 +1497,35 @@ const tube = {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   },
 
+  // The switches, painted into the picture rather than over it.
+  //
+  // They have to be DOM -- they are the things you click, and they are the only
+  // part of this page a screen reader can be told about. But a crisp label
+  // sitting on top of a curved, scanlined picture is the browser-landed-on-a-
+  // terminal look that the rest of this went to some trouble to avoid. So while
+  // the tube is on the DOM keeps the clicks and gives up the ink, and the same
+  // three words go onto the frame before it reaches the glass: they curve with
+  // it, they get the mask, they dim into the corner.
+  //
+  // Positioned and coloured off the elements themselves rather than off a copy
+  // of their state. There is one arrangement of these words and one set of
+  // rules for what colour they are, and both of them are in the stylesheet.
+  switches() {
+    const box = switches.getBoundingClientRect();
+    if (!box.width || !glass.clientWidth) return;
+    const scale = this.size.w / glass.clientWidth;
+    const ctx = this.sctx;
+    ctx.textBaseline = 'top';
+    ctx.font = `${14 * scale}px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
+    for (let i = 0; i < switches.children.length; i++) {
+      const el = switches.children[i];
+      if (el.hidden) continue;
+      const at = el.getBoundingClientRect();
+      ctx.fillStyle = getComputedStyle(el).getPropertyValue('--ink').trim() || '#3a3e46';
+      ctx.fillText(`[${el.textContent}]`, at.left * scale, at.top * scale);
+    }
+  },
+
   draw() {
     if (!this.gl) return;
     const gl = this.gl;
@@ -1456,6 +1543,7 @@ const tube = {
     for (let i = 0; i < layers.length; i++) {
       this.sctx.drawImage(layers[i], 0, 0, w, h);
     }
+    this.switches();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.source);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, this.scratch);
@@ -1529,6 +1617,9 @@ const showScreen = () => {
   const s = screenById(tube.screen);
   picker.textContent = s.id;
   picker.title = s.hint;
+  // `one-piece` is six columns wider than `p22`, and the app is keeping that
+  // many columns clear for it.
+  sendGutter();
 };
 
 const setScreen = (id) => {
@@ -1554,11 +1645,15 @@ const setCrt = (on) => {
   }
   button.setAttribute('aria-pressed', on ? 'true' : 'false');
   picker.hidden = !on;
+  // The switch appears with the tube and goes with it, so the room it needs
+  // does too.
+  sendGutter();
   try { localStorage.setItem('crt', on ? '1' : '0'); } catch (e) { /* private mode */ }
   if (on) {
     tube.on = true;
     useRenderer('canvas');
     screen.classList.add('shaded');
+    switches.classList.add('shaded');
     glass.classList.add('on');
     tube.resize();
     tube.warmTo = 1;
@@ -1576,6 +1671,7 @@ const setCrt = (on) => {
       tube.on = false;
       glass.classList.remove('on');
       screen.classList.remove('shaded');
+      switches.classList.remove('shaded');
       useRenderer('webgl');
     };
     tube.wake();
@@ -1584,8 +1680,14 @@ const setCrt = (on) => {
   term.focus();
 };
 
-// Every repaint of the terminal is a repaint of the tube, and nothing else is.
+// Every repaint of the terminal is a repaint of the tube, and nothing else is
+// -- except the switches, whose hover is drawn into the frame now and so needs
+// a frame to be drawn into.
 term.onRender(() => tube.schedule());
+switches.addEventListener('mouseover', () => tube.wake());
+switches.addEventListener('mouseout', () => tube.wake());
+switches.addEventListener('focusin', () => tube.wake());
+switches.addEventListener('focusout', () => tube.wake());
 
 // A tab in the background is not a tube anybody is looking at. The frames it
 // would have drawn are not owed to it afterwards either -- whatever was fading
@@ -1655,6 +1757,20 @@ mod tests {
     fn browser_preserves_modified_editing_keys() {
         for sequence in [r"\x1b[13;2u", r"\x1b[127;5u", r"\x1b[127;3u"] {
             assert!(INDEX.contains(sequence), "browser does not send {sequence}");
+        }
+    }
+
+    /// The text channel carries statements about the window and nothing else.
+    #[test]
+    fn the_text_channel_is_a_size_or_a_gutter_and_never_input() {
+        assert!(matches!(parse_text("r120x40"), Some(session::In::Resize(120, 40))));
+        assert!(matches!(parse_text("g16"), Some(session::In::Gutter(16))));
+        assert!(matches!(parse_text("g0"), Some(session::In::Gutter(0))));
+        // Typed characters come in on the binary channel. Anything here that is
+        // neither of the two is dropped rather than guessed at -- a `g` is a
+        // gutter, and `great` is not a gutter of any width.
+        for junk in ["great", "g", "gx", "rm -rf /", "", "i-visitor", "m1"] {
+            assert!(parse_text(junk).is_none(), "`{junk}` was taken as a message");
         }
     }
 
