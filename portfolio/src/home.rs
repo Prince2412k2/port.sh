@@ -239,7 +239,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
 pub fn help(f: &mut Frame, area: Rect) {
     let rows: [(&str, &str); 19] = [
         ("navigation", ""),
-        ("0 / 1 – 5", "home / open a section"),
+        ("1 – 6", "open a section; 0 is home too"),
         ("click / esc", "open rail / local back, then home"),
         ("/", "this list outside Ask"),
         ("", ""),
@@ -363,7 +363,7 @@ mod tests {
             })
             .unwrap();
         let plain = termap::snapshot::plain(terminal.backend().buffer());
-        assert!(plain.contains("0 / 1 – 5"));
+        assert!(plain.contains("1 – 6"));
         assert!(plain.contains("complete / delete word / menu"));
     }
 }
