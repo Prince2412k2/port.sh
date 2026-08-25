@@ -575,9 +575,10 @@ A question appears once whatever became of it, marked `[cancelled]`,
 one was asked nine times. `open` in place of a duration is a visit still going,
 or one whose process was killed under it.
 
-`bin/visits` prints the same log as plain text. It is a fallback for a copy of
-the log on a machine with no build of this, and it cannot open the
-conversations — that needs the renderers, and they are in the binary.
+`bin/visits --docker` prints the same log as plain text, reading it out of
+whichever of the two containers is up. It is the fallback for a machine with no
+build of this, and it cannot open the conversations — that needs the
+renderers, and they are in the binary.
 
 Underneath is append-only JSONL, beside the messages on the same volume:
 

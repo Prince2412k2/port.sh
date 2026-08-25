@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The visit log, printed. A fallback for when the binary is not to hand.
 
-    bin/visits                     $PORTFOLIO_VISITS, or the usual places
+    bin/visits --docker            read it out of the running container
     bin/visits --file some.jsonl   a copy taken off the box
+    bin/visits                     $PORTFOLIO_VISITS, or the usual places
 
 `portfolio --visitors` is the real reader: it browses people, folds their
 visits, and opens any conversation back up in the chat itself, with the maps
@@ -18,7 +19,9 @@ rather than fatal.
 import argparse
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 CANDIDATES = [
@@ -99,11 +102,38 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--file")
+    ap.add_argument("--docker", action="store_true",
+                    help="copy the log out of the running container first")
+    ap.add_argument("--service", default="portfolio-web",
+                    help="which container to read it from (default portfolio-web)")
     args = ap.parse_args()
 
-    path = args.file or next((p for p in CANDIDATES if p and os.path.exists(p)), None)
+    path = args.file
+    if args.docker:
+        # Both containers mount the messages volume, so either will do -- and
+        # if the named one is down, the other is worth trying before giving up.
+        names = [args.service] + [n for n in ("portfolio", "portfolio-web")
+                                  if n != args.service]
+        tmp = os.path.join(tempfile.gettempdir(), "portfolio-visits.jsonl")
+        why = ""
+        for name in names:
+            with open(tmp, "w", encoding="utf-8") as f:
+                r = subprocess.run(
+                    ["docker", "compose", "exec", "-T", name,
+                     "cat", "/app/messages/visits.jsonl"],
+                    stdout=f, stderr=subprocess.PIPE, text=True,
+                )
+            if r.returncode == 0:
+                path = tmp
+                break
+            why = r.stderr.strip()
+        else:
+            sys.exit(f"could not read the log from {' or '.join(names)}:\n{why}")
+
+    path = path or next((p for p in CANDIDATES if p and os.path.exists(p)), None)
     if not path:
-        sys.exit("no visit log found. Tried:\n  " + "\n  ".join(p for p in CANDIDATES if p))
+        sys.exit("no visit log found. Tried:\n  " + "\n  ".join(p for p in CANDIDATES if p)
+                 + "\n\nOn the host, the real one is in the container: bin/visits --docker")
 
     stays = read(path)
     if not stays:
