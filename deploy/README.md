@@ -161,14 +161,24 @@ find out in production or not at all.
 
 Six secrets, in **Settings → Secrets and variables → Actions**:
 
+It runs `ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST <command>`, and every
+part of that is a secret:
+
 | secret | what |
 |---|---|
-| `DEPLOY_HOST` | the box |
+| `DEPLOY_HOST` | the box, by name or address |
 | `DEPLOY_USER` | the account the checkout belongs to |
-| `DEPLOY_PORT` | the real sshd, if it is not 22. Not 2222 — that is this app |
-| `DEPLOY_PATH` | the checkout, e.g. `/srv/terminal`. Defaults to that |
+| `DEPLOY_PORT` | **the box's own sshd.** No default — see below |
 | `DEPLOY_KEY` | the private half of a key made only for this |
 | `DEPLOY_KNOWN_HOSTS` | the box's *host* key, so the runner can tell it apart |
+| `DEPLOY_PATH` | the checkout. Optional; `/srv/terminal` if unset |
+
+**`DEPLOY_PORT` has no default and that is deliberate.** It used to fall back
+to 22 — which, once this app is deployed on 22, is this app. An unset secret
+would have pointed the deploy at the portfolio's own ssh server rather than at
+the box. It refuses the command and the job fails, so nothing bad happens; it
+just happens for a reason nobody can read. Missing secrets are now named
+before the connection is attempted at all.
 
 ```bash
 # on your machine: a key that does nothing else
@@ -178,8 +188,15 @@ ssh-keygen -t ed25519 -f deploy -C 'github actions -> port.sh' -N ''
 echo "restrict $(cat deploy.pub)" >> ~/.ssh/authorized_keys
 
 # the host key, so the deploy is not trusting whoever answers on that address
-ssh-keyscan -p 22 your-host
+ssh-keyscan -p "$DEPLOY_PORT" "$DEPLOY_HOST"
 ```
+
+Run that `ssh-keyscan` with **the same host and port the secrets hold**. A
+known_hosts entry is keyed by exactly what was typed: an address and a name
+for the same machine are two different entries, and a non-default port is
+recorded as `[host]:port`. Scanned one way and connected the other, the deploy
+fails on a host key it has never seen — which is the check working, and reads
+like the check being broken.
 
 `restrict` turns off port forwarding, agent forwarding, X11 and pty allocation
 for that key. The deploy needs none of them.

@@ -43,6 +43,21 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
+
+          # Named, so a missing one is a sentence rather than `ssh: Could not
+          # resolve hostname : Name or service not known` three lines later.
+          missing=
+          for v in DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "${!v:-}" ]; then
+              echo "secret $v is not set" >&2
+              missing=yes
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "see 'On push to main' in deploy/README.md" >&2
+            exit 1
+          fi
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy
           chmod 600 ~/.ssh/deploy
@@ -53,11 +68,22 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
+          # `DEPLOY_PORT` has no default on purpose. It used to fall back to 22,
+          # which is where this app's own ssh server now is -- so an unset
+          # secret would have pointed the deploy at the portfolio instead of at
+          # the box. It refuses the command and the job fails, which is the
+          # right outcome reached by an unreadable route.
+          #
+          # BatchMode so nothing can stop and wait for an answer nobody is
+          # there to give, and a timeout so an unreachable box is a minute
+          # rather than the job's whole budget.
           ssh -i ~/.ssh/deploy \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
               -o UserKnownHostsFile=~/.ssh/known_hosts \
-              -p "${DEPLOY_PORT:-22}" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -p "$DEPLOY_PORT" \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "DEPLOY_PATH='${DEPLOY_PATH:-/srv/terminal}' SHA='${{ github.sha }}' bash -s" <<'REMOTE'
           set -euo pipefail
