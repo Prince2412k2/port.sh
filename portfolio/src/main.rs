@@ -5,6 +5,7 @@ mod about;
 mod boot;
 mod budget;
 mod ask;
+mod audience;
 mod browse;
 mod cert;
 mod coffee;
@@ -57,6 +58,8 @@ fn main() -> io::Result<()> {
     let mut ssh_addr = "0.0.0.0".to_string();
     let mut ssh_port: u16 = 2222;
     let mut host_key: Option<String> = None;
+    let mut replay: Option<String> = None;
+    let mut visitors = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -69,6 +72,8 @@ fn main() -> io::Result<()> {
                 println!("  --at SECONDS     how far into the section's animation to draw");
                 println!("  --probe          check which agent tier is answering, and exit");
                 println!("  --health         process health check; prints ok and exits");
+                println!("  --visitors       who came, what they asked, and their conversations");
+                println!("  --replay SESSION one conversation, read-only, panels and all");
                 println!("  --tools          serve our tools and print what an agent calls, and");
                 println!("                   exit on ctrl-c. For pointing an agent at by hand");
                 println!();
@@ -109,6 +114,8 @@ fn main() -> io::Result<()> {
                 println!("ok");
                 return Ok(());
             }
+            "--replay" => replay = args.next(),
+            "--visitors" => visitors = true,
             "--plain" => {
                 if let Some(s) = shot.as_mut() {
                     s.plain = true;
@@ -302,6 +309,45 @@ fn main() -> io::Result<()> {
             .map_err(|e| io::Error::other(e.to_string()));
     }
 
+    if visitors {
+        let browser = audience::Browser::new();
+        if browser.is_empty() {
+            eprintln!("portfolio: no visits recorded yet at {}", visits::path().display());
+            std::process::exit(1);
+        }
+        if !io::stdout().is_terminal() {
+            eprintln!("portfolio: --visitors draws a page, so it needs a terminal");
+            std::process::exit(1);
+        }
+        let mut term = setup()?;
+        install_panic_hook();
+        let result = audience_loop(&mut term, browser);
+        restore(&mut term)?;
+        return result;
+    }
+
+    // Before the check below, because a replay that cannot run should say which
+    // of the two reasons it is: an empty answer to `--replay` is a mistyped
+    // session, and no terminal is a pipe. Falling through to the plain page
+    // said neither, and said it with an exit code of zero.
+    if let Some(session) = replay {
+        let turns = visits::chat_of(&session);
+        if turns.is_empty() {
+            eprintln!("portfolio: nothing recorded for session {session}");
+            eprintln!("portfolio: `bin/visits --raw` lists the sessions there are");
+            std::process::exit(1);
+        }
+        if !io::stdout().is_terminal() {
+            eprintln!("portfolio: --replay draws a page, so it needs a terminal");
+            std::process::exit(1);
+        }
+        let mut term = setup()?;
+        install_panic_hook();
+        let result = watch(&mut term, turns, format!("session {session}"));
+        restore(&mut term)?;
+        return result;
+    }
+
     // No terminal on the other end: `ssh host | cat`, a health check, a script.
     // Raw mode would fail and the error would be the only thing they ever saw.
     if !io::stdout().is_terminal() {
@@ -327,6 +373,72 @@ fn idle_limit() -> Duration {
         .and_then(|v| v.parse().ok())
         .unwrap_or(900);
     Duration::from_secs(secs)
+}
+
+/// The visitor list, and the conversations it opens.
+///
+/// One loop and two screens rather than two programs: opening a conversation
+/// builds a `Shell` in read-only mode, runs it until it is quit, and drops it.
+/// The list is still there underneath because it was never taken down.
+fn audience_loop(term: &mut Term, mut browser: audience::Browser) -> io::Result<()> {
+    loop {
+        term.draw(|f| browser.render(f))?;
+        if !event::poll(Duration::from_millis(120))? {
+            continue;
+        }
+        let went = match event::read()? {
+            Event::Key(k) => browser.on_key(k),
+            _ => audience::Went::Nowhere,
+        };
+        match went {
+            audience::Went::Nowhere => {}
+            audience::Went::Out => return Ok(()),
+            audience::Went::Into { session, whose } => {
+                let turns = visits::chat_of(&session);
+                if !turns.is_empty() {
+                    watch(term, turns, whose)?;
+                    // The chat cleared the screen for itself and drew over
+                    // everything; the list has to be laid down again rather
+                    // than diffed against a frame that is no longer there.
+                    term.clear()?;
+                }
+            }
+        }
+    }
+}
+
+/// Read a conversation back. The same renderer, none of the machinery.
+///
+/// No idle timeout and no agent: nobody is waiting on this and there is
+/// nothing for it to wait on. It still ticks, because the panels animate --
+/// a diagram that was drawn with beats still has them, which is most of the
+/// reason to look at one of these rather than at the text.
+fn watch(term: &mut Term, turns: Vec<crate::ask::SavedTurn>, whose: String) -> io::Result<()> {
+    let mut shell = Shell::new();
+    shell.replay(turns, whose);
+    let mut last = Instant::now();
+    loop {
+        term.draw(|f| shell.render(f))?;
+        if event::poll(Duration::from_millis(shell.frame_ms()))? {
+            loop {
+                match event::read()? {
+                    Event::Key(k) => shell.on_key(k),
+                    Event::Mouse(m) => shell.on_mouse(m),
+                    _ => {}
+                }
+                if shell.quit || !event::poll(Duration::ZERO)? {
+                    break;
+                }
+            }
+        }
+        if shell.quit {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(last).as_secs_f64().min(0.1);
+        last = now;
+        shell.tick(dt);
+    }
 }
 
 fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {

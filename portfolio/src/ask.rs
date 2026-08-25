@@ -725,6 +725,12 @@ pub enum State {
 }
 
 pub struct Ask {
+    /// Reading a conversation that has already happened, rather than having
+    /// one. No composer, no agent, no keys but the ones that move the page.
+    /// Everything else about it is the same renderer, which is the point: a
+    /// transcript that is drawn by something other than the thing being
+    /// transcribed is a transcript of that other thing.
+    pub read_only: bool,
     client: Option<acp::Ask>,
     pub state: State,
     pub input: String,
@@ -815,6 +821,7 @@ impl Drop for Ask {
 impl Ask {
     pub fn new() -> Ask {
         Ask {
+            read_only: false,
             client: None,
             state: State::Cold,
             input: String::new(),
@@ -1896,6 +1903,27 @@ impl Ask {
 
     pub fn on_key(&mut self, k: crossterm::event::KeyEvent) {
         use crossterm::event::{KeyCode, KeyModifiers};
+        // Nothing here edits anything, so in a replay the whole handler is
+        // reduced to moving through what is already on the page. Filtering the
+        // keys that type rather than the keys that do not would leave the next
+        // one somebody adds able to type into a transcript.
+        if self.read_only {
+            match k.code {
+                // The same walk the live page does with an empty line, and for
+                // the same reason: a panel belongs to one answer, so stepping
+                // between answers is what brings each one's map or diagram
+                // back. Scrolling the text alone would leave the picture from
+                // whichever turn happened to be last.
+                KeyCode::Up | KeyCode::Char('k') => self.walk_answers(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.walk_answers(1),
+                KeyCode::PageUp => self.scroll_by(10),
+                KeyCode::PageDown => self.scroll_by(-10),
+                KeyCode::Home => self.scroll_by(i32::MAX),
+                KeyCode::End => self.scroll = 0,
+                _ => {}
+            }
+            return;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // Three things want the arrows, so the order is fixed here rather than
         // fought over further down: the palette while it is open, then the
@@ -2136,6 +2164,9 @@ fn editable_lines(input: &str, width: u16, cursor: Option<usize>) -> Vec<String>
 }
 
 fn question_height(area: Rect, a: &Ask) -> u16 {
+    if a.read_only {
+        return 0;
+    }
     let rows = if a.driving || a.input.is_empty() {
         1
     } else {
@@ -2424,16 +2455,18 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         &picks,
         a.picked(),
     );
-    question(
-        f,
-        Rect {
-            x,
-            y: area.y + area.height - question_rows,
-            width: w,
-            height: question_rows,
-        },
-        a,
-    );
+    if question_rows > 0 {
+        question(
+            f,
+            Rect {
+                x,
+                y: area.y + area.height - question_rows,
+                width: w,
+                height: question_rows,
+            },
+            a,
+        );
+    }
 }
 
 /// The invitation, before anybody has asked anything.

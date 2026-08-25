@@ -161,6 +161,9 @@ pub struct Shell {
     /// Columns the client has taken at the start of the header row. See
     /// `set_gutter`; zero everywhere except a browser tab.
     gutter: u16,
+    /// Whose conversation is being read, for the header row. Empty unless this
+    /// shell is a replay.
+    replaying: String,
 }
 
 /// How long a chord's report stays up.
@@ -363,6 +366,7 @@ impl Shell {
             clock: 0.0,
             since: 0.0,
             gutter: 0,
+            replaying: String::new(),
             locator: None,
             manual: None,
             chord: None,
@@ -515,6 +519,21 @@ impl Shell {
     ///
     /// Capped, because it arrives over the wire: a client claiming the whole
     /// width would leave the rail nowhere to go.
+    /// Open on a conversation that has already happened.
+    ///
+    /// Not `go(Section::Ask)`, which wakes the agent -- a transcript does not
+    /// need one and spawning a model to look at what a model already said
+    /// would be an odd way to read it. The section is set directly and the
+    /// turns are put in through the same `restore` a returning visitor's are.
+    pub fn replay(&mut self, turns: Vec<crate::ask::SavedTurn>, whose: String) {
+        self.replaying = whose;
+        self.section = Section::Ask;
+        self.switch = 0.0;
+        self.skip_boot();
+        self.ask.read_only = true;
+        self.ask.restore(turns);
+    }
+
     pub fn set_gutter(&mut self, cols: u16) {
         self.gutter = cols.min(40);
     }
@@ -699,6 +718,17 @@ impl Shell {
         // Tab belongs to completion, not navigation. Ask has a command line;
         // the visual sections do not, so there it is deliberately inert.
         if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && self.section != Section::Ask {
+            return;
+        }
+
+        // A replay is one screen and a way out of it. The section rail, the
+        // digits and the map keys all lead somewhere that is not this
+        // conversation, and there is no reason to be taken there from here.
+        if self.ask.read_only {
+            match k.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+                _ => self.ask.on_key(k),
+            }
             return;
         }
 
@@ -1171,6 +1201,20 @@ impl Shell {
     }
 
     fn rail(&self, f: &mut Frame, area: Rect) {
+        // A transcript has nowhere to navigate to. The rail would offer six
+        // sections and answer for none of them, so the row says which
+        // conversation this is instead -- which is the thing somebody reading
+        // one actually needs to know and cannot get from the page itself.
+        if !self.replaying.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  reading  ", Style::default().fg(ACCENT)),
+                    Span::styled(self.replaying.clone(), Style::default().fg(DIM)),
+                ])),
+                area,
+            );
+            return;
+        }
         let start = self.rail_spans().map(|spans| spans[0].1);
 
         // Not on Home: the landing screen sets the name as its headline three
@@ -1304,7 +1348,13 @@ impl Shell {
         if self.section == Section::Ask {
             let n = self.ask.turns.len();
             right.push(Span::styled(
-                format!("{n}/{} questions     ", crate::gates::GATES.turns),
+                match self.ask.read_only {
+                    // An allowance out of a budget, under a conversation that
+                    // is over and spent it already. What is worth knowing here
+                    // is how much of it there is.
+                    true => format!("{n} question{}     ", if n == 1 { "" } else { "s" }),
+                    false => format!("{n}/{} questions     ", crate::gates::GATES.turns),
+                },
                 Style::default().fg(FAINT),
             ));
         }
@@ -1317,10 +1367,14 @@ impl Shell {
             .sum::<u16>();
         let available = area.width.saturating_sub(right_width + 3) as usize;
         let (full, compact) = self.section.hints();
-        let hint = match self.driving && self.section == Section::Ask {
-            true => "driving map   n/b places   esc typing",
-            false if full.chars().count() <= available => full,
-            false => compact,
+        let hint = match (self.ask.read_only, self.driving && self.section == Section::Ask) {
+            // A transcript offers none of the verbs the live page does. Saying
+            // `enter send` under a conversation that already happened is an
+            // invitation to type into it and find out that nothing happens.
+            (true, _) => "up down  step through the answers   q  back",
+            (_, true) => "driving map   n/b places   esc typing",
+            _ if full.chars().count() <= available => full,
+            _ => compact,
         };
         let hint: String = hint.chars().take(available).collect();
         f.render_widget(
@@ -2634,6 +2688,84 @@ mod tests {
         let mut s = shell();
         s.set_gutter(9_000);
         assert!(s.gutter <= 40, "an absurd gutter was taken at face value");
+    }
+
+    /// A replay draws the conversation, the panel it came with, and no
+    /// composer -- and takes no keys that would change any of it.
+    #[test]
+    fn a_replay_is_the_chat_without_the_chatting() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let spec = skysheet::diagram::Spec {
+            title: "Git: from edit to merge".into(),
+            elements: vec![skysheet::diagram::Element {
+                id: "work".into(),
+                rect: skysheet::diagram::RectSpec { x: 8, y: 20, width: 40, height: 30 },
+                tone: skysheet::diagram::Tone::Normal,
+                kind: skysheet::diagram::ElementKind::Box {
+                    title: "working tree".into(),
+                    lines: vec!["edit".into()],
+                    frame: skysheet::diagram::Frame::Plain,
+                },
+            }],
+            connectors: Vec::new(),
+            beats: Vec::new(),
+        };
+        let mut s = shell();
+        s.replay(vec![
+            crate::ask::SavedTurn {
+                q: "can you draw me a diagram teaching me how git works?".into(),
+                a: "Here is one.".into(),
+                panel: Some(crate::ask::SavedView {
+                    show: crate::ask::SavedShow::Diagram(spec),
+                    source: None,
+                }),
+            },
+            crate::ask::SavedTurn {
+                q: "and what is a branch really".into(),
+                a: "A movable name pointing at one commit.".into(),
+                panel: None,
+            },
+        ], "prince  ·  2026-08-24 19:33".into());
+        s.tick(0.1);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 44)).unwrap();
+        terminal.draw(|f| s.render(f)).unwrap();
+        let page = termap::snapshot::plain(terminal.backend().buffer());
+
+        assert!(page.contains("what is a branch really"), "the questions are missing:\n{page}");
+        assert!(page.contains("A movable name"), "the answers are missing:\n{page}");
+        // The panel belongs to one answer, and the page opens on the last --
+        // which here had none. Stepping back to the answer that did have one
+        // brings it with them, which is the reason this is the app and not a
+        // text dump.
+        assert!(!page.contains("working tree"), "the last answer had no panel to show");
+        s.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        s.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        s.tick(0.1);
+        terminal.draw(|f| s.render(f)).unwrap();
+        let page = termap::snapshot::plain(terminal.backend().buffer());
+        assert!(page.contains("working tree"), "the diagram did not come back:\n{page}");
+
+        // Typing does nothing, and does not become a question.
+        let before = page.clone();
+        for c in "hello".chars() {
+            s.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        s.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(s.ask.input.is_empty(), "a read-only page took typing");
+        assert!(!s.quit, "enter left the page");
+        terminal.draw(|f| s.render(f)).unwrap();
+        assert_eq!(
+            termap::snapshot::plain(terminal.backend().buffer()),
+            before,
+            "typing changed a page that is only being read"
+        );
+
+        // And there is a way out.
+        s.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(s.quit, "no way out of a replay");
     }
 
     /// A click lands on the entry that is drawn under it.

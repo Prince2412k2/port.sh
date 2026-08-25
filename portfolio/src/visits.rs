@@ -213,26 +213,53 @@ fn saved_turns(id: &str) -> Vec<crate::ask::SavedTurn> {
         if !belongs {
             continue;
         }
-        let (Some(q), Some(a)) = (
-            value.get("q").and_then(|value| value.as_str()),
-            value.get("a").and_then(|value| value.as_str()),
-        ) else {
-            continue;
-        };
-        let panel = (value.get("chat_version").and_then(|value| value.as_u64()) == Some(1))
-            .then(|| value.get("panel").cloned())
-            .flatten()
-            .and_then(|value| serde_json::from_value(value).ok());
-        turns.push(crate::ask::SavedTurn {
-            q: q.to_string(),
-            a: a.to_string(),
-            panel,
-        });
+        let Some(turn) = turn_of(&value) else { continue };
+        turns.push(turn);
     }
     if turns.len() > KEEP {
         turns.drain(..turns.len() - KEEP);
     }
     turns
+}
+
+/// One `ask` line as an exchange the page can be seeded with.
+///
+/// The panel only comes back from a line that says which version wrote it.
+/// Records from before the panel was saved have no `chat_version`, and reading
+/// their absent panel as "no panel" would be right by accident -- reading a
+/// future one's as a `SavedView` would not be.
+fn turn_of(value: &serde_json::Value) -> Option<crate::ask::SavedTurn> {
+    let q = value.get("q")?.as_str()?;
+    let a = value.get("a")?.as_str()?;
+    let panel = (value.get("chat_version").and_then(|v| v.as_u64()) == Some(1))
+        .then(|| value.get("panel").cloned())
+        .flatten()
+        .and_then(|value| serde_json::from_value(value).ok());
+    Some(crate::ask::SavedTurn { q: q.to_string(), a: a.to_string(), panel })
+}
+
+/// One session's conversation, for reading back rather than continuing.
+///
+/// By session where `saved_turns` is by identity, because they answer
+/// different questions: that one is "what was this person told last time", so
+/// it spans their visits; this one is "what happened in this visit".
+///
+/// Not capped. The cap on the other exists because those turns are put back on
+/// a live page and paid for in bandwidth; nobody is served by a reader that
+/// silently drops the first half of what it was asked to show.
+pub fn chat_of(session: &str) -> Vec<crate::ask::SavedTurn> {
+    if session.is_empty() {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(path()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("event").and_then(|e| e.as_str()) == Some("ask"))
+        .filter(|value| value.get("session").and_then(|s| s.as_str()) == Some(session))
+        .filter_map(|value| turn_of(&value))
+        .collect()
 }
 
 fn append(line: &str) {

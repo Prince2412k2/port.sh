@@ -162,7 +162,7 @@ Anything on the `messages` volume can be read from either container, and they
 both mount it — so while one is down the other still has it:
 
 ```bash
-bin/visitors --docker --service portfolio-web
+docker compose exec -it portfolio portfolio --visitors
 ```
 
 ### Updating
@@ -544,24 +544,42 @@ place that exists.
 ## Who came
 
 Visits are logged, so there is an answer to the question a portfolio exists to
-ask: is anybody looking, and from where. Two readers, both in `bin/`:
+ask: is anybody looking, and from where.
 
 ```bash
-bin/visitors --docker      # interactive, folded by person
-bin/visits   --chats       # the conversations, in full
-bin/visits   --who alice   # one person, every visit and every question
-bin/visits   --places      # where they came from
+docker compose exec -it portfolio-web portfolio --visitors
 ```
 
-`--docker` copies the log out of the running container first, so neither tool
-needs to be in the image and the image needs no python.
+People, most recent first, folded across their visits. Enter opens one; inside,
+their conversations are numbered, and pressing the number **opens that
+conversation back up in the chat itself** — read-only, with the map or the
+diagram or the project card that came with each answer. Those are the app's own
+renderers, and there is only one honest way to show somebody what a visitor
+saw, which is to show them it.
+
+```
+  visitors  3 visitors   5 visits   12 questions
+
+  › prince            3 visits   3 questions    15m00s   Ahmedabad, India   2026-08-24 19:33
+    someone           1 visit    9 questions    open                        2026-08-24 19:30
+    w-mf3k2p-a91      1 visit    0 questions    59s      Berlin, Germany    2026-08-24 19:25
+
+  enter open   / search   s sort   r returning   q quit
+```
+
+`/` searches names, addresses, places and the questions themselves. `s` sorts
+by recency, visits or questions. `r` hides anyone who came only once.
 
 A question appears once whatever became of it, marked `[cancelled]`,
-`[failed]` or `[unanswered]` when it did not finish. `[unanswered]` is the one
-that was sent and never came back at all.
+`[failed]` or `[unanswered]` when it did not finish, and `[x9]` when the same
+one was asked nine times. `open` in place of a duration is a visit still going,
+or one whose process was killed under it.
 
-Underneath is append-only JSONL, beside the messages on the same volume, for
-anything the readers do not answer:
+`bin/visits` prints the same log as plain text. It is a fallback for a copy of
+the log on a machine with no build of this, and it cannot open the
+conversations — that needs the renderers, and they are in the binary.
+
+Underneath is append-only JSONL, beside the messages on the same volume:
 
 ```bash
 docker compose exec portfolio-web cat /app/messages/visits.jsonl | jq
