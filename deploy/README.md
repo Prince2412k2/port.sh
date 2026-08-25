@@ -141,6 +141,30 @@ In order, because two of these are one-way:
    `ssh -p 2222 prince.dev`. Both paths run the same program, and either can
    be broken while the other is fine.
 
+### When a service is renamed
+
+Compose only manages what is in the file, so a service that has been renamed
+leaves its old container running under the old name — still up, still holding
+the ports it was given. The replacement then cannot bind them and never
+starts, and `docker compose exec` on the new name says it is not running,
+which is true and not the reason.
+
+```bash
+docker compose ps -a                       # both names will be here
+docker compose up -d --remove-orphans      # the old one goes, the new one binds
+```
+
+The deploy passes `--remove-orphans` for this, so it only bites a stack that
+was last brought up by hand across the rename. `web` became `portfolio-web` in
+this repo, so a deployment older than that needs it once.
+
+Anything on the `messages` volume can be read from either container, and they
+both mount it — so while one is down the other will still answer:
+
+```bash
+docker compose exec portfolio portfolio --visitors
+```
+
 ### Updating
 
 By hand:

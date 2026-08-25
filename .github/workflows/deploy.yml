@@ -138,7 +138,12 @@ jobs:
           # The old containers keep serving until this succeeds. A build that
           # fails leaves the site exactly as it was, which is the reason the
           # build comes before the swap and not after it.
-          $compose up -d --build
+          #
+          # `--remove-orphans` because a renamed service leaves its old
+          # container running under the old name. Compose will not touch it --
+          # it is no longer in the file -- so it keeps whatever ports it had,
+          # and the replacement cannot bind them and never starts.
+          $compose up -d --build --remove-orphans
 
           # And say so only once it is answering, because "compose returned 0"
           # and "the site is up" are different claims.
