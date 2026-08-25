@@ -670,25 +670,56 @@ gates apply to all of them, so adding a server cannot widen what an agent may do
 ## Who came
 
 Visits are logged, so there is an answer to the question a portfolio exists to
-ask: is anybody looking, and from where. Append-only JSONL beside the messages,
-on the same volume:
+ask: is anybody looking, and from where.
 
 ```bash
-docker compose exec portfolio cat /app/messages/visits.jsonl | jq
+docker compose exec portfolio-web portfolio --visitors
 ```
 
-Four kinds of line, all keyed by `session`:
+```text
+2026-08-24 19:33  ssh  prince  ·  203.0.113.7  ·  Ahmedabad, Gujarat, India  ·  8m14s  ·  3 questions  ·  visit 4
+      SSH-2.0-OpenSSH_9.6
+      how does the map actually work
+      why did you write your own ssh server   [cancelled]
+      what is netjail for   [unanswered]
+
+2026-08-24 19:43  web  w-mf3k2p-a91  ·  198.51.100.4  ·  Berlin, Germany  ·  1m02s  ·  no questions  ·  first time
+      Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Firefox/141.0
+
+3 visits  ·  1 returning  ·  4 questions  ·  2026-08-24 19:33 to 2026-08-24 19:48
+```
+
+A question appears once whatever became of it. Both halves are logged — when it
+is sent and when it comes back — so the plain read of the file shows every
+answered question twice, and `[cancelled]`, `[failed]` and `[unanswered]` are
+the three ways one does not finish. `open` in place of a duration is a visit
+still going, or one whose process was killed under it.
+
+Underneath is append-only JSONL, beside the messages on the same volume, for
+anything the report does not answer:
+
+```bash
+docker compose exec portfolio-web cat /app/messages/visits.jsonl | jq
+```
+
+Five kinds of line, all keyed by `session`:
 
 | event | what |
 |---|---|
 | `arrive` | transport, username, identity, address, client, and whether they have been here before |
 | `where` | city, region, country, lat/lon — appended when the lookup returns |
-| `ask` | one exchange, question and answer |
+| `question` | one asked, at the moment it was sent |
+| `ask` | one exchange that finished, question and answer, and what it cost |
 | `leave` | how long they stayed and how many questions they asked |
 
-**What identifies somebody.** Over SSH, two things arrive as part of logging in
-and neither is taken behind anyone's back: the username they typed in front of
-the `@`, and the fingerprint of the key they authenticated with. The fingerprint
+**What identifies somebody, and what to call them.** Over SSH, two things
+arrive as part of logging in and neither is taken behind anyone's back: the
+username they typed in front of the `@`, and the fingerprint of the key they
+authenticated with. Any string is accepted as a username, so it is what
+somebody chose to be called rather than an account — which makes it the closest
+thing to a name here, and the report leads with it. A browser has nowhere to
+type one, so its stable id stands in: not a name, but the thing that makes two
+visits the same person. The fingerprint
 is what makes a return visit recognisable, because it is stable across addresses.
 In a browser there is no equivalent, so the page keeps a random id in
 `localStorage` and sends it — clearing site data makes somebody a new visitor,
