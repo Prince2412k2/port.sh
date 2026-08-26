@@ -184,7 +184,10 @@ impl Relief {
                 // alias; the z-buffer still receives the complete ribbon below.
                 let paint_to = y0 + (y1 - y0).min(2.5);
                 let mut py = y0;
-                while py <= paint_to {
+                // `Hachure` writes the depth buffer below but lays no stipple:
+                // it describes the surface instead of painting it, and the
+                // quiet is what the strokes are drawn against.
+                while ground.paints_surface() && py <= paint_to {
                     let t = (py - y0) / span;
                     let x = sp[0] + (sp_near[0] - sp[0]) * t;
                     canvas.splat(x, py, alpha, &brush);
@@ -213,7 +216,153 @@ impl Relief {
         if ground == Ground::Contour {
             self.contours(canvas, vp, &world, datum, exag, m_per_world);
         }
+        if ground == Ground::Hachure {
+            plotted = self.hachures(canvas, vp, &world, datum, exag, m_per_world);
+        }
         plotted
+    }
+
+    /// Strokes down the line of steepest descent.
+    ///
+    /// One mark per sample, pointing the way water would run, as long and as
+    /// dark as the ground is steep. Flat ground gets nothing, which is most of
+    /// the reason to draw this way: the marks only ever appear where there is
+    /// something to say, so the eye reads relief instead of reading texture.
+    ///
+    /// Three things here are deliberate and worth not undoing.
+    ///
+    /// The direction is computed in *world* space, from the two world vectors
+    /// the sampling grid already spans, not from the gradient in screen space.
+    /// That is what keeps a stroke attached to the hillside it belongs to: turn
+    /// the camera and the mark turns with the slope rather than swimming across
+    /// it. Screen-space marks shimmer, and a shimmering hillside reads as noise
+    /// however pretty the single frame is.
+    ///
+    /// The glyph family changes with distance rather than only the brightness.
+    /// Near strokes are laid in block, which has mass; far ones in braille,
+    /// which is the finest mark available. Depth stops being a fade and becomes
+    /// a change of language, which is a much stronger cue at this resolution.
+    ///
+    /// And a crest -- a sample higher than the ground either side of it along
+    /// the fall line -- is drawn heavier. Silhouette carries more of a mountain
+    /// than its interior does, so it gets the weight.
+    fn hachures(
+        &self,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        world: &[[f64; 2]],
+        datum: f32,
+        exag: f64,
+        m_per_world: f64,
+    ) -> usize {
+        let mut drawn = 0usize;
+        // Every other sample, both ways. At full density the strokes touch and
+        // the whole hillside greys over into the wash this mode exists to avoid.
+        const STRIDE: usize = 2;
+        /// How much of the real fall the stroke is allowed to show.
+        ///
+        /// A hachure is read in plan -- the strokes radiate away from a summit
+        /// and that fan is the whole shape. Given the full exaggerated drop the
+        /// far end lands so far down the screen that every stroke stands up
+        /// vertical and the fan disappears into a picket fence. Taking a third
+        /// of it keeps the sense of falling and keeps the direction legible,
+        /// which is the trade the medium asks for.
+        const FALL: f64 = 0.32;
+        for gy in (1..self.gh.saturating_sub(2)).step_by(STRIDE) {
+            for gx in (1..self.gw.saturating_sub(1)).step_by(STRIDE) {
+                let i = gy * self.gw + gx;
+                let h = self.heights[i];
+                if h < 1.0 {
+                    continue;
+                }
+                let dzdx = self.heights[i + 1] - self.heights[i - 1];
+                let dzdy = self.heights[i + self.gw] - self.heights[i - self.gw];
+                let grade = (dzdx * dzdx + dzdy * dzdy).sqrt();
+                // The quiet. Below this the ground is flat enough that a mark
+                // would be describing rounding error in the heightmap.
+                if grade < 6.0 {
+                    continue;
+                }
+
+                // Downhill, in world units, and the units are the whole care
+                // here. `ex`/`ey` are the world vectors that *one* grid step
+                // spans -- the neighbours are two steps apart, hence the half.
+                // Going through them is how a screen-space grid yields a
+                // world-space direction without unprojecting anything, and it
+                // is what keeps the stroke welded to its hillside when the
+                // camera turns.
+                let ex = [
+                    (world[i + 1][0] - world[i - 1][0]) * 0.5,
+                    (world[i + 1][1] - world[i - 1][1]) * 0.5,
+                ];
+                let ey = [
+                    (world[i + self.gw][0] - world[i - self.gw][0]) * 0.5,
+                    (world[i + self.gw][1] - world[i - self.gw][1]) * 0.5,
+                ];
+                // Unit downhill in grid space.
+                let (gx, gy) = (-dzdx as f64 / grade as f64, -dzdy as f64 / grade as f64);
+
+                // Steeper ground gets a longer stroke, measured in grid steps
+                // and capped under the stride so neighbours never touch. Too
+                // short is a speck with no direction; too long and the hillside
+                // braids into curtains, which is what the first cut of this did.
+                let steep = ((grade / 90.0) as f64).clamp(0.0, 1.0);
+                let reach = (0.85 + 1.15 * steep).min(STRIDE as f64 * 0.8);
+                let span = [
+                    world[i][0] + reach * (gx * ex[0] + gy * ey[0]),
+                    world[i][1] + reach * (gx * ex[1] + gy * ey[1]),
+                ];
+
+                // A crest: higher than the ground both up and down the fall
+                // line. Silhouette over interior, so it gets the weight.
+                let up = self.heights[i - self.gw].max(self.heights[i - 1]);
+                let down = self.heights[i + self.gw].max(self.heights[i + 1]);
+                let crest = h > up && h > down;
+
+                let top = (h - datum) as f64 * exag / m_per_world;
+                // The far end sits lower by however much the ground actually
+                // falls over the stroke, so the mark lies on the surface rather
+                // than floating off it. `grade` is a difference across two grid
+                // steps, so the fall per step is half of it.
+                let drop = (grade as f64 * 0.5 * reach) * exag * FALL / m_per_world;
+                let (pa, da) = vp.project3(world[i], top);
+                let (pb, db) = vp.project3(span, top - drop);
+                if !da.is_finite() || !db.is_finite() {
+                    continue;
+                }
+
+                let far = da.max(db).clamp(0.0, 1.0);
+                crate::raster::line(
+                    canvas,
+                    pa,
+                    pb,
+                    &crate::raster::Pen {
+                        width: 1.0,
+                        // Steepness carries most of it, distance takes some
+                        // back, and a crest is never faint.
+                        alpha: (((0.30 + 0.55 * steep) * (1.0 - 0.5 * far as f64)) as f32
+                            + if crest { 0.20 } else { 0.0 })
+                        .clamp(0.08, 0.95),
+                        depth: da.min(db),
+                        tint: TINT_GREEN,
+                        // Mass near, hairline far -- the one place in this file
+                        // where distance changes the vocabulary rather than just
+                        // the brightness. Kept rare on purpose: a block is four
+                        // braille dots of ink, so spending it on anything but a
+                        // near crest turns the hillside back into a wash.
+                        mat: if crest && far < 0.35 {
+                            crate::canvas::MAT_SOLID
+                        } else {
+                            MAT_DOT
+                        },
+                        pick: u32::MAX,
+                        occlude: false,
+                    },
+                );
+                drawn += 1;
+            }
+        }
+        drawn
     }
 
     /// Iso-elevation lines over the sampled grid, by marching squares.

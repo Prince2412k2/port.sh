@@ -847,7 +847,7 @@ fn help(f: &mut Frame, area: Rect) {
         row("! @ # $ % ^ & *", "toggle a layer (see the panel)"),
         row(")", "all layers on"),
         row("(", "terrain relief"),
-        row("v", "relief / contour / shade"),
+        row("v", "relief / contour / hachure / shade"),
         row("x", "my location"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),

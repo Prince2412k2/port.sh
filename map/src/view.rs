@@ -106,6 +106,19 @@ pub enum Ground {
     Shade,
     /// Ribbon with iso-elevation lines drawn over it. Spacing *is* slope.
     Contour,
+    /// Strokes down the line of steepest descent, and nothing else.
+    ///
+    /// The other three all paint the surface and then say something about it.
+    /// This one paints only what it has something to say about: ground with no
+    /// slope gets no marks at all, and the quiet is the point. Hachures are the
+    /// pre-contour way of drawing relief -- Lehmann's, from 1799 -- and they sit
+    /// exactly opposite contours in the same language. A contour runs across the
+    /// slope and you read steepness from how close the lines are. A hachure runs
+    /// down it and you read steepness from how dark and how long the stroke is.
+    ///
+    /// It is also the one mode that changes glyph family with distance rather
+    /// than just fading: near strokes are laid in block, far ones in braille.
+    Hachure,
 }
 
 impl Ground {
@@ -114,19 +127,30 @@ impl Ground {
             Ground::Ribbon => "relief",
             Ground::Shade => "shade",
             Ground::Contour => "contour",
+            Ground::Hachure => "hachure",
         }
     }
 
     pub fn next(self) -> Ground {
         match self {
             Ground::Ribbon => Ground::Contour,
-            Ground::Contour => Ground::Shade,
+            Ground::Contour => Ground::Hachure,
+            Ground::Hachure => Ground::Shade,
             Ground::Shade => Ground::Ribbon,
         }
     }
 
     pub fn displaces(self) -> bool {
         self != Ground::Shade
+    }
+
+    /// Whether the surface itself gets painted, as opposed to only described.
+    ///
+    /// The depth buffer is written either way -- a ridge still hides the road
+    /// behind it. This only says whether the stipple is laid down, which is the
+    /// difference between understanding the scene and painting it.
+    pub fn paints_surface(self) -> bool {
+        self != Ground::Hachure
     }
 }
 
@@ -194,17 +218,41 @@ mod tests {
         }
     }
 
+    /// `v` has to reach every style and come back, however many there are.
+    ///
+    /// Written against a count when there were three, which is how adding a
+    /// fourth broke it: the cycle was fine and the test was counting.
     #[test]
-    fn the_ground_styles_cycle_and_only_one_lies_flat() {
+    fn the_ground_styles_cycle_through_all_of_themselves() {
+        let all = [Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
         let mut g = Ground::default();
         let mut seen = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..all.len() {
+            assert!(!seen.contains(&g), "{g:?} came round twice before the cycle closed");
             seen.push(g);
             g = g.next();
         }
         assert_eq!(g, Ground::default(), "the cycle does not close");
-        assert_eq!(seen.len(), 3);
+        for style in all {
+            assert!(seen.contains(&style), "{style:?} is unreachable from the key");
+        }
+    }
+
+    /// The two axes the styles vary on, and they are independent.
+    ///
+    /// `displaces` is whether elevation moves a mark up the screen; `paints`
+    /// is whether the surface gets a stipple at all. Hachure is the one that
+    /// displaces without painting -- it writes the depth buffer so a ridge
+    /// still hides what is behind it, and then says nothing more.
+    #[test]
+    fn only_shade_lies_flat_and_only_hachure_leaves_the_surface_bare() {
         assert!(!Ground::Shade.displaces());
-        assert!(Ground::Ribbon.displaces() && Ground::Contour.displaces());
+        for style in [Ground::Ribbon, Ground::Contour, Ground::Hachure] {
+            assert!(style.displaces(), "{style:?} should read elevation");
+        }
+        assert!(!Ground::Hachure.paints_surface());
+        for style in [Ground::Ribbon, Ground::Contour, Ground::Shade] {
+            assert!(style.paints_surface(), "{style:?} should lay the stipple");
+        }
     }
 }

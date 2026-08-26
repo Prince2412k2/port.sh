@@ -34,7 +34,7 @@ fn main() -> io::Result<()> {
                 println!("  --cursor X,Y     place the focus cursor (snapshot only)");
                 println!("  --focus MODE     depth focus: off | subtle | strong");
                 println!("  --roads MODE     road glyphs: braille | blocks | lines");
-                println!("  --ground MODE    terrain: relief | contour | shade");
+                println!("  --ground MODE    terrain: relief | contour | hachure | shade");
                 println!("  --weight W       stroke width multiplier (0.4 - 2.5)");
                 println!("  --center LON,LAT centre the view");
                 println!("  --tilt DEG       camera pitch (0 = flat 2D)");
@@ -108,6 +108,7 @@ fn main() -> io::Result<()> {
                     Some("relief") => Some(view::Ground::Ribbon),
                     Some("contour") => Some(view::Ground::Contour),
                     Some("shade") => Some(view::Ground::Shade),
+                    Some("hachure") => Some(view::Ground::Hachure),
                     _ => None,
                 };
                 if let Some(s) = shot.as_mut() {
