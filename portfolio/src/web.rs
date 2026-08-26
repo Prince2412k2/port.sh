@@ -80,6 +80,7 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(page))
         .route("/ws", get(upgrade))
+        .route(FONT_URL, get(font))
         .with_state(state);
 
     let bind: SocketAddr = format!("{addr}:{port}").parse()?;
@@ -92,6 +93,48 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
         .with_graceful_shutdown(crate::net::shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// The one font this page may not do without, and why it is served rather
+/// than named.
+///
+/// The art here is 114,632 sextants -- U+1FB00..U+1FB3B, "Symbols for Legacy
+/// Computing", Unicode 13 -- and 28,705 braille cells. DejaVu Sans Mono, which
+/// this asked for first for a long time, has *none* of either: 0/60 sextants
+/// and 0/256 braille. Every plate and the whole map were therefore drawn by
+/// whatever font the browser went and found on its own, and the metrics of the
+/// two do not agree. Noto Sans Symbols2, which is what it finds on Debian,
+/// draws a sextant one full em wide with its ink only 0.333 em tall, into a
+/// cell measured at 0.602 em from DejaVu. Too wide, so it bleeds into the cell
+/// beside it; too short, so every row of the picture has a seam above and
+/// below it. That is the "lines and boxes" this fixes.
+///
+/// Naming a better fallback cannot fix it, and was tried twice. Any fallback
+/// is wrong, because the cell is measured from one font and the glyph comes
+/// from another. It takes one family that has all of it, and Iosevka is the
+/// one -- 60/60 sextants, 256/256 braille, 32/32 block elements, every last
+/// glyph on the same 0.5 em advance, with the block elements landing on the
+/// exact halves and thirds of the cell so they tile without a seam.
+///
+/// Subset to the 943 glyphs this app can emit, it is 31 KB, which is small
+/// enough to carry rather than fetch. Served from here rather than from the
+/// CDN the terminal comes from: the page already degrades honestly when
+/// jsdelivr is unreachable, and there is no reason to add a second thing that
+/// can be blocked for a file this size.
+const FONT_URL: &str = "/iosevka.woff2";
+const FONT: &[u8] = include_bytes!("../data/iosevka-portfolio.woff2");
+
+async fn font() -> Response {
+    (
+        [
+            ("content-type", "font/woff2"),
+            // Immutable: the name changes when the file does, because the file
+            // is part of the binary that serves it.
+            ("cache-control", "public, max-age=31536000, immutable"),
+        ],
+        FONT,
+    )
+        .into_response()
 }
 
 async fn page(
@@ -402,8 +445,22 @@ const INDEX: &str = r##"<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prince Patel</title>
+<link rel="preload" href="/iosevka.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <style>
+  /* Everything the terminal draws comes out of this one file -- letters, box
+     drawing, braille and the sextants every portrait is built from. One family
+     for all of it is the point: see `FONT_URL` above for what happens when the
+     cell is measured from one font and the picture is drawn with another.
+     `swap` rather than `block`, because text in the wrong font for a moment is
+     better than no text at all if this somehow does not arrive. */
+  @font-face {
+    font-family: "Iosevka Portfolio";
+    src: url("/iosevka.woff2") format("woff2");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
   html, body {
     margin: 0; padding: 0; height: 100%;
     background: #08090b; overflow: hidden;
@@ -454,7 +511,7 @@ const INDEX: &str = r##"<!doctype html>
        edges away from the viewer, and the leftmost thing on the screen is the
        first to go over the horizon. */
     padding: 0 1ch 0 2ch;
-    font: 14px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
+    font: 17px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
     line-height: 1.2;
     /* The strip is as tall as the window so the switches can sit in the middle
        of it, which would otherwise make the whole left edge unclickable. */
@@ -518,7 +575,7 @@ if (typeof Terminal === 'undefined') {
   said.style.cssText =
     'position:absolute;inset:0;display:flex;align-items:center;' +
     'justify-content:center;margin:0;text-align:center;color:#c4c8ce;' +
-    'font:14px "DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
+    'font:17px "Iosevka Portfolio","DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
   said.textContent =
     'the terminal emulator this page needs did not load.\n\n' +
     'it comes from cdn.jsdelivr.net, which is either blocked here or down.\n\n' +
@@ -533,8 +590,11 @@ const term = new Terminal({
   cursorBlink: false,
   // The app hides the cursor and draws everything itself; a blinking block
   // parked wherever the last write landed only ever looks like a bug.
-  fontFamily: '"DejaVu Sans Mono", "Menlo", ui-monospace, monospace',
-  fontSize: 14,
+  fontFamily: '"Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace',
+  // 17 against DejaVu's 14. Iosevka sets a 0.5 em cell where DejaVu sets
+  // 0.602, so matching the size would have shrunk every column by a fifth;
+  // this lands the cell within a tenth of a pixel of where it was.
+  fontSize: 17,
   theme: { background: '#08090b', foreground: '#c4c8ce' },
   // Braille and half-block glyphs are the whole renderer here, and letting
   // xterm draw them from the font rather than its own box-drawing shortcuts
@@ -569,6 +629,30 @@ const useRenderer = (kind) => {
 };
 useRenderer('webgl');
 fit.fit();
+
+// Measure the cell again once the real font is actually here.
+//
+// xterm works out how wide a character is the moment it opens, and with
+// `font-display: swap` that can happen against the fallback -- which sets a
+// cell a fifth wider than Iosevka's and so a column count that is wrong for
+// the font that ends up drawing. Everything downstream is built on that
+// number: how many columns the app is told it has, where the switches think
+// they are, where a click lands.
+//
+// The round trip through a different size is not decoration. xterm only
+// re-measures when an option it is watching actually changes value, so
+// assigning the size it already holds does nothing at all.
+if (document.fonts && document.fonts.load) {
+  document.fonts.load('17px "Iosevka Portfolio"').then(() => {
+    if (term.options.fontSize === 17) {
+      term.options.fontSize = 16;
+      term.options.fontSize = 17;
+    }
+    fit.fit();
+    sendSize();
+    measure();
+  }).catch(() => { /* the fallback is already drawing; nothing to undo */ });
+}
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1760,7 +1844,7 @@ const tube = {
     const scale = this.size.w / glass.clientWidth;
     const ctx = this.sctx;
     ctx.textBaseline = 'top';
-    ctx.font = `${14 * scale}px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
+    ctx.font = `${17 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
     for (const it of laidOut) {
       ctx.fillStyle = getComputedStyle(it.el).getPropertyValue('--ink').trim() || '#3a3e46';
       ctx.fillText(`[${it.el.textContent}]`, it.x * scale, it.y * scale);
@@ -1987,6 +2071,53 @@ setTimeout(dismiss, 8000);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The font is here, and it is a font.
+    #[test]
+    fn the_font_this_serves_is_shipped_with_the_binary() {
+        assert_eq!(&FONT[..4], b"wOF2", "the shipped font is not woff2");
+        // 943 glyphs, of which 60 sextants and 256 braille cells. Anything
+        // near empty means the file was replaced by something that is not it.
+        assert!(
+            FONT.len() > 20_000,
+            "too small to be carrying the glyphs the art is made of: {} bytes",
+            FONT.len()
+        );
+        assert!(INDEX.contains(FONT_URL), "the page never asks for the font this serves");
+    }
+
+    /// Every font stack on the page asks for the shipped font before it falls
+    /// back to anything.
+    ///
+    /// There are four of them -- the chrome strip's CSS, the message shown when
+    /// xterm never loaded, the terminal's own option, and the canvas that
+    /// paints the switches over the shader -- and they have to agree. The last
+    /// time they did not, the portraits came apart down every row: DejaVu Sans
+    /// Mono has 0 of the 60 sextants and 0 of the 256 braille cells this draws
+    /// with, so the cell was measured from one font and the picture drawn with
+    /// whatever the browser found instead, an em wide against a cell 0.602 em
+    /// wide and a third as tall as it needed to be.
+    ///
+    /// Falling back to DejaVu is still right -- text in the wrong font beats no
+    /// text -- but it must never be what gets asked for first.
+    #[test]
+    fn every_font_stack_asks_for_the_shipped_font_first() {
+        let stacks: Vec<&str> = INDEX
+            .match_indices("\"DejaVu Sans Mono\"")
+            .map(|(at, _)| &INDEX[at.saturating_sub(90)..at])
+            .collect();
+        assert!(
+            stacks.len() >= 4,
+            "the page has lost a font stack: found {} of the 4 that should be there",
+            stacks.len()
+        );
+        for before in stacks {
+            assert!(
+                before.contains("Iosevka Portfolio"),
+                "a stack falls through to DejaVu without asking for the shipped font: ...{before}"
+            );
+        }
+    }
 
     #[test]
     fn resize_messages_parse_and_junk_does_not() {
