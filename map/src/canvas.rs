@@ -101,6 +101,55 @@ const LINE_HEAVY: [char; 16] = [
 /// has to pick a side; roads win because they are what you trace with your eye.
 pub const MAT_DOT: u8 = 0;
 pub const MAT_SOLID: u8 = 1;
+/// Direction, not coverage.
+///
+/// A cell of this family reads the *shape* of what was drawn into it and picks
+/// the line glyph that runs the same way. Braille can put a mark anywhere in a
+/// cell but every mark looks the same; these four look like the thing they are
+/// describing, which is worth more than sub-cell placement when what is being
+/// said is "the ground falls this way".
+pub const MAT_HATCH: u8 = 2;
+/// Tone. Coverage becomes one of four densities rather than a dot pattern.
+///
+/// Braille at low coverage reads as speckle -- individual dots the eye counts.
+/// A shade block at the same coverage reads as a surface, which is the right
+/// answer when the thing being drawn is ground rather than a line on it.
+pub const MAT_SHADE: u8 = 3;
+
+/// Line glyphs by direction: horizontal, down-right, vertical, down-left.
+const HATCH: [char; 4] = ['\u{2500}', '\u{2572}', '\u{2502}', '\u{2571}'];
+
+/// The line glyph that runs closest to `theta`, an axis angle in radians.
+///
+/// Screen y runs downward, so a positive angle is a stroke falling to the
+/// right. The axis is undirected -- a stroke and its reverse are the same
+/// line -- so this only has to cover a half turn, and the four glyphs split it
+/// into quarters centred on horizontal, the two diagonals, and vertical.
+fn hatch_of(theta: f32) -> char {
+    // Folded into a half turn first. The caller's `0.5 * atan2` already lands
+    // in this range, but a function that quietly returns the wrong glyph for an
+    // angle one turn away is a trap for the next caller, and the fix is a line.
+    let mut theta = theta % std::f32::consts::PI;
+    if theta > std::f32::consts::FRAC_PI_2 {
+        theta -= std::f32::consts::PI;
+    } else if theta < -std::f32::consts::FRAC_PI_2 {
+        theta += std::f32::consts::PI;
+    }
+    let eighth = std::f32::consts::FRAC_PI_8;
+    let k = if theta.abs() < eighth {
+        0
+    } else if theta >= eighth && theta < 3.0 * eighth {
+        1
+    } else if theta.abs() >= 3.0 * eighth {
+        2
+    } else {
+        3
+    };
+    HATCH[k]
+}
+
+/// Coverage ramp, lightest first.
+const SHADES: [char; 4] = ['\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}'];
 
 /// How roads are drawn. Cycled at runtime because the trade-off is genuinely a
 /// matter of taste and of what the terminal's font renders well.
@@ -541,6 +590,14 @@ impl Canvas {
                 let mut weight = [0.0f32; TINT_RGB.len()];
                 let mut solid_w = 0.0f32;
                 let mut dot_w = 0.0f32;
+                let mut hatch_w = 0.0f32;
+                let mut shade_w = 0.0f32;
+                // Coverage-weighted moments of the lit subpixels, for `MAT_HATCH`
+                // to read a direction out of. A braille dot is square on the
+                // usual cell, so column and row are already in the same units
+                // and no aspect correction belongs here.
+                let (mut mx, mut my) = (0.0f32, 0.0f32);
+                let (mut mxx, mut myy, mut mxy) = (0.0f32, 0.0f32, 0.0f32);
                 // Fallback for features too faint to trip DOT_ON anywhere in the
                 // cell -- without this, thin distant roads vanish entirely.
                 let mut strongest = (0.0f32, 0u8);
@@ -556,11 +613,18 @@ impl Canvas {
                         lit += 1;
                         weight[self.tint[i] as usize] += a;
                         near = near.min(self.depth[i]);
-                        if self.mat[i] == MAT_SOLID {
-                            solid_w += a;
-                        } else {
-                            dot_w += a;
+                        match self.mat[i] {
+                            MAT_SOLID => solid_w += a,
+                            MAT_HATCH => hatch_w += a,
+                            MAT_SHADE => shade_w += a,
+                            _ => dot_w += a,
                         }
+                        let (fx, fy) = (col as f32, row as f32);
+                        mx += a * fx;
+                        my += a * fy;
+                        mxx += a * fx * fx;
+                        myy += a * fy * fy;
+                        mxy += a * fx * fy;
                         // Two braille rows collapse into one quadrant row.
                         let q = (row / 2) * 2 + col;
                         quad[q] = quad[q].max(a);
@@ -587,7 +651,73 @@ impl Canvas {
 
                 // A cell can only be one glyph, so the two families compete and
                 // the heavier contribution wins the cell outright.
-                let ch = if solid_w > dot_w {
+                // Four families now, and a cell can only be one glyph, so they
+                // compete and the heaviest contribution takes it outright.
+                let winner = [
+                    (dot_w, MAT_DOT),
+                    (solid_w, MAT_SOLID),
+                    (hatch_w, MAT_HATCH),
+                    (shade_w, MAT_SHADE),
+                ]
+                .into_iter()
+                .fold((0.0f32, MAT_DOT), |a, b| if b.0 > a.0 { b } else { a })
+                .1;
+
+                if winner == MAT_HATCH {
+                    // The direction of the ink, from the principal axis of the
+                    // lit subpixels. Reading it back off the cell rather than
+                    // carrying it alongside means any drawer gets this for free
+                    // and the glyph can never disagree with the mark.
+                    let inv = 1.0 / sum.max(1e-6);
+                    let (cx, cy) = (mx * inv, my * inv);
+                    let (vxx, vyy, vxy) =
+                        (mxx * inv - cx * cx, myy * inv - cy * cy, mxy * inv - cx * cy);
+                    // One dot, or a perfectly round blob, has no direction to
+                    // report. Braille says "something is here" without claiming
+                    // an orientation it cannot see.
+                    let spread = vxx + vyy;
+                    if spread > 0.05 {
+                        // Screen y runs down, so a positive axis angle is a
+                        // stroke falling to the right.
+                        let theta = 0.5 * (2.0 * vxy).atan2(vxx - vyy);
+                        if let Some(cell) = buf.cell_mut((sx, sy)) {
+                            let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
+                            let keep =
+                                tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
+                            let (r, g, b) =
+                                if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
+                            let l = quantise_for(lum, r, g, b);
+                            cell.set_char(hatch_of(theta)).set_fg(ink(
+                                (r as f32 * l) as u8,
+                                (g as f32 * l) as u8,
+                                (b as f32 * l) as u8,
+                            ));
+                        }
+                        continue;
+                    }
+                }
+
+                if winner == MAT_SHADE {
+                    // Fill fraction of the whole cell, not the mean over lit
+                    // subpixels: a surface is described by how much of the cell
+                    // it covers, which is what a shade block encodes.
+                    let fill = sum / (SUB_X * SUB_Y) as f32;
+                    let k = ((fill * 4.0) as usize).min(3);
+                    if let Some(cell) = buf.cell_mut((sx, sy)) {
+                        let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
+                        let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
+                        let (r, g, b) = if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
+                        let l = quantise_for(lum, r, g, b);
+                        cell.set_char(SHADES[k]).set_fg(ink(
+                            (r as f32 * l) as u8,
+                            (g as f32 * l) as u8,
+                            (b as f32 * l) as u8,
+                        ));
+                    }
+                    continue;
+                }
+
+                let ch = if winner == MAT_SOLID {
                     // Quadrants cover four times the area of a braille dot, so
                     // they need a higher bar before lighting or thin roads bloom
                     // into blocks.
@@ -654,5 +784,57 @@ mod tests {
         assert_eq!(quantise_for(l, 232, 232, 226), quantise(l));
         assert_eq!(quantise_for(l, 140, 186, 140), quantise_hued(l));
         assert_ne!(quantise(l), quantise_hued(l));
+    }
+}
+
+#[cfg(test)]
+mod brush_tests {
+    use super::*;
+    use std::f32::consts::PI;
+
+    /// The hatch glyph has to look like the direction it is reporting.
+    ///
+    /// That is the whole reason this family exists: braille can put a mark
+    /// anywhere in a cell but every mark looks the same, so a stroke saying
+    /// "the ground falls this way" has to be inferred from where the dots sit.
+    /// A line glyph says it outright.
+    #[test]
+    fn a_hatch_glyph_runs_the_way_the_ink_does() {
+        // Screen y is down, so a positive angle falls to the right.
+        assert_eq!(hatch_of(0.0), '\u{2500}');
+        assert_eq!(hatch_of(PI / 4.0), '\u{2572}');
+        assert_eq!(hatch_of(-PI / 4.0), '\u{2571}');
+        assert_eq!(hatch_of(PI / 2.0), '\u{2502}');
+        assert_eq!(hatch_of(-PI / 2.0), '\u{2502}');
+    }
+
+    /// An axis is undirected: a stroke and its reverse are the same line, so
+    /// the two must never pick different glyphs.
+    #[test]
+    fn a_stroke_and_its_reverse_draw_the_same_glyph() {
+        let mut t = -PI / 2.0;
+        while t <= PI / 2.0 {
+            let flipped = if t > 0.0 { t - PI } else { t + PI };
+            assert_eq!(
+                hatch_of(t),
+                hatch_of(flipped),
+                "{t} and {flipped} disagree"
+            );
+            t += 0.05;
+        }
+    }
+
+    /// Every direction gets an answer, and all four glyphs are reachable.
+    #[test]
+    fn the_half_turn_is_covered_by_all_four() {
+        let mut seen = std::collections::HashSet::new();
+        let mut t = -PI / 2.0;
+        while t <= PI / 2.0 {
+            seen.insert(hatch_of(t));
+            t += 0.01;
+        }
+        for g in HATCH {
+            assert!(seen.contains(&g), "{g} is unreachable");
+        }
     }
 }

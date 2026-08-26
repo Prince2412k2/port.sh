@@ -159,7 +159,15 @@ impl Relief {
                 let brush = Brush {
                     depth,
                     tint: TINT_GREEN,
-                    mat: MAT_DOT,
+                    // `Shade` is describing a surface rather than marking
+                    // points on one, and a surface wants tone. Braille at low
+                    // coverage reads as speckle the eye counts; the same
+                    // coverage as a shade block reads as ground.
+                    mat: if ground == Ground::Shade {
+                        crate::canvas::MAT_SHADE
+                    } else {
+                        MAT_DOT
+                    },
                     pick: u32::MAX,
                     occlude: true,
                 };
@@ -258,7 +266,10 @@ impl Relief {
         let mut drawn = 0usize;
         // Every other sample, both ways. At full density the strokes touch and
         // the whole hillside greys over into the wash this mode exists to avoid.
-        const STRIDE: usize = 2;
+        // Three, not two, and the reason is the glyph. A hatch mark claims a
+        // whole cell where a braille dot claims an eighth of one, so the same
+        // spacing that left air between dots leaves none between lines.
+        const STRIDE: usize = 3;
         /// How much of the real fall the stroke is allowed to show.
         ///
         /// A hachure is read in plan -- the strokes radiate away from a summit
@@ -345,13 +356,20 @@ impl Relief {
                         .clamp(0.08, 0.95),
                         depth: da.min(db),
                         tint: TINT_GREEN,
-                        // Mass near, hairline far -- the one place in this file
-                        // where distance changes the vocabulary rather than just
-                        // the brightness. Kept rare on purpose: a block is four
-                        // braille dots of ink, so spending it on anything but a
-                        // near crest turns the hillside back into a wash.
+                        // Three families in one mode, and distance chooses
+                        // between them. A near crest gets block, which has
+                        // mass. The body of the slope gets hatch, whose glyph
+                        // runs the way the stroke does -- the mark then *looks*
+                        // like the direction it is reporting instead of being a
+                        // dot that happens to sit along it. Far ground falls
+                        // back to braille, the finest and quietest mark there
+                        // is, because at that distance a line glyph is a whole
+                        // cell of ink spent on something the eye is not reading
+                        // in detail anyway.
                         mat: if crest && far < 0.35 {
                             crate::canvas::MAT_SOLID
+                        } else if far < 0.72 {
+                            crate::canvas::MAT_HATCH
                         } else {
                             MAT_DOT
                         },
