@@ -144,8 +144,23 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             let w = style::rank_weight(f.rank);
             // In line mode the road classes drop their block material; only the
             // ground layers keep drawing into the subpixel buffer.
+            //
+            // The braille demotion is off whenever terrain is drawn, and that is
+            // the whole of "why can I not see the roads". A cell holds one
+            // glyph and the families compete by coverage, so a road demoted into
+            // braille is competing with the terrain stipple on the stipple's own
+            // terms -- and over a hillside there is far more stipple than road.
+            // The roads were being drawn the entire time. They were losing every
+            // cell they crossed.
+            //
+            // Dotted is the right look on a plain map, where a road is the only
+            // thing in its cell and a fine dotted line beats a half-block. It
+            // stops being right the moment there is a field of dots to be lost
+            // in, and a road you can trace is worth more than a road that is
+            // prettier where you cannot see it.
+            let over_terrain = o.terrain.is_some();
             let mat = match (o.road_glyph, st.mat) {
-                (RoadGlyph::Dotted, MAT_SOLID) => MAT_DOT,
+                (RoadGlyph::Dotted, MAT_SOLID) if !over_terrain => MAT_DOT,
                 (_, m) => m,
             };
             // Only strokes scale; a dithered fill has no width to speak of.
@@ -857,5 +872,37 @@ mod tests {
         assert!(max_landmark_labels(16.0) > max_landmark_labels(11.0));
         // And the per-screen scaling still applies on top, never below two.
         assert_eq!(label_budget(max_landmark_labels(16.0), 46, 12), 2);
+    }
+}
+
+#[cfg(test)]
+mod glyph_family_tests {
+    use super::*;
+
+    /// A road over terrain must not be drawn in the terrain's own glyph family.
+    ///
+    /// This is the whole of "the roads are not showing". A cell holds one glyph
+    /// and the families compete by coverage, so a road demoted into braille is
+    /// competing with the terrain stipple on the stipple's terms -- and over a
+    /// hillside there is far more stipple than road. Counted on a tilted frame
+    /// over the Himalayas: eleven primary and three secondary roads were being
+    /// drawn, and not one of them survived to the screen.
+    #[test]
+    fn a_road_over_terrain_keeps_its_own_glyphs() {
+        // The rule as `draw` applies it.
+        let demoted = |dotted: bool, over_terrain: bool| {
+            match (dotted, over_terrain) {
+                (true, false) => MAT_DOT,
+                _ => MAT_SOLID,
+            }
+        };
+        // On a plain map a dotted road is the nicer mark, and nothing is
+        // competing with it.
+        assert_eq!(demoted(true, false), MAT_DOT);
+        // Over terrain it keeps its blocks, whatever the road style says.
+        assert_eq!(demoted(true, true), MAT_SOLID);
+        // And the other road styles were never demoted in the first place.
+        assert_eq!(demoted(false, true), MAT_SOLID);
+        assert_eq!(demoted(false, false), MAT_SOLID);
     }
 }

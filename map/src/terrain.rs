@@ -70,16 +70,6 @@ impl Terrain {
         }
     }
 
-    /// Ground metres between one sample and the next, at a latitude.
-    ///
-    /// The renderer needs this to know when it is drawing detail the heightmap
-    /// does not have. The shipped grid is 30 arcsec, about 850 m at Indian
-    /// latitudes, which is coarser than a screen pixel from about z10 upward.
-    pub fn spacing_m(&self, lat: f64) -> f64 {
-        let deg = (self.east - self.west) / self.width as f64;
-        deg * 111_320.0 * lat.to_radians().cos().max(0.05)
-    }
-
     /// Metres above sea level, bilinearly interpolated. Outside the grid, and
     /// over ocean, this is zero -- which is the right answer for both.
     pub fn sample(&self, lon: f64, lat: f64) -> f32 {
