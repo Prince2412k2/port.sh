@@ -20,6 +20,7 @@ pub struct Opts {
     pub cursor: Option<(u16, u16)>,
     pub focus: Option<FocusMode>,
     pub roads: Option<crate::canvas::RoadGlyph>,
+    pub ground: Option<crate::view::Ground>,
     pub weight: Option<f64>,
     pub center: Option<(f64, f64)>,
     pub tilt: Option<f64>,
@@ -41,6 +42,9 @@ pub fn render(app: &mut App, o: &Opts) -> std::io::Result<()> {
     }
     if let Some(g) = o.roads {
         app.road_glyph = g;
+    }
+    if let Some(g) = o.ground {
+        app.ground = g;
     }
     if let Some(w) = o.weight {
         app.road_weight = w;

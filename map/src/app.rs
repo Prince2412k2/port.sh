@@ -43,6 +43,7 @@ pub const LAYER_KEYS: [char; 8] = ['!', '@', '#', '$', '%', '^', '&', '*'];
 
 /// Terrain relief. Shift and `9`, keeping its place in the row.
 pub const TERRAIN_KEY: char = '(';
+pub const GROUND_KEY: char = 'v';
 
 /// Every layer back on. Shift and `0`, likewise.
 pub const ALL_LAYERS_KEY: char = ')';
@@ -81,6 +82,8 @@ pub struct App {
     /// Force the whole map to the paper-white tint.
     pub mono: bool,
     pub show_terrain: bool,
+    /// How the ground surface is drawn -- see `view::Ground`.
+    pub ground: crate::view::Ground,
     pub relief: crate::relief::Relief,
     pub road_glyph: RoadGlyph,
     /// Multiplies every stroke width, so road weight can be dialled in at
@@ -150,6 +153,7 @@ impl App {
             show_labels: true,
             mono: true,
             show_terrain: true,
+            ground: Default::default(),
             relief: Default::default(),
             road_glyph: RoadGlyph::Dotted,
             road_weight: 1.0,
@@ -633,6 +637,13 @@ impl App {
                 self.toast = Some(
                     if self.show_terrain { "terrain on" } else { "terrain off" }.into(),
                 );
+            }
+            // Cycles rather than toggles: there are three ways to draw ground
+            // and the only way to judge between them is to see them in the
+            // same place a moment apart.
+            KeyCode::Char(GROUND_KEY) => {
+                self.ground = self.ground.next();
+                self.toast = Some(format!("ground: {}", self.ground.label()));
             }
             KeyCode::Char('m') => {
                 self.auto_view = !self.auto_view;

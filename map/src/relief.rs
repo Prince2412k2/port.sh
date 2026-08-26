@@ -9,15 +9,28 @@
 use crate::canvas::{Brush, Canvas, MAT_DOT, TINT_GREEN};
 use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
+use crate::view::Ground;
 
 /// Subpixels between grid samples. Denser than this and the relief turns into a
 /// solid wash that competes with the roads it is supposed to sit behind.
 const STEP: f64 = 3.0;
 
-/// Vertical exaggeration. Real relief is imperceptible at map scale -- India's
-/// tallest ground is under 0.1% of the width of the country -- so terrain in
-/// tilted views is always exaggerated. This is the usual cartographic lie.
-pub const EXAG: f64 = 14.0;
+/// Contour intervals to choose between, metres. Round numbers only: a map
+/// whose lines are 37 m apart is a map nobody can count in their head.
+const STEPS: [f32; 10] = [5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0];
+
+/// Roughly how many lines should cross the visible range of elevation.
+const WANT_LINES: f32 = 9.0;
+
+/// The interval for a given spread of elevation.
+///
+/// Chosen from the ground actually in frame rather than from the zoom, because
+/// the same zoom over the Ghats and over Ahmedabad wants intervals an order of
+/// magnitude apart -- 754 m of range against 21 m.
+fn interval(range: f32) -> f32 {
+    let want = (range / WANT_LINES).max(1.0);
+    *STEPS.iter().find(|s| **s >= want).unwrap_or(&2000.0)
+}
 
 /// Highest elevation used to normalise shading, metres.
 const MAX_ELEV: f32 = 6000.0;
@@ -33,7 +46,15 @@ pub struct Relief {
 
 impl Relief {
     /// Draw the terrain surface. Returns the number of samples plotted.
-    pub fn draw(&mut self, t: &Terrain, canvas: &mut Canvas, vp: &Viewport, datum: f32) -> usize {
+    pub fn draw(
+        &mut self,
+        t: &Terrain,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        datum: f32,
+        exag: f64,
+        ground: Ground,
+    ) -> usize {
         // Sampling in screen space rather than world space keeps the grid
         // uniform on the display no matter how the camera is turned.
         self.gw = (canvas.sw as f64 / STEP).ceil() as usize + 3;
@@ -72,7 +93,9 @@ impl Relief {
 
         let (_, clat) = vp.center_lonlat();
         let m_per_world = meters_per_world_unit(clat);
-        let exag = if vp.is_flat() { 0.0 } else { EXAG };
+        // Flat views have no vertical axis to displace along, and `Shade` is the
+        // mode that chooses not to use the one it has.
+        let exag = if vp.is_flat() || !ground.displaces() { 0.0 } else { exag };
         let mut plotted = 0usize;
 
         // Column-major, marching far to near. That ordering is the whole trick:
@@ -186,6 +209,146 @@ impl Relief {
                 plotted += 1;
             }
         }
+
+        if ground == Ground::Contour {
+            self.contours(canvas, vp, &world, datum, exag, m_per_world);
+        }
         plotted
+    }
+
+    /// Iso-elevation lines over the sampled grid, by marching squares.
+    ///
+    /// Contours are the one way of drawing terrain where slope is read
+    /// directly rather than inferred: the lines bunch where the ground is
+    /// steep because that is what a constant height step means on a steep
+    /// face. They are also the honest option when the heightmap is coarse --
+    /// at 853 x 928 m per sample there is no fine detail to invent, and an
+    /// interval wide enough to be supportable says so on the page.
+    ///
+    /// Drawn against the grid `draw` has already sampled, so this costs no
+    /// heightmap lookups, and projected with the same exaggeration as the
+    /// surface so the lines lie *on* the ground rather than through it.
+    fn contours(
+        &self,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        world: &[[f64; 2]],
+        datum: f32,
+        exag: f64,
+        m_per_world: f64,
+    ) {
+        let (lo, hi) = self
+            .heights
+            .iter()
+            .filter(|h| **h >= 1.0)
+            .fold((f32::MAX, f32::MIN), |(a, b), h| (a.min(*h), b.max(*h)));
+        if !(lo.is_finite() && hi.is_finite()) || hi - lo < 2.0 {
+            return;
+        }
+        let step = interval(hi - lo);
+
+        // Where a level crosses the segment between two corners, as a world
+        // point lifted to that level. Both ends are already projected samples,
+        // so this is a straight interpolation in world space.
+        let cross = |ia: usize, ib: usize, level: f32| -> Option<([f64; 2], f64)> {
+            let (ha, hb) = (self.heights[ia], self.heights[ib]);
+            if (ha < level) == (hb < level) || (hb - ha).abs() < 1e-6 {
+                return None;
+            }
+            let f = ((level - ha) / (hb - ha)) as f64;
+            let (a, b) = (world[ia], world[ib]);
+            Some(([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], level as f64))
+        };
+
+        let first = (lo / step).ceil() as i32;
+        let last = (hi / step).floor() as i32;
+        for k in first..=last {
+            let level = k as f32 * step;
+            if level < 1.0 {
+                continue;
+            }
+            // Every fifth line is an index contour, the heavier one a reader
+            // counts from. Straight off paper cartography.
+            let index = k % 5 == 0;
+            for gy in 0..self.gh - 1 {
+                for gx in 0..self.gw - 1 {
+                    let i = gy * self.gw + gx;
+                    let (a, b, c, d) = (i, i + 1, i + self.gw, i + self.gw + 1);
+                    // Sea is not terrain, and a coastline drawn as a contour
+                    // fights the water layer that already owns it.
+                    if self.heights[a] < 1.0 && self.heights[d] < 1.0 {
+                        continue;
+                    }
+                    let mut ends: Vec<([f64; 2], f64)> = Vec::new();
+                    for (p, q) in [(a, b), (b, d), (c, d), (a, c)] {
+                        if let Some(hit) = cross(p, q, level) {
+                            ends.push(hit);
+                        }
+                    }
+                    // Two crossings is a segment. Four is a saddle, and joining
+                    // the wrong pair draws an X through the col; taking them in
+                    // edge order pairs each with its neighbour instead.
+                    for pair in ends.chunks(2) {
+                        let [(wa, la), (wb, lb)] = pair else { continue };
+                        let ea = (*la as f32 - datum) as f64 * exag / m_per_world;
+                        let eb = (*lb as f32 - datum) as f64 * exag / m_per_world;
+                        let (pa, da) = vp.project3(*wa, ea);
+                        let (pb, db) = vp.project3(*wb, eb);
+                        if !da.is_finite() || !db.is_finite() {
+                            continue;
+                        }
+                        crate::raster::line(
+                            canvas,
+                            pa,
+                            pb,
+                            &crate::raster::Pen {
+                                width: 1.0,
+                                alpha: if index { 0.55 } else { 0.28 },
+                                depth: da.min(db),
+                                tint: TINT_GREEN,
+                                mat: MAT_DOT,
+                                pick: u32::MAX,
+                                occlude: false,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interval comes off the ground in frame, not off the zoom.
+    ///
+    /// The same zoom over the Ghats and over Ahmedabad wants intervals an order
+    /// of magnitude apart -- 754 m of range against 21 m -- and a fixed ladder
+    /// keyed to zoom would draw one line over the Ghats and five hundred over
+    /// the plain.
+    #[test]
+    fn the_contour_interval_follows_the_ground_not_the_zoom() {
+        // Real spreads, sampled from the shipped heightmap.
+        let ghats = interval(754.0 - 34.0);
+        let ahmedabad = interval(60.0 - 39.0);
+        assert!(ghats > ahmedabad, "{ghats} vs {ahmedabad}");
+        for range in [21.0f32, 68.0, 104.0, 720.0, 3000.0] {
+            let step = interval(range);
+            let lines = range / step;
+            assert!(
+                (1.0..=WANT_LINES + 1.0).contains(&lines),
+                "{range} m of range gave {lines} lines at a {step} m interval"
+            );
+        }
+    }
+
+    /// Round numbers only. A map whose lines are 37 m apart cannot be counted.
+    #[test]
+    fn every_interval_is_one_a_reader_can_count_in() {
+        for range in [5.0f32, 50.0, 500.0, 5000.0, 12345.0] {
+            assert!(STEPS.contains(&interval(range)) || interval(range) == 2000.0);
+        }
     }
 }

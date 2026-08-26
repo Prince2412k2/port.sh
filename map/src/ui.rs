@@ -181,6 +181,13 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" 0.1.0", Style::default().fg(DIM)),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled(app.mode().label(), Style::default().fg(FG)),
+        // The zoom mode and the ground style are different things and both were
+        // called RELIEF here, which made comparing the three impossible: the
+        // header said the same word whichever one was on screen.
+        Span::styled(
+            format!(" {}", app.ground.label()),
+            Style::default().fg(if app.show_terrain { DIM } else { FAINT }),
+        ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled(app.source.label().to_string(), Style::default().fg(DIM)),
     ]);
@@ -360,7 +367,7 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         } else {
             None
         },
-        exag: crate::relief::EXAG,
+        exag: crate::view::exaggeration(app.vp.zoom),
         datum,
         home: app.home.lock().unwrap().clone(),
         road_weight: app.road_weight,
@@ -373,7 +380,9 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     let mut relief_pts = 0;
     if app.show_terrain && app.mode().terrain() {
         if let Some(t) = app.source.terrain.as_ref() {
-            relief_pts = app.relief.draw(t, &mut app.canvas, &app.vp, datum);
+            let exag = crate::view::exaggeration(app.vp.zoom);
+            relief_pts =
+                app.relief.draw(t, &mut app.canvas, &app.vp, datum, exag, app.ground);
         }
     }
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);
@@ -838,6 +847,7 @@ fn help(f: &mut Frame, area: Rect) {
         row("! @ # $ % ^ & *", "toggle a layer (see the panel)"),
         row(")", "all layers on"),
         row("(", "terrain relief"),
+        row("v", "relief / contour / shade"),
         row("x", "my location"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),
