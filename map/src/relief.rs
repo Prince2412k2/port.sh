@@ -15,6 +15,25 @@ use crate::view::Ground;
 /// solid wash that competes with the roads it is supposed to sit behind.
 const STEP: f64 = 3.0;
 
+/// Half the ground each sample is answerable for, in subpixels, rounded up.
+const HALF_STEP: isize = (STEP as isize + 1) / 2;
+
+/// Grid rows in the order they must be drawn: nearest first.
+///
+/// This is not a detail. The canvas composites alpha-over -- `cov += a * (1 -
+/// cov)` -- so painting a near mark on top of a far one *adds* to the cell
+/// instead of replacing it. Drawing far-to-near and trusting nearer ribbons to
+/// "paint over" the ones behind, which is what this did, is only true of an
+/// opaque renderer, and this one is not: the range behind a ridge stayed on
+/// screen underneath it at reduced contrast.
+///
+/// Near first, and the depth buffer does the work instead. The front ridge
+/// claims its subpixels, and everything behind arrives afterwards to find them
+/// taken. Over Zanskar at 55 degrees that is 1874 cells of ink down to 1293.
+fn near_to_far(gh: usize) -> impl Iterator<Item = usize> {
+    (1..gh.saturating_sub(2)).rev()
+}
+
 /// Contour intervals to choose between, metres. Round numbers only: a map
 /// whose lines are 37 m apart is a map nobody can count in their head.
 const STEPS: [f32; 10] = [5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.0, 1000.0];
@@ -187,7 +206,7 @@ impl Relief {
         // and nearer ribbons paint over farther ones. Occlusion by a ridge then
         // falls out of the draw order without a visibility test.
         for gx in 1..self.gw - 1 {
-            for gy in 1..self.gh - 2 {
+            for gy in near_to_far(self.gh) {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
                 // Sea level is not terrain; the water layer already owns it.
@@ -308,12 +327,15 @@ impl Relief {
                     let t = (y - y0) / span;
                     let x = sp[0] + (sp_near[0] - sp[0]) * t;
                     // The ribbon is opaque ground whether or not the stipple
-                    // happened to paint here, so claim both subpixel columns
-                    // it spans. Otherwise roads behind a ridge leak through the
-                    // gaps between dots.
+                    // happened to paint here, so it claims the whole width it
+                    // is responsible for. Two columns was not that: samples sit
+                    // `STEP` subpixels apart and each was claiming two, so a
+                    // third of every row had no ground in the depth buffer at
+                    // all and the range behind showed through the gaps.
                     let xi = x as isize;
-                    canvas.occlude_at(xi, y as isize, depth);
-                    canvas.occlude_at(xi + 1, y as isize, depth);
+                    for dx in -HALF_STEP..=HALF_STEP {
+                        canvas.occlude_at(xi + dx, y as isize, depth);
+                    }
                     y += 1.0;
                 }
                 plotted += 1;
@@ -773,6 +795,37 @@ mod tests {
         assert_eq!(at(2, 2), 1.0, "ground in front of the wall lost its light");
         // Twenty-four steps out, past where the ray has fallen back to ground.
         assert_eq!(at(28, 28), 1.0, "the shadow never ended");
+    }
+
+    /// The nearest row is drawn first, so the depth buffer can reject.
+    ///
+    /// The canvas is alpha-over, not opaque, so "nearer ribbons paint over
+    /// farther ones" was never true -- a near mark laid on a far one adds to
+    /// the cell. Hidden-surface removal here depends entirely on the near
+    /// ground reaching the depth buffer before the far ground asks to draw.
+    #[test]
+    fn the_ground_nearest_the_camera_is_drawn_first() {
+        let rows: Vec<usize> = near_to_far(12).collect();
+        assert_eq!(rows.first(), Some(&9), "the first row drawn is not the nearest");
+        assert_eq!(rows.last(), Some(&1), "the last row drawn is not the farthest");
+        assert!(rows.windows(2).all(|w| w[0] > w[1]), "the order is not monotonic");
+        // Degenerate grids must not wrap into an enormous range.
+        assert_eq!(near_to_far(2).count(), 0);
+    }
+
+    /// The depth ribbon has to cover the ground between samples.
+    ///
+    /// Samples sit `STEP` subpixels apart and each one used to claim two
+    /// columns, so a third of every row held no ground in the depth buffer and
+    /// the range behind showed through the gap -- the stipple hid it well
+    /// enough to look like dither rather than like a bug.
+    #[test]
+    fn the_depth_ribbon_leaves_no_column_unclaimed() {
+        let claimed = 2 * HALF_STEP + 1;
+        assert!(
+            claimed >= STEP.ceil() as isize,
+            "a sample claims {claimed} columns of the {STEP} it is answerable for"
+        );
     }
 
     /// The sun has to be low, and the reason is the data, not the taste.
