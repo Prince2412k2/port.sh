@@ -9,12 +9,16 @@ use ratatui::Frame;
 
 use crate::portraits;
 
-pub const BG: Color = Color::Rgb(8, 9, 11);
-pub const FG: Color = Color::Rgb(196, 200, 206);
-pub const DIM: Color = Color::Rgb(96, 102, 112);
-pub const FAINT: Color = Color::Rgb(58, 62, 70);
-pub const ACCENT: Color = Color::Rgb(255, 176, 64);
-pub const CYAN: Color = Color::Rgb(110, 224, 255);
+// The palette belongs to `Theme` now, and is threaded rather than constant.
+// Ink on paper is not a second set of colours; it is the same strengths spent
+// in the other direction, and only the theme knows which direction that is.
+//
+// Threaded and not a global, even though `WARM` two lines down is a global
+// doing something adjacent: one process serves every SSH session at once, so a
+// process-wide theme means one visitor pressing `i` repaints everybody else's
+// screen mid-sentence. `WARM` has exactly that bug; it is older than this and
+// out of scope here, but it is the same bug.
+pub use termap::canvas::Theme;
 
 /// Which of the two the chat leans on, flipped by `/theme`.
 ///
@@ -30,11 +34,11 @@ pub fn flip_theme() -> bool {
 }
 
 /// The colour the chat leads with.
-pub fn lead() -> Color {
+pub fn lead(th: Theme) -> Color {
     if WARM.load(std::sync::atomic::Ordering::Relaxed) {
-        ACCENT
+        th.amber()
     } else {
-        CYAN
+        th.cyan()
     }
 }
 
@@ -136,8 +140,8 @@ pub fn portrait_loop(p: &portraits::Portrait, t: f64, alive: bool) -> &'static [
 /// instead of needing a palette slot each. Cells the region never drew into
 /// are left alone — the test is the page's own ground, not brightness, or the
 /// darkest parts of the field would be indistinguishable from empty.
-pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32) {
-    let Color::Rgb(kr, kg, kb) = BG else { return };
+pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32, th: Theme) {
+    let Some((kr, kg, kb)) = termap::canvas::rgb_of(th.page()) else { return };
     let buf = f.buffer_mut();
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
@@ -180,11 +184,11 @@ pub fn ink(i: portraits::Ink) -> Color {
 /// which symbol class won the cell. Either one over our own background is a
 /// cell to leave alone, so a plate sits on the page rather than on a rectangle
 /// of its own.
-fn is_ground(ch: char, bg: portraits::Ink) -> bool {
+fn is_ground(ch: char, bg: portraits::Ink, th: Theme) -> bool {
     if ch != ' ' && ch != '\u{2800}' {
         return false;
     }
-    let Color::Rgb(kr, kg, kb) = BG else { return false };
+    let Some((kr, kg, kb)) = termap::canvas::rgb_of(th.page()) else { return false };
     match bg {
         portraits::Ink::C(r, g, b) => (r, g, b) == (kr, kg, kb),
         // Quantised, so our ground has landed on whatever palette entry is
@@ -194,14 +198,22 @@ fn is_ground(ch: char, bg: portraits::Ink) -> bool {
     }
 }
 
-pub fn portrait(f: &mut Frame, area: Rect, x: u16, y: u16, cells: &[portraits::Cell], cols: u16) {
+pub fn portrait(
+    f: &mut Frame,
+    area: Rect,
+    x: u16,
+    y: u16,
+    cells: &[portraits::Cell],
+    cols: u16,
+    th: Theme,
+) {
     for (i, &(ch, fg, bg)) in cells.iter().enumerate() {
         let (c, r) = (i as u16 % cols, i as u16 / cols);
         let (px, py) = (x + c, y + r);
         if px >= area.x + area.width || py >= area.y + area.height {
             continue;
         }
-        if is_ground(ch, bg) {
+        if is_ground(ch, bg, th) {
             continue;
         }
         if let Some(cell) = f.buffer_mut().cell_mut((px, py)) {
@@ -216,17 +228,20 @@ pub fn portrait(f: &mut Frame, area: Rect, x: u16, y: u16, cells: &[portraits::C
 /// because the map emits palette indices for neutral cells and a match on the
 /// truecolor variant alone silently skips most of the screen. That exact bug
 /// cost real time once already.
-pub fn toward_bg(c: Color, k: f32) -> Color {
+pub fn toward_bg(c: Color, k: f32, th: Theme) -> Color {
     let Some((r, g, b)) = termap::canvas::rgb_of(c) else { return c };
-    let Color::Rgb(br, bg, bb) = BG else { return c };
+    // `rgb_of` on *both* sides. The page is a grey-ramp index too, and matching
+    // the truecolor variant on it made this whole function a no-op -- the third
+    // time that pattern has bitten, and the paragraph above is about the first.
+    let Some((br, bg, bb)) = termap::canvas::rgb_of(th.page()) else { return c };
     let mix = |a: u8, t: u8| (t as f32 + (a as f32 - t as f32) * k).round().clamp(0.0, 255.0) as u8;
     termap::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
 }
 
 /// Fade a colour to nothing. The inverse reading of `toward_bg`, named for the
 /// way it is used: things arriving and leaving rather than being dimmed.
-pub fn dim_to(c: Color, alpha: f32) -> Color {
-    toward_bg(c, alpha.clamp(0.0, 1.0))
+pub fn dim_to(c: Color, alpha: f32, th: Theme) -> Color {
+    toward_bg(c, alpha.clamp(0.0, 1.0), th)
 }
 
 /// Dissolve a whole region toward the background.
@@ -234,7 +249,7 @@ pub fn dim_to(c: Color, alpha: f32) -> Color {
 /// Used for the section transition. Compositing the finished frame rather than
 /// asking each section to render itself at an opacity means the shell can fade
 /// anything it can draw, including two renderers that know nothing about it.
-pub fn veil(f: &mut Frame, area: Rect, k: f32) {
+pub fn veil(f: &mut Frame, area: Rect, k: f32, th: Theme) {
     if k >= 0.999 {
         return;
     }
@@ -242,7 +257,7 @@ pub fn veil(f: &mut Frame, area: Rect, k: f32) {
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
             let Some(cell) = buf.cell_mut((x, y)) else { continue };
-            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            let (fg, bg) = (toward_bg(cell.fg, k, th), toward_bg(cell.bg, k, th));
             cell.set_fg(fg).set_bg(bg);
         }
     }
@@ -264,7 +279,7 @@ pub fn veil(f: &mut Frame, area: Rect, k: f32) {
 ///
 /// `strength` scales the whole thing, so a panel arriving fades and feathers in
 /// one pass rather than being dimmed twice.
-pub fn feather(f: &mut Frame, area: Rect, strength: f32) {
+pub fn feather(f: &mut Frame, area: Rect, strength: f32, th: Theme) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -294,7 +309,7 @@ pub fn feather(f: &mut Frame, area: Rect, strength: f32) {
             };
             let k = (a * strength).clamp(0.0, 1.0);
             let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) else { continue };
-            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            let (fg, bg) = (toward_bg(cell.fg, k, th), toward_bg(cell.bg, k, th));
             cell.set_fg(fg).set_bg(bg);
         }
     }
@@ -310,7 +325,7 @@ pub fn feather(f: &mut Frame, area: Rect, strength: f32) {
 ///
 /// `from` applies at the left of `area` and `to` at the right, both as keep
 /// factors like `veil` -- 1 leaves a cell alone.
-pub fn veil_ramp(f: &mut Frame, area: Rect, from: f32, to: f32) {
+pub fn veil_ramp(f: &mut Frame, area: Rect, from: f32, to: f32, th: Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -325,7 +340,7 @@ pub fn veil_ramp(f: &mut Frame, area: Rect, from: f32, to: f32) {
         }
         for y in 0..area.height {
             let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) else { continue };
-            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            let (fg, bg) = (toward_bg(cell.fg, k, th), toward_bg(cell.bg, k, th));
             cell.set_fg(fg).set_bg(bg);
         }
     }
@@ -434,7 +449,7 @@ mod tests {
                     }
                 }
             }
-            feather(f, area, 1.0);
+            feather(f, area, 1.0, Theme::default());
         })
         .unwrap();
 
@@ -482,7 +497,7 @@ mod tests {
                     }
                 }
             }
-            feather(f, area, 0.0);
+            feather(f, area, 0.0, Theme::default());
         })
         .unwrap();
         let buf = term.backend().buffer().clone();

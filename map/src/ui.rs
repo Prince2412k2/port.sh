@@ -119,7 +119,7 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
                 );
             }
         };
-        cell(f, y, "\u{25be}", th.accent(crate::canvas::TINT_LANDMARK), true);
+        cell(f, y, "\u{25be}", th.amber(), true);
         if up > 0 {
             cell(f, y.saturating_sub(1), "\u{2502}", th.faint(), false);
         }
@@ -131,7 +131,7 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
     f.render_widget(
         Paragraph::new(Span::styled(
             "\u{25c8}".to_string(),
-            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         )),
         Rect { x: cx, y: cy, width: 1, height: 1 },
     );
@@ -219,7 +219,7 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(
             format!("depth:{} ", app.focus.label()),
-            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)),
+            Style::default().fg(th.amber()),
         ),
     ]);
 
@@ -460,7 +460,7 @@ fn hint(f: &mut Frame, area: Rect, app: &App) {
         .map(|(s, key)| {
             Span::styled(
                 (*s).to_string(),
-                Style::default().fg(fade(if *key { th.accent(crate::canvas::TINT_SELECT) } else { th.faint() }, a, th)),
+                Style::default().fg(fade(if *key { th.cyan() } else { th.faint() }, a, th)),
             )
         })
         .collect();
@@ -510,7 +510,7 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled("find ", Style::default().fg(th.ghost())),
             Span::styled(q.clone(), Style::default().fg(th.ink()).add_modifier(Modifier::BOLD)),
-            Span::styled("▌", Style::default().fg(th.accent(crate::canvas::TINT_SELECT))),
+            Span::styled("▌", Style::default().fg(th.cyan())),
         ])),
         Rect { x, y, width: w, height: 1 },
     );
@@ -534,7 +534,7 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     if on { "› " } else { "  " },
-                    Style::default().fg(if on { th.accent(crate::canvas::TINT_LANDMARK) } else { th.ghost() }),
+                    Style::default().fg(if on { th.amber() } else { th.ghost() }),
                 ),
                 Span::styled(
                     hit.name.clone(),
@@ -604,7 +604,7 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
             [
                 Span::styled(
                     if here { "\u{25cf}" } else { "\u{00b7}" },
-                    Style::default().fg(dim(if here { th.accent(crate::canvas::TINT_LANDMARK) } else { th.ghost() }, alpha, th)),
+                    Style::default().fg(dim(if here { th.amber() } else { th.ghost() }, alpha, th)),
                 ),
                 Span::styled(" ", Style::default()),
             ]
@@ -623,7 +623,7 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
     )]);
     right(f, y, vec![Span::styled(
         p.years.clone(),
-        Style::default().fg(dim(th.accent(crate::canvas::TINT_LANDMARK), alpha, th)),
+        Style::default().fg(dim(th.amber(), alpha, th)),
     )]);
 
     y += 1;
@@ -803,17 +803,17 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
         if app.pinned.is_some() { " PINNED " } else { " NORMAL " },
         Style::default()
             .fg(th.page())
-            .bg(if app.pinned.is_some() { th.accent(crate::canvas::TINT_SELECT) } else { th.ink() })
+            .bg(if app.pinned.is_some() { th.cyan() } else { th.ink() })
             .add_modifier(Modifier::BOLD),
     )];
     left.push(Span::styled("  ", Style::default()));
 
     if let Some(msg) = &app.toast {
-        left.push(Span::styled(msg.clone(), Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK))));
+        left.push(Span::styled(msg.clone(), Style::default().fg(th.amber())));
     } else if let Some(info) = app.highlight().and_then(|id| app.feature_info(id)) {
         left.push(Span::styled(
             info,
-            Style::default().fg(if app.pinned.is_some() { th.accent(crate::canvas::TINT_SELECT) } else { th.ink() }),
+            Style::default().fg(if app.pinned.is_some() { th.cyan() } else { th.ink() }),
         ));
     } else {
         left.push(Span::styled(
@@ -861,7 +861,7 @@ fn help(f: &mut Frame, area: Rect, th: Theme) {
         .style(Style::default().bg(th.page()))
         .title(Span::styled(
             " termap ",
-            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
@@ -901,7 +901,7 @@ fn help(f: &mut Frame, area: Rect, th: Theme) {
         Line::default(),
         Line::from(Span::styled(
             "  The experience tour",
-            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)),
+            Style::default().fg(th.amber()),
         )),
         row("e", "fly the tour / leave it"),
         row("n  tab", "next place"),

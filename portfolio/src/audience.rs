@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::paint::{ACCENT, CYAN, DIM, FAINT, FG};
+use crate::paint::Theme;
 
 /// One question, and what became of it.
 ///
@@ -466,7 +466,7 @@ impl Browser {
         Went::Nowhere
     }
 
-    pub fn render(&mut self, f: &mut Frame) {
+    pub fn render(&mut self, f: &mut Frame, th: Theme) {
         let area = f.area();
         if area.height < 4 {
             return;
@@ -494,23 +494,23 @@ impl Browser {
 
         let mut head = vec![Span::styled(
             "  visitors  ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         )];
-        head.push(Span::styled(title, Style::default().fg(DIM)));
+        head.push(Span::styled(title, Style::default().fg(th.faint())));
         if self.searching || !self.query.is_empty() {
             head.push(Span::styled(
                 format!("   /{}", self.query),
-                Style::default().fg(CYAN),
+                Style::default().fg(th.cyan()),
             ));
         }
         if self.open.is_none() && self.by != By::Last {
             head.push(Span::styled(
                 format!("   by {}", self.by.label()),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ));
         }
         if self.returning_only {
-            head.push(Span::styled("   returning only", Style::default().fg(FAINT)));
+            head.push(Span::styled("   returning only", Style::default().fg(th.ghost())));
         }
         f.render_widget(
             Paragraph::new(Line::from(head)),
@@ -518,24 +518,24 @@ impl Browser {
         );
 
         match self.open {
-            None => self.list(f, body),
-            Some(at) => self.one(f, body, at),
+            None => self.list(f, body, th),
+            Some(at) => self.one(f, body, at, th),
         }
 
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("  {keys}"),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ))),
             Rect { y: area.y + area.height - 1, height: 1, ..area },
         );
     }
 
-    fn list(&mut self, f: &mut Frame, area: Rect) {
+    fn list(&mut self, f: &mut Frame, area: Rect, th: Theme) {
         let rows = self.shown();
         if rows.is_empty() {
             f.render_widget(
-                Paragraph::new(Span::styled("  nobody matches that.", Style::default().fg(DIM))),
+                Paragraph::new(Span::styled("  nobody matches that.", Style::default().fg(th.faint()))),
                 area,
             );
             return;
@@ -552,16 +552,16 @@ impl Browser {
         for (row, &at) in rows.iter().skip(self.top).take(room).enumerate() {
             let p = &self.people[at];
             let here = self.top + row == self.cursor;
-            let ink = if here { FG } else { DIM };
+            let ink = if here { th.ink() } else { th.faint() };
             let line = Line::from(vec![
                 Span::styled(
                     if here { "  \u{203a} " } else { "    " },
-                    Style::default().fg(ACCENT),
+                    Style::default().fg(th.amber()),
                 ),
                 Span::styled(
                     format!("{:<18}", cut(&p.name, 18)),
                     match here {
-                        true => Style::default().fg(FG).add_modifier(Modifier::BOLD),
+                        true => Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
                         false => Style::default().fg(ink),
                     },
                 ),
@@ -576,9 +576,9 @@ impl Browser {
                 ),
                 Span::styled(
                     format!("{:<26}", cut(&p.wheres().join(" · "), 26)),
-                    Style::default().fg(if here { CYAN } else { FAINT }),
+                    Style::default().fg(if here { th.cyan() } else { th.ghost() }),
                 ),
-                Span::styled(stamp(p.last()), Style::default().fg(FAINT)),
+                Span::styled(stamp(p.last()), Style::default().fg(th.ghost())),
             ]);
             f.render_widget(
                 Paragraph::new(line),
@@ -587,15 +587,15 @@ impl Browser {
         }
     }
 
-    fn one(&mut self, f: &mut Frame, area: Rect, at: usize) {
+    fn one(&mut self, f: &mut Frame, area: Rect, at: usize, th: Theme) {
         let p = &self.people[at];
         let mut lines: Vec<Line> = Vec::new();
-        let dim = Style::default().fg(DIM);
-        let faint = Style::default().fg(FAINT);
+        let dim = Style::default().fg(th.faint());
+        let faint = Style::default().fg(th.ghost());
 
         lines.push(Line::from(Span::styled(
             format!("  {}", p.name),
-            Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
         )));
         let via = p.via();
         lines.push(Line::from(Span::styled(
@@ -633,7 +633,7 @@ impl Browser {
                 false => "    ".to_string(),
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {tag}"), Style::default().fg(ACCENT)),
+                Span::styled(format!("  {tag}"), Style::default().fg(th.amber())),
                 Span::styled(
                     format!(
                         "{}   {:<8}{} question{}",
@@ -642,7 +642,7 @@ impl Browser {
                         stay.asked(),
                         if stay.asked() == 1 { "" } else { "s" },
                     ),
-                    Style::default().fg(FG),
+                    Style::default().fg(th.ink()),
                 ),
                 Span::styled(
                     match stay.place.is_empty() {
@@ -664,7 +664,7 @@ impl Browser {
                     Span::styled("        ", faint),
                     Span::styled(
                         cut(&said.q, area.width.saturating_sub(24) as usize),
-                        Style::default().fg(FG),
+                        Style::default().fg(th.ink()),
                     ),
                     Span::styled(
                         match marks.is_empty() {

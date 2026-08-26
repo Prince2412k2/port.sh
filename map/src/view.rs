@@ -140,9 +140,15 @@ pub enum Ground {
     /// that carry the silhouette as continuous strokes, and a few contours for
     /// reference. No per-sample stipple at all. It draws about a fifth of the
     /// marks the ribbon does and says considerably more with them.
-    #[default]
     Massif,
     /// Shaded stipple, displaced by elevation. The 3D reading.
+    ///
+    /// The default, and it is braille all the way down. What was wrong with it
+    /// was never the glyph -- it was that the stipple had no boundary and no
+    /// tonal range, so it read as texture. It has an outline now (`Canvas::rim`)
+    /// and the bottom of the ramp back, and only ground that stands thirty
+    /// metres over its surroundings is drawn at all.
+    #[default]
     Ribbon,
     /// The same stipple with no vertical displacement at all: hillshade, the
     /// way a printed map does relief. Honest where the heightmap is coarse,

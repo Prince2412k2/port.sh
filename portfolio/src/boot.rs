@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::paint::{dim_to, ease, ACCENT, FAINT, FG};
+use crate::paint::{dim_to, ease, Theme};
 
 /// How long the whole thing lasts.
 pub const SECS: f64 = 2.4;
@@ -25,7 +25,7 @@ pub const SECS: f64 = 2.4;
 /// Where the name has fully arrived and the sea has gone flat.
 const SETTLED: f64 = 1.5;
 
-pub fn render(f: &mut Frame, area: Rect, t: f64) {
+pub fn render(f: &mut Frame, area: Rect, t: f64, th: Theme) {
     if area.width < 20 || area.height < 8 {
         return;
     }
@@ -55,12 +55,12 @@ pub fn render(f: &mut Frame, area: Rect, t: f64) {
         f,
         y,
         name,
-        Style::default().fg(dim_to(FG, appear)).add_modifier(Modifier::BOLD),
+        Style::default().fg(dim_to(th.ink(), appear, th)).add_modifier(Modifier::BOLD),
     );
     // The subtitle comes in behind the name rather than with it, so the two
     // arrive as one thing settling instead of two things switching on.
     let late = ease(((t - 0.6) / (SETTLED - 0.4)).clamp(0.0, 1.0)) as f32 * out;
-    put(f, y + 1, sub, Style::default().fg(dim_to(FAINT, late)));
+    put(f, y + 1, sub, Style::default().fg(dim_to(th.ghost(), late, th)));
 
     if t > SETTLED * 0.8 {
         let k = ease(((t - SETTLED * 0.8) / 0.5).clamp(0.0, 1.0)) as f32 * out;
@@ -68,7 +68,7 @@ pub fn render(f: &mut Frame, area: Rect, t: f64) {
             f,
             area.y + area.height.saturating_sub(3),
             "any key",
-            Style::default().fg(dim_to(ACCENT, k * 0.7)),
+            Style::default().fg(dim_to(th.amber(), k * 0.7, th)),
         );
     }
 }

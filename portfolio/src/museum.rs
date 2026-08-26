@@ -29,7 +29,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::paint::{self, wrap, ACCENT, DIM, FAINT, FG};
+use crate::paint::{self, wrap, Theme};
 use crate::portraits::{self, Portrait};
 use crate::taste::{Entry, Sheet};
 
@@ -265,13 +265,13 @@ impl Museum {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, m: &Museum) {
+pub fn render(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
     if m.works.is_empty() || area.width < 24 || area.height < 12 {
         return;
     }
 
     // The field goes down first and everything else sits on it.
-    field(f, area, m);
+    field(f, area, m, th);
 
     let stride = area.width as f64;
     // Only the works that can actually reach the screen. At a stride of one
@@ -284,14 +284,14 @@ pub fn render(f: &mut Frame, area: Rect, m: &Museum) {
         if dx.abs() >= area.width as f64 {
             continue;
         }
-        work(f, area, m, i, dx);
+        work(f, area, m, i, dx, th);
     }
 
-    index(f, area, m);
+    index(f, area, m, th);
 }
 
 /// One work, offset `dx` columns from centre.
-fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
+fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
     let e = &m.works[i];
 
     // Resolved once, in one place, shared with the wall behind it. Every
@@ -328,7 +328,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
         {
             let r = Rect { x: x as u16, ..bed };
             f.render_widget(ratatui::widgets::Clear, r);
-            f.render_widget(Paragraph::new("").style(Style::default().bg(crate::paint::BG)), r);
+            f.render_widget(Paragraph::new("").style(Style::default().bg(th.page())), r);
         }
     }
 
@@ -341,7 +341,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
         if x >= area.x as f64 {
             let rule = "\u{2500}".repeat(measure as usize / 3);
             f.render_widget(
-                Paragraph::new(Line::from(Span::styled(rule, Style::default().fg(FAINT)))),
+                Paragraph::new(Line::from(Span::styled(rule, Style::default().fg(th.ghost())))),
                 Rect { x: x as u16, y: top + 1, width: measure, height: 1 },
             );
         }
@@ -358,27 +358,27 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64) {
             } else {
                 p.frames[0]
             };
-            paint::portrait(f, area, x as u16, top, frame, p.cols);
+            paint::portrait(f, area, x as u16, top, frame, p.cols, th);
         }
     }
 
     let mut y = top + plate.map_or(0, |p| p.rows) + 1;
     put(f, y, measure, vec![
-        Span::styled(e.name.to_uppercase(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("   {}", e.from), Style::default().fg(FAINT)),
+        Span::styled(e.name.to_uppercase(), Style::default().fg(th.ink()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("   {}", e.from), Style::default().fg(th.ghost())),
     ]);
     y += 2;
     for l in lines {
         put(f, y, measure, vec![Span::styled(
             l,
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            Style::default().fg(th.faint()).add_modifier(Modifier::ITALIC),
         )]);
         y += 1;
     }
 }
 
 /// Where you are in the collection, as a row of marks.
-fn index(f: &mut Frame, area: Rect, m: &Museum) {
+fn index(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
     let n = m.works.len();
     let w = (n * 2) as u16;
     if w + 2 > area.width {
@@ -389,9 +389,9 @@ fn index(f: &mut Frame, area: Rect, m: &Museum) {
     let spans: Vec<Span> = (0..n)
         .map(|i| {
             if i == m.sel {
-                Span::styled("\u{25cf} ", Style::default().fg(ACCENT))
+                Span::styled("\u{25cf} ", Style::default().fg(th.amber()))
             } else {
-                Span::styled("\u{00b7} ", Style::default().fg(FAINT))
+                Span::styled("\u{00b7} ", Style::default().fg(th.ghost()))
             }
         })
         .collect();
@@ -407,7 +407,7 @@ fn index(f: &mut Frame, area: Rect, m: &Museum) {
 ///
 /// It holds still once the plate does -- a wall that keeps raining behind a
 /// settled photograph is bandwidth spent on something nobody is looking at.
-fn field(f: &mut Frame, area: Rect, m: &Museum) {
+fn field(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
     let Some(e) = m.works.get(m.sel) else { return };
     // A name nothing answers to is the plain wall, not an error: this file is
     // content, edited without a rebuild, and a typo in it should cost the
@@ -434,7 +434,7 @@ fn field(f: &mut Frame, area: Rect, m: &Museum) {
         // Stronger than the old field's 0.26. That was a texture nobody was
         // meant to look at; this is a picture, and at a quarter strength every
         // scene read as smudges on an empty screen.
-        paint::recolour(f, area, m.wall(), 0.55);
+        paint::recolour(f, area, m.wall(), 0.55, th);
     }
 }
 

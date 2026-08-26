@@ -20,7 +20,7 @@ use crate::boot;
 use crate::context;
 use crate::home;
 use crate::museum::Museum;
-use crate::paint::{self, ACCENT, BG, DIM, FAINT, FG};
+use crate::paint::{self, Theme};
 use crate::taste;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -493,7 +493,7 @@ impl Shell {
                 // window too narrow for the portrait has nothing animating at
                 // all, and a wider one that earns the large bake pays for it in
                 // seconds rather than in bandwidth.
-                Section::Home => home::plate(self.body, &self.about)
+                Section::Home => home::plate(self.body, &self.about, self.map.theme)
                     .is_some_and(|p| self.since < crate::paint::lively_for(p)),
             }
     }
@@ -710,6 +710,22 @@ impl Shell {
         match k.code {
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.quit = true;
+                return;
+            }
+            // Ink or light, for the whole page. Handled here rather than in
+            // the map's own keys because the theme is the app's: pressing it
+            // on the home screen has to work, and it did not when the map
+            // owned the binding.
+            //
+            // Not in the chat, and not with the map's search box open, for the
+            // same reason `q` is not the quit key in the chat: there `i` is a
+            // letter somebody is typing.
+            KeyCode::Char('i')
+                if k.modifiers.is_empty()
+                    && self.section != Section::Ask
+                    && self.map.query.is_none() =>
+            {
+                self.map.theme = self.map.theme.next();
                 return;
             }
             _ => {}
@@ -1026,13 +1042,17 @@ impl Shell {
     }
 
     pub fn render(&mut self, f: &mut Frame) {
+        // One theme per session, taken off the map because that is where the
+        // key that flips it lands. A `static` would be simpler and wrong:
+        // one process serves every visitor, so it would repaint all of them.
+        let th = self.map.theme;
         let area = f.area();
         Block::default()
-            .style(Style::default().bg(BG))
+            .style(Style::default().bg(th.page()))
             .render(area, f.buffer_mut());
 
         if self.booting() {
-            boot::render(f, area, self.boot);
+            boot::render(f, area, self.boot, th);
             return;
         }
 
@@ -1054,11 +1074,11 @@ impl Shell {
         .areas(area);
         self.body = body;
 
-        self.rail(f, head);
+        self.rail(f, head, th);
 
         match self.section {
-            Section::Home => home::render(f, body, &self.about, self.since),
-            Section::Taste => crate::museum::render(f, body, &self.museum),
+            Section::Home => home::render(f, body, &self.about, self.since, th),
+            Section::Taste => crate::museum::render(f, body, &self.museum, th),
             Section::Ask => {
                 // The map goes down first and the words go on top of it. It
                 // cannot draw itself from in there -- the renderer wants an
@@ -1085,7 +1105,7 @@ impl Shell {
                     // Composited afterwards, like the section dissolve: the map
                     // renderer knows nothing about this page's fade, or about
                     // having no edges, and should not have to.
-                    paint::feather(f, at, fade);
+                    paint::feather(f, at, fade, th);
                     // Knocked back only where the map's edge reaches over the
                     // words. Braille under prose is unreadable at full strength,
                     // and the fix is not to move the map aside -- it is to leave
@@ -1099,11 +1119,11 @@ impl Shell {
                     // avoid. It arrives gradually now: heaviest where the words
                     // are, nothing by the time the map is on its own.
                     let over = ask::prose_rect(body, &self.ask).intersection(at);
-                    paint::veil_ramp(f, over, 0.34, 1.0);
+                    paint::veil_ramp(f, over, 0.34, 1.0, th);
                     // On top of the dissolve, not under it: it is a read-out
                     // rather than part of the picture, and it fades on its own.
                     if let Some((said, age)) = chord {
-                        ask::chord_note(f, at, &said, (1.0 - age / CHORD_SECS) as f32);
+                        ask::chord_note(f, at, &said, (1.0 - age / CHORD_SECS) as f32, th);
                     }
                 }
                 // Project art lives on the sourced canvas beside the answer.
@@ -1172,13 +1192,13 @@ impl Shell {
                             }
                         }
                     }
-                    paint::veil(f, at, fade);
+                    paint::veil(f, at, fade, th);
                 }
                 if let Some((at, spec, fade, t, running)) = ask::diagram_panel(body, &self.ask) {
                     skysheet::diagram::render(f.buffer_mut(), at, spec, t, running);
-                    paint::veil(f, at, fade);
+                    paint::veil(f, at, fade, th);
                 }
-                ask::render(f, body, &self.ask);
+                ask::render(f, body, &self.ask, th);
             }
             Section::Experience => termap::ui::render_map_only(f, body, &mut self.map),
             Section::Projects | Section::Skills => {
@@ -1191,16 +1211,16 @@ impl Shell {
         // renderers that know nothing about each other.
         if self.switch > 0.0 {
             let k = paint::ease(1.0 - self.switch / SWITCH) as f32;
-            paint::veil(f, body, k);
+            paint::veil(f, body, k, th);
         }
 
-        self.footer(f, foot);
+        self.footer(f, foot, th);
         if self.show_help {
-            home::help(f, area);
+            home::help(f, area, th);
         }
     }
 
-    fn rail(&self, f: &mut Frame, area: Rect) {
+    fn rail(&self, f: &mut Frame, area: Rect, th: Theme) {
         // A transcript has nowhere to navigate to. The rail would offer six
         // sections and answer for none of them, so the row says which
         // conversation this is instead -- which is the thing somebody reading
@@ -1208,8 +1228,8 @@ impl Shell {
         if !self.replaying.is_empty() {
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("  reading  ", Style::default().fg(ACCENT)),
-                    Span::styled(self.replaying.clone(), Style::default().fg(DIM)),
+                    Span::styled("  reading  ", Style::default().fg(th.amber())),
+                    Span::styled(self.replaying.clone(), Style::default().fg(th.faint())),
                 ])),
                 area,
             );
@@ -1228,7 +1248,7 @@ impl Shell {
                 Paragraph::new(Line::from(vec![
                     Span::styled(
                         self.about.name.to_uppercase(),
-                        Style::default().fg(FG).add_modifier(Modifier::BOLD),
+                        Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
                     ),
                 ])),
                 Rect { x: area.x + 2, width: area.width.saturating_sub(2), ..area },
@@ -1251,13 +1271,13 @@ impl Shell {
             // way it is typed rather than the way the array is indexed.
             line.push(Span::styled(
                 format!("[{}] ", index + 1),
-                Style::default().fg(if on { ACCENT } else { FAINT }),
+                Style::default().fg(if on { th.amber() } else { th.ghost() }),
             ));
             line.push(Span::styled(
                 s.label(),
                 match on {
-                    true => Style::default().fg(FG).add_modifier(Modifier::BOLD),
-                    false => Style::default().fg(DIM),
+                    true => Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
+                    false => Style::default().fg(th.faint()),
                 },
             ));
             if index + 1 < Section::ALL.len() {
@@ -1322,7 +1342,7 @@ impl Shell {
             .map(|(section, _, _)| section)
     }
 
-    fn footer(&self, f: &mut Frame, area: Rect) {
+    fn footer(&self, f: &mut Frame, area: Rect, th: Theme) {
         let mut right = Vec::new();
         // The map's instruments live here now that it no longer draws its own
         // status line. They are readings, not decoration: what scale you are
@@ -1330,7 +1350,7 @@ impl Shell {
         if self.section == Section::Experience && !self.map.source.has_basemap() {
             right.push(Span::styled(
                 "no basemap mounted     ".to_string(),
-                Style::default().fg(ACCENT),
+                Style::default().fg(th.amber()),
             ));
         }
         if self.section == Section::Experience {
@@ -1342,7 +1362,7 @@ impl Shell {
                     vp.zoom,
                     vp.tilt.to_degrees()
                 ),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ));
         }
         if self.section == Section::Ask {
@@ -1355,11 +1375,11 @@ impl Shell {
                     true => format!("{n} question{}     ", if n == 1 { "" } else { "s" }),
                     false => format!("{n}/{} questions     ", crate::gates::GATES.turns),
                 },
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ));
         }
         if self.section != Section::Ask {
-            right.push(Span::styled("q  quit  ", Style::default().fg(DIM)));
+            right.push(Span::styled("q  quit  ", Style::default().fg(th.faint())));
         }
         let right_width = right
             .iter()
@@ -1382,7 +1402,7 @@ impl Shell {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     hint,
-                    Style::default().fg(if self.driving { ACCENT } else { FAINT }),
+                    Style::default().fg(if self.driving { th.amber() } else { th.ghost() }),
                 ),
             ])),
             Rect {

@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::about::About;
-use crate::paint::{wrap, ACCENT, BG, CYAN, DIM, FAINT, FG};
+use crate::paint::{wrap, Theme};
 
 /// Text is set against this rather than the terminal's full width. A pitch
 /// measured across 200 columns is one line the eye cannot track back from.
@@ -55,14 +55,14 @@ fn titlecase(s: &str) -> String {
 /// the layout that has to leave room for them -- and a layout that measured the
 /// links separately from the way they are drawn would be one edit away from
 /// disagreeing with itself.
-fn contact_rows(a: &About) -> Vec<Vec<Span<'static>>> {
+fn contact_rows(a: &About, th: Theme) -> Vec<Vec<Span<'static>>> {
     let joined = |parts: [&String; 2]| -> Vec<Span<'static>> {
         let mut spans: Vec<Span> = Vec::new();
         for s in parts.iter().filter(|s| !s.is_empty()) {
             if !spans.is_empty() {
-                spans.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
+                spans.push(Span::styled("   ·   ", Style::default().fg(th.ghost())));
             }
-            spans.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
+            spans.push(Span::styled((*s).clone(), Style::default().fg(th.cyan())));
         }
         spans
     };
@@ -87,8 +87,8 @@ fn row_width(spans: &[Span]) -> u16 {
 /// contact row happened to fit in what was left over, and the moment the
 /// picture got bigger the ssh line lost its last few characters off the right
 /// of the frame.
-fn text_width(a: &About) -> u16 {
-    MEASURE.max(contact_rows(a).iter().map(|r| row_width(r)).max().unwrap_or(0))
+fn text_width(a: &About, th: Theme) -> u16 {
+    MEASURE.max(contact_rows(a, th).iter().map(|r| row_width(r)).max().unwrap_or(0))
 }
 
 /// Which bake of the portrait this screen can hang beside the text, if any.
@@ -101,10 +101,10 @@ fn text_width(a: &About) -> u16 {
 /// Shared with `shell`, which needs the same answer to decide whether this
 /// section is still animating. Two independent guesses would let the loop stop
 /// while the plate was still asking for frames.
-pub fn plate(area: Rect, a: &About) -> Option<&'static crate::portraits::Portrait> {
+pub fn plate(area: Rect, a: &About, th: Theme) -> Option<&'static crate::portraits::Portrait> {
     crate::portraits::fit(
         "snufkin-home",
-        area.width.saturating_sub(text_width(a) + GAP + 8),
+        area.width.saturating_sub(text_width(a, th) + GAP + 8),
         area.height.saturating_sub(2),
     )
 }
@@ -126,15 +126,15 @@ struct Columns {
     contact: u16,
 }
 
-fn columns(area: Rect, a: &About) -> Columns {
-    let art = plate(area, a).map_or(0, |p| p.cols);
+fn columns(area: Rect, a: &About, th: Theme) -> Columns {
+    let art = plate(area, a, th).map_or(0, |p| p.cols);
     let gap = if art > 0 { GAP } else { 0 };
     let room = area.width.saturating_sub(8 + art + gap);
     let measure = MEASURE.min(room);
     // Centred on the block's widest line rather than on the paragraph, so the
     // contact row gets the columns it needs instead of whatever the prose left
     // behind.
-    let block = art + gap + measure.max(text_width(a).min(room));
+    let block = art + gap + measure.max(text_width(a, th).min(room));
     let art_x = area.x + (area.width.saturating_sub(block)) / 2;
     let text_x = art_x + art + gap;
     Columns {
@@ -146,12 +146,12 @@ fn columns(area: Rect, a: &About) -> Columns {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
+pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64, th: Theme) {
     if area.width < 24 || area.height < 8 {
         return;
     }
-    let face = plate(area, a);
-    let c = columns(area, a);
+    let face = plate(area, a, th);
+    let c = columns(area, a, th);
     let (aw, x0, x, w) = (c.art, c.art_x, c.text_x, c.measure);
 
     let pitch = wrap(&a.pitch, w as usize);
@@ -171,7 +171,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
             // it runs comes from the size of the bake, so a wide window buys a
             // bigger picture rather than a dearer one.
             let frame = crate::paint::portrait_loop(m, t, t < crate::paint::lively_for(m));
-            crate::paint::portrait(f, area, x0, y, frame, m.cols);
+            crate::paint::portrait(f, area, x0, y, frame, m.cols, th);
         }
     }
 
@@ -183,27 +183,27 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
 
     put(f, y, vec![Span::styled(
         a.name.to_uppercase(),
-        Style::default().fg(FG).add_modifier(Modifier::BOLD),
+        Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
     )]);
     y += 1;
     put(f, y, vec![
-        Span::styled(a.role.clone(), Style::default().fg(ACCENT)),
+        Span::styled(a.role.clone(), Style::default().fg(th.amber())),
         Span::styled("   ", Style::default()),
-        Span::styled(a.where_.clone(), Style::default().fg(DIM)),
+        Span::styled(a.where_.clone(), Style::default().fg(th.faint())),
     ]);
     y += 2;
 
     for l in &pitch {
-        put(f, y, vec![Span::styled(l.clone(), Style::default().fg(FG))]);
+        put(f, y, vec![Span::styled(l.clone(), Style::default().fg(th.ink()))]);
         y += 1;
     }
 
     if !now.is_empty() {
         y += 1;
-        put(f, y, vec![Span::styled("NOW", Style::default().fg(FAINT))]);
+        put(f, y, vec![Span::styled("NOW", Style::default().fg(th.ghost()))]);
         y += 1;
         for l in &now {
-            put(f, y, vec![Span::styled(l.clone(), Style::default().fg(DIM))]);
+            put(f, y, vec![Span::styled(l.clone(), Style::default().fg(th.faint()))]);
             y += 1;
         }
     }
@@ -215,10 +215,10 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     // the visitor asks first.
     put(f, y, vec![
         Span::styled("\u{25c6}  ", Style::default().fg(cert_mark())),
-        Span::styled(crate::cert::NAME.to_string(), Style::default().fg(FG)),
+        Span::styled(crate::cert::NAME.to_string(), Style::default().fg(th.ink())),
         Span::styled(
             format!(" \u{b7} {}", titlecase(crate::cert::TIER)),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         ),
     ]);
     y += 2;
@@ -233,9 +233,9 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
         ("5", "ask", "put a question to the agent on this box"),
     ] {
         put(f, y, vec![
-            Span::styled(format!("{key}  "), Style::default().fg(ACCENT)),
-            Span::styled(format!("{label:<12}"), Style::default().fg(FG)),
-            Span::styled(blurb.to_string(), Style::default().fg(FAINT)),
+            Span::styled(format!("{key}  "), Style::default().fg(th.amber())),
+            Span::styled(format!("{label:<12}"), Style::default().fg(th.ink())),
+            Span::styled(blurb.to_string(), Style::default().fg(th.ghost())),
         ]);
         y += 1;
     }
@@ -243,7 +243,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     y += 1;
     // None of these may wrap or clip. They get the rest of the frame, and
     // `columns` is what guarantees the rest of the frame is enough.
-    for row in contact_rows(a) {
+    for row in contact_rows(a, th) {
         if y >= area.y + area.height {
             break;
         }
@@ -312,7 +312,7 @@ const KEYS: [Group; 6] = [
 /// The key column is measured per column rather than across the whole panel:
 /// `shift-enter` is eleven characters and `/` is one, and one width for both
 /// pushes every short key in the list a finger's width away from what it does.
-fn column(groups: &[Group]) -> (Vec<Line<'static>>, u16) {
+fn column(groups: &[Group], th: Theme) -> (Vec<Line<'static>>, u16) {
     let keys = groups
         .iter()
         .flat_map(|(_, rows)| rows.iter())
@@ -328,20 +328,20 @@ fn column(groups: &[Group]) -> (Vec<Line<'static>>, u16) {
         width = width.max(head.chars().count());
         lines.push(Line::from(Span::styled(
             *head,
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         )));
         for (k, v) in rows.iter() {
             width = width.max(2 + keys + 2 + v.chars().count());
             lines.push(Line::from(vec![
-                Span::styled(format!("  {k:<keys$}  "), Style::default().fg(FG)),
-                Span::styled(*v, Style::default().fg(DIM)),
+                Span::styled(format!("  {k:<keys$}  "), Style::default().fg(th.ink())),
+                Span::styled(*v, Style::default().fg(th.faint())),
             ]));
         }
     }
     (lines, width as u16)
 }
 
-pub fn help(f: &mut Frame, area: Rect) {
+pub fn help(f: &mut Frame, area: Rect, th: Theme) {
     // Two columns where there is room, because one column is thirty-one rows
     // and the terminal this has to fit is twenty-four. Where to split is a
     // search over five places rather than a number written down here, which is
@@ -357,8 +357,8 @@ pub fn help(f: &mut Frame, area: Rect) {
     let mut fits: Option<(usize, u16)> = None;
     let mut nearest: Option<(usize, u16)> = None;
     for at in 1..KEYS.len() {
-        let (left, lw) = column(&KEYS[..at]);
-        let (right, rw) = column(&KEYS[at..]);
+        let (left, lw) = column(&KEYS[..at], th);
+        let (right, rw) = column(&KEYS[at..], th);
         if lw + gutter + rw > room {
             continue;
         }
@@ -375,12 +375,12 @@ pub fn help(f: &mut Frame, area: Rect) {
     // better than a single column and much better than the widest one.
     let (columns, inner_w, inner_h) = match fits.or(nearest) {
         Some((at, tall)) => {
-            let (left, lw) = column(&KEYS[..at]);
-            let (right, rw) = column(&KEYS[at..]);
+            let (left, lw) = column(&KEYS[..at], th);
+            let (right, rw) = column(&KEYS[at..], th);
             (vec![(left, lw), (right, rw)], lw + gutter + rw, tall)
         }
         None => {
-            let (only, w) = column(&KEYS);
+            let (only, w) = column(&KEYS, th);
             let h = only.len() as u16;
             (vec![(only, w)], w, h)
         }
@@ -401,14 +401,14 @@ pub fn help(f: &mut Frame, area: Rect) {
 
     let frame = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(FAINT))
-        .style(Style::default().bg(BG))
+        .border_style(Style::default().fg(th.ghost()))
+        .style(Style::default().bg(th.page()))
         .title(Span::styled(
             " keys ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(
-            Line::from(Span::styled(" esc closes ", Style::default().fg(DIM))).right_aligned(),
+            Line::from(Span::styled(" esc closes ", Style::default().fg(th.faint()))).right_aligned(),
         );
     let inside = frame.inner(popup);
     f.render_widget(frame, popup);
@@ -447,9 +447,9 @@ mod tests {
         // Measured off the row itself, not off the layout's opinion of it —
         // asking `text_width` how much room the row needs would make this test
         // agree with any answer that function gave, including a wrong one.
-        let need = contact_rows(&a).iter().map(|r| row_width(r)).max().expect("rows");
+        let need = contact_rows(&a, Theme::default()).iter().map(|r| row_width(r)).max().expect("rows");
         for width in 24..=320u16 {
-            let c = columns(Rect { x: 0, y: 0, width, height: 50 }, &a);
+            let c = columns(Rect { x: 0, y: 0, width, height: 50 }, &a, Theme::default());
             if c.art == 0 {
                 continue; // no picture is the escape hatch, and it is allowed
             }
@@ -465,7 +465,7 @@ mod tests {
         // hundred columns, which reserved the whole frame and left the
         // portrait nothing. Apart, they fit the reading measure and the
         // picture is free to use what is left.
-        let together: u16 = contact_rows(&a).iter().map(|r| row_width(r)).sum::<u16>() + 7;
+        let together: u16 = contact_rows(&a, Theme::default()).iter().map(|r| row_width(r)).sum::<u16>() + 7;
         assert!(
             together > MEASURE && need <= MEASURE,
             "split rows are {need} wide and would be {together} on one line, \
@@ -478,8 +478,8 @@ mod tests {
     #[test]
     fn the_portrait_grows_with_the_window_and_leaves_when_it_cannot_fit() {
         let a = shipped();
-        let wide = columns(Rect { x: 0, y: 0, width: 220, height: 50 }, &a);
-        let narrow = columns(Rect { x: 0, y: 0, width: 96, height: 50 }, &a);
+        let wide = columns(Rect { x: 0, y: 0, width: 220, height: 50 }, &a, Theme::default());
+        let narrow = columns(Rect { x: 0, y: 0, width: 96, height: 50 }, &a, Theme::default());
         assert!(wide.art > 0, "no portrait on a 220-column terminal");
         assert_eq!(narrow.art, 0, "a 96-column terminal still tried to hang one");
 
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn a_shallow_window_drops_the_portrait_too() {
         let a = shipped();
-        let c = columns(Rect { x: 0, y: 0, width: 240, height: 14 }, &a);
+        let c = columns(Rect { x: 0, y: 0, width: 240, height: 14 }, &a, Theme::default());
         assert_eq!(c.art, 0, "hung a portrait in 14 rows");
     }
 
@@ -515,7 +515,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    help(frame, area);
+                    help(frame, area, Theme::default());
                 })
                 .unwrap();
             let plain = termap::snapshot::plain(terminal.backend().buffer());

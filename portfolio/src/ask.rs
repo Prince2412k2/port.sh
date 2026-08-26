@@ -26,7 +26,7 @@ use ratatui::widgets::Paragraph;
 use serde::{Deserialize, Serialize};
 
 use crate::acp::{self, Call, Event, Status};
-use crate::paint::{ACCENT, CYAN, DIM, FAINT, FG, wrap};
+use crate::paint::{wrap, Theme};
 
 /// The longest question anybody can ask.
 ///
@@ -2297,7 +2297,7 @@ pub fn map_panel(area: Rect, a: &Ask) -> Option<(Rect, Spot, f32)> {
 /// It fades, and it exists because a four-degree tilt step is not visible on a
 /// map this size: without it, a chord that worked and a chord the terminal
 /// swallowed look exactly the same on screen.
-pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32) {
+pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32, th: Theme) {
     if area.height < 3 || alpha <= 0.02 {
         return;
     }
@@ -2306,7 +2306,7 @@ pub fn chord_note(f: &mut Frame, area: Rect, said: &str, alpha: f32) {
     f.render_widget(
         Paragraph::new(Span::styled(
             text,
-            Style::default().fg(crate::paint::dim_to(crate::paint::lead(), alpha)),
+            Style::default().fg(crate::paint::dim_to(crate::paint::lead(th), alpha, th)),
         )),
         Rect {
             x: area.x + area.width - w,
@@ -2341,7 +2341,7 @@ pub fn map_rect(area: Rect, a: &Ask) -> Option<Rect> {
     map_panel(area, a).map(|(at, _, _)| at)
 }
 
-pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
+pub fn render(f: &mut Frame, area: Rect, a: &Ask, th: Theme) {
     if area.width < 30 || area.height < 8 {
         return;
     }
@@ -2373,12 +2373,12 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
 
     let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
     if a.turns.is_empty() {
-        opening(&mut lines, prose, a);
+        opening(&mut lines, prose, a, th);
     }
     let visible = a.viewed.unwrap_or_else(|| a.turns.len().saturating_sub(1));
     for (i, t) in a.turns.iter().enumerate().take(visible + 1) {
         let live = i + 1 == a.turns.len() && a.busy();
-        transcript(&mut lines, prose, t, a, live, panel_w == 0);
+        transcript(&mut lines, prose, t, a, live, panel_w == 0, th);
     }
 
     // Short pages sit on the question line rather than floating at the top of a
@@ -2427,7 +2427,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("\u{2191} {} more", a.scrolled()),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ))
             .right_aligned(),
             Rect {
@@ -2440,8 +2440,8 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
     }
 
     if let (Some(at), Some(p)) = (panel_rect(area, a), &a.panel) {
-        canvas_chrome(f, at, p);
-        side(f, at, p);
+        canvas_chrome(f, at, p, th);
+        side(f, at, p, th);
     }
 
     palette(
@@ -2454,6 +2454,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
         },
         &picks,
         a.picked(),
+        th,
     );
     if question_rows > 0 {
         question(
@@ -2465,22 +2466,23 @@ pub fn render(f: &mut Frame, area: Rect, a: &Ask) {
                 height: question_rows,
             },
             a,
-        );
+        th,
+    );
     }
 }
 
 /// The invitation, before anybody has asked anything.
-fn opening(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
+fn opening(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask, th: Theme) {
     lines.push(vec![]);
-    panel_gates(lines, w, a);
+    panel_gates(lines, w, a, th);
     for l in wrap(OPENING, w as usize) {
-        lines.push(vec![Span::styled(l, Style::default().fg(DIM))]);
+        lines.push(vec![Span::styled(l, Style::default().fg(th.faint()))]);
     }
     lines.push(vec![]);
     for s in SUGGESTIONS {
         lines.push(vec![Span::styled(
             format!("  {s}"),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         )]);
     }
 }
@@ -2676,8 +2678,9 @@ fn transcript(
     // is already showing it, which is where it goes when there is room -- drawn
     // both ways, a wide screen showed the same code twice.
     inline_code: bool,
+    th: Theme,
 ) {
-    let lead = crate::paint::lead();
+    let lead = crate::paint::lead(th);
     for (i, l) in wrap(&t.q, w.saturating_sub(2) as usize)
         .into_iter()
         .enumerate()
@@ -2723,8 +2726,8 @@ fn transcript(
                 TOOL_MOVING,
                 TOOL_HI,
             ),
-            Status::Done if rendered => ("\u{25a3}", TOOL_SETTLED, FG),
-            Status::Done => ("\u{2713}", DIM, TOOL_LABEL),
+            Status::Done if rendered => ("\u{25a3}", TOOL_SETTLED, th.ink()),
+            Status::Done => ("\u{2713}", th.faint(), TOOL_LABEL),
             Status::Failed => ("\u{2717}", TOOL_BROKEN, TOOL_BROKEN),
             Status::Refused => ("\u{2298}", TOOL_BROKEN, TOOL_BROKEN),
         };
@@ -2789,7 +2792,7 @@ fn transcript(
                 ),
                 Span::styled(
                     ellipsis(&said, w.saturating_sub(4) as usize),
-                    Style::default().fg(DIM),
+                    Style::default().fg(th.faint()),
                 ),
             ]);
         }
@@ -2828,12 +2831,12 @@ fn transcript(
         // what makes it read as settling instead of as two things.
         let tip = body.pop().unwrap_or_default();
         for l in body {
-            lines.push(vec![Span::styled(l, Style::default().fg(FG))]);
+            lines.push(vec![Span::styled(l, Style::default().fg(th.ink()))]);
         }
-        lines.push(settling(&tip, w, a.t));
+        lines.push(settling(&tip, w, a.t, th));
     } else {
         for l in body {
-            lines.push(vec![Span::styled(l, Style::default().fg(FG))]);
+            lines.push(vec![Span::styled(l, Style::default().fg(th.ink()))]);
         }
     }
 
@@ -2841,14 +2844,14 @@ fn transcript(
         let span = code.size + QUIET * 2;
         if (span as u16) <= w {
             lines.push(vec![]);
-            for row in qr_lines(code, 1.0) {
+            for row in qr_lines(code, 1.0, Theme::default()) {
                 lines.push(row);
             }
         } else {
             lines.push(vec![]);
             lines.push(vec![Span::styled(
                 "(the window is too narrow to draw the code)".to_string(),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             )]);
         }
     }
@@ -2892,7 +2895,7 @@ fn churn(frame: u64, at: usize) -> u64 {
 
 /// The line an answer is still arriving on: settled words, then a stretch that
 /// is still deciding, then glyphs that are not words yet.
-fn settling(tip: &str, w: u16, t: f64) -> Vec<Span<'static>> {
+fn settling(tip: &str, w: u16, t: f64, th: Theme) -> Vec<Span<'static>> {
     let frame = (t * CHURN) as u64;
     let chars: Vec<char> = tip.chars().collect();
     let run = 12usize.min(w.saturating_sub(4) as usize);
@@ -2928,10 +2931,10 @@ fn settling(tip: &str, w: u16, t: f64) -> Vec<Span<'static>> {
     let solid: String = out.chars().take(cut).collect();
     let deciding: String = out.chars().skip(cut).take(settled_len - cut).collect();
     let ahead: String = out.chars().skip(settled_len).collect();
-    let lead = crate::paint::lead();
+    let lead = crate::paint::lead(th);
     let mut spans = Vec::new();
     if !solid.is_empty() {
-        spans.push(Span::styled(solid, Style::default().fg(FG)));
+        spans.push(Span::styled(solid, Style::default().fg(th.ink())));
     }
     if !deciding.is_empty() {
         spans.push(Span::styled(deciding, Style::default().fg(lead)));
@@ -2942,8 +2945,8 @@ fn settling(tip: &str, w: u16, t: f64) -> Vec<Span<'static>> {
             ahead.chars().take(half).collect(),
             ahead.chars().skip(half).collect(),
         );
-        spans.push(Span::styled(near, Style::default().fg(DIM)));
-        spans.push(Span::styled(far, Style::default().fg(FAINT)));
+        spans.push(Span::styled(near, Style::default().fg(th.faint())));
+        spans.push(Span::styled(far, Style::default().fg(th.ghost())));
     }
     spans
 }
@@ -2978,7 +2981,7 @@ fn panel_width(p: &Panel, area: Rect) -> u16 {
     }
 }
 
-fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel) {
+fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel, th: Theme) {
     if matches!(p.what, Show::Place(_)) {
         return;
     }
@@ -3012,12 +3015,12 @@ fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 left,
-                Style::default().fg(crate::paint::dim_to(TOOL_SETTLED, fade)),
+                Style::default().fg(crate::paint::dim_to(TOOL_SETTLED, fade, th)),
             ),
             Span::raw(" ".repeat(gap)),
             Span::styled(
                 source,
-                Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade)),
+                Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade, th)),
             ),
         ])),
         header,
@@ -3034,7 +3037,7 @@ fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel) {
             .map(|_| {
                 Line::styled(
                     "\u{2502}",
-                    Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade)),
+                    Style::default().fg(crate::paint::dim_to(TOOL_RULE, fade, th)),
                 )
             })
             .collect::<Vec<_>>();
@@ -3043,11 +3046,11 @@ fn canvas_chrome(f: &mut Frame, area: Rect, p: &Panel) {
 }
 
 /// Draw whatever is at the side, faded in.
-fn side(f: &mut Frame, area: Rect, p: &Panel) {
+fn side(f: &mut Frame, area: Rect, p: &Panel, th: Theme) {
     let fade = p.fade();
     match &p.what {
         Show::Code(code) => {
-            let rows = qr_lines(code, fade);
+            let rows = qr_lines(code, fade, Theme::default());
             for (i, spans) in rows.into_iter().enumerate() {
                 if i as u16 >= area.height {
                     break;
@@ -3063,14 +3066,14 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 );
             }
         }
-        Show::Cert => badge(f, area, fade),
+        Show::Cert => badge(f, area, fade, Theme::default()),
         // Only the caption, for the same reason as a place: the mark and the
         // diagram belong to `skysheet`, and the shell draws them there.
         Show::Work(w) => {
             let Some(p) = crate::mcp::project(&w.id) else {
                 return;
             };
-            let lead = crate::paint::lead();
+            let lead = crate::paint::lead(th);
             let bottom = area.y + area.height;
             let tag = wrap(&p.tag, area.width as usize);
             let foot = format!("{}   {}", p.year, p.repo);
@@ -3095,7 +3098,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 vec![Span::styled(
                     p.name.clone(),
                     Style::default()
-                        .fg(crate::paint::dim_to(lead, fade))
+                        .fg(crate::paint::dim_to(lead, fade, th))
                         .add_modifier(Modifier::BOLD),
                 )],
             );
@@ -3105,7 +3108,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     &mut y,
                     vec![Span::styled(
                         l,
-                        Style::default().fg(crate::paint::dim_to(DIM, fade)),
+                        Style::default().fg(crate::paint::dim_to(th.faint(), fade, th)),
                     )],
                 );
             }
@@ -3115,7 +3118,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                 &mut y,
                 vec![Span::styled(
                     foot,
-                    Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                    Style::default().fg(crate::paint::dim_to(th.ghost(), fade, th)),
                 )],
             );
         }
@@ -3153,7 +3156,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     *y += 1;
                 }
             };
-            let lead = crate::paint::lead();
+            let lead = crate::paint::lead(th);
             for l in wrap(&spot.name, area.width as usize) {
                 row(
                     f,
@@ -3161,7 +3164,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     vec![Span::styled(
                         l,
                         Style::default()
-                            .fg(crate::paint::dim_to(lead, fade))
+                            .fg(crate::paint::dim_to(lead, fade, th))
                             .add_modifier(Modifier::BOLD),
                     )],
                 );
@@ -3172,7 +3175,7 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     &mut y,
                     vec![Span::styled(
                         l,
-                        Style::default().fg(crate::paint::dim_to(DIM, fade)),
+                        Style::default().fg(crate::paint::dim_to(th.faint(), fade, th)),
                     )],
                 );
             }
@@ -3187,23 +3190,23 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     vec![
                         Span::styled(
                             format!("{}/{}", tour.at + 1, tour.stops.len()),
-                            Style::default().fg(crate::paint::dim_to(lead, fade)),
+                            Style::default().fg(crate::paint::dim_to(lead, fade, th)),
                         ),
                         Span::styled(
                             "   ^n".to_string(),
-                            Style::default().fg(crate::paint::dim_to(CYAN, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.cyan(), fade, th)),
                         ),
                         Span::styled(
                             " next".to_string(),
-                            Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.ghost(), fade, th)),
                         ),
                         Span::styled(
                             "   ^b".to_string(),
-                            Style::default().fg(crate::paint::dim_to(CYAN, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.cyan(), fade, th)),
                         ),
                         Span::styled(
                             " back".to_string(),
-                            Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.ghost(), fade, th)),
                         ),
                     ],
                 );
@@ -3216,11 +3219,11 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
                     vec![
                         Span::styled(
                             "/map".to_string(),
-                            Style::default().fg(crate::paint::dim_to(CYAN, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.cyan(), fade, th)),
                         ),
                         Span::styled(
                             "  fly there".to_string(),
-                            Style::default().fg(crate::paint::dim_to(FAINT, fade)),
+                            Style::default().fg(crate::paint::dim_to(th.ghost(), fade, th)),
                         ),
                     ],
                 );
@@ -3230,11 +3233,11 @@ fn side(f: &mut Frame, area: Rect, p: &Panel) {
 }
 
 /// The command palette, in the space above the question line.
-fn palette(f: &mut Frame, area: Rect, picks: &[(&'static str, &'static str)], on: usize) {
+fn palette(f: &mut Frame, area: Rect, picks: &[(&'static str, &'static str)], on: usize, th: Theme) {
     if area.height == 0 {
         return;
     }
-    let lead = crate::paint::lead();
+    let lead = crate::paint::lead(th);
     for (i, (name, help)) in picks.iter().take(area.height as usize).enumerate() {
         let here = i == on;
         let spans = vec![
@@ -3247,10 +3250,10 @@ fn palette(f: &mut Frame, area: Rect, picks: &[(&'static str, &'static str)], on
                 if here {
                     Style::default().fg(lead).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(FG)
+                    Style::default().fg(th.ink())
                 },
             ),
-            Span::styled(help.to_string(), Style::default().fg(FAINT)),
+            Span::styled(help.to_string(), Style::default().fg(th.ghost())),
         ];
         f.render_widget(
             Paragraph::new(Line::from(spans)),
@@ -3265,12 +3268,12 @@ fn palette(f: &mut Frame, area: Rect, picks: &[(&'static str, &'static str)], on
 }
 
 /// The rule and the text being typed.
-fn question(f: &mut Frame, area: Rect, a: &Ask) {
-    let lead = crate::paint::lead();
+fn question(f: &mut Frame, area: Rect, a: &Ask, th: Theme) {
+    let lead = crate::paint::lead(th);
     f.render_widget(
         Paragraph::new(Span::styled(
             "\u{2500}".repeat(area.width as usize),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         )),
         Rect { height: 1, ..area },
     );
@@ -3282,14 +3285,14 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
     if a.driving {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("\u{25c8} ", Style::default().fg(ACCENT)),
+                Span::styled("\u{25c8} ", Style::default().fg(th.amber())),
                 Span::styled(
                     "the map has the keyboard".to_string(),
-                    Style::default().fg(ACCENT),
+                    Style::default().fg(th.amber()),
                 ),
                 Span::styled(
                     "   esc to type again".to_string(),
-                    Style::default().fg(FAINT),
+                    Style::default().fg(th.ghost()),
                 ),
             ])),
             Rect {
@@ -3301,10 +3304,10 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
         return;
     }
     let (mark, hint, style) = match &a.state {
-        State::Cold | State::Starting => ("\u{b7}", waking.as_str(), Style::default().fg(FAINT)),
+        State::Cold | State::Starting => ("\u{b7}", waking.as_str(), Style::default().fg(th.ghost())),
         State::Ready => ("\u{203a}", "", Style::default().fg(lead)),
-        State::Thinking => ("\u{b7}", "", Style::default().fg(FAINT)),
-        State::Failed(m) => ("\u{d7}", m.as_str(), Style::default().fg(ACCENT)),
+        State::Thinking => ("\u{b7}", "", Style::default().fg(th.ghost())),
+        State::Failed(m) => ("\u{d7}", m.as_str(), Style::default().fg(th.amber())),
     };
     if !a.input.is_empty() {
         let lines = editable_lines(
@@ -3331,11 +3334,11 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
             };
             let mut spans = vec![Span::styled(prefix, style)];
             if let Some((before, after)) = line.split_once(CURSOR_MARK) {
-                spans.push(Span::styled(before.to_string(), Style::default().fg(FG)));
+                spans.push(Span::styled(before.to_string(), Style::default().fg(th.ink())));
                 spans.push(Span::styled("\u{258c}", Style::default().fg(lead)));
-                spans.push(Span::styled(after.to_string(), Style::default().fg(FG)));
+                spans.push(Span::styled(after.to_string(), Style::default().fg(th.ink())));
             } else {
-                spans.push(Span::styled(line, Style::default().fg(FG)));
+                spans.push(Span::styled(line, Style::default().fg(th.ink())));
             }
             f.render_widget(
                 Paragraph::new(Line::from(spans)),
@@ -3351,11 +3354,11 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
 
     let mut spans = vec![Span::styled(format!("{mark} "), style)];
     if !hint.is_empty() {
-        spans.push(Span::styled(hint.to_string(), Style::default().fg(FAINT)));
+        spans.push(Span::styled(hint.to_string(), Style::default().fg(th.ghost())));
     } else if a.state == State::Ready {
         spans.push(Span::styled(
             "ask, or / for commands".to_string(),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         ));
     }
     f.render_widget(
@@ -3372,11 +3375,11 @@ fn question(f: &mut Frame, area: Rect, a: &Ask) {
 ///
 /// `t` of 0 is the background exactly, so a panel starts invisible and arrives;
 /// 1 is the colour untouched, which is what a QR code has to end at.
-fn mix(rgb: (u8, u8, u8), t: f32) -> ratatui::style::Color {
-    const BG: (u8, u8, u8) = (8, 9, 11);
+fn mix(rgb: (u8, u8, u8), t: f32, th: Theme) -> ratatui::style::Color {
+    let page = termap::canvas::rgb_of(th.page()).unwrap_or((8, 9, 11));
     let t = t.clamp(0.0, 1.0);
     let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    ratatui::style::Color::Rgb(f(BG.0, rgb.0), f(BG.1, rgb.1), f(BG.2, rgb.2))
+    ratatui::style::Color::Rgb(f(page.0, rgb.0), f(page.1, rgb.1), f(page.2, rgb.2))
 }
 
 /// The badge, and the code that verifies it under it when the page is tall
@@ -3388,11 +3391,11 @@ fn mix(rgb: (u8, u8, u8), t: f32) -> ratatui::style::Color {
 /// terminal draws them in its own font at its own size. Dithering a letter a
 /// font already knows how to draw is how the words came out unreadable when
 /// this was tried as a picture of the real PNG.
-fn badge(f: &mut Frame, area: Rect, fade: f32) {
+fn badge(f: &mut Frame, area: Rect, fade: f32, th: Theme) {
     let b = &crate::cert::BADGE;
-    let plate = mix(crate::cert::PLATE, fade);
-    let ink = mix(crate::cert::INK, fade);
-    let page = mix((8, 9, 11), fade);
+    let plate = mix(crate::cert::PLATE, fade, th);
+    let ink = mix(crate::cert::INK, fade, th);
+    let page = mix((8, 9, 11), fade, th);
     let hue = |c: u8| match c {
         b'p' => plate,
         b'w' => ink,
@@ -3464,7 +3467,7 @@ fn badge(f: &mut Frame, area: Rect, fade: f32) {
     // The code, if the window can hold it. When it cannot, the link is already
     // in the answer beside this as something to type -- a code clipped in half
     // is worse than no code, because it looks scannable.
-    let qr = qr_lines(&crate::cert::QR, fade);
+    let qr = qr_lines(&crate::cert::QR, fade, Theme::default());
     if area.height < row + 1 + qr.len() as u16 {
         return;
     }
@@ -3501,12 +3504,12 @@ const QUIET: usize = 4;
 /// the other way round or the contrast is inverted and phones will not read it.
 /// Runs of the same pair are merged into one span rather than emitted per cell,
 /// which takes a 45-column code from 45 spans a row to about a dozen.
-fn qr_lines(code: &crate::coffee::Code, fade: f32) -> Vec<Vec<Span<'static>>> {
+fn qr_lines(code: &crate::coffee::Code, fade: f32, th: Theme) -> Vec<Vec<Span<'static>>> {
     // Mixed toward the page's own background by the fade, so the code rises out
     // of the dark rather than being switched on. At rest it is pure black on
     // pure white, which is what a scanner wants.
-    let dark = mix((0, 0, 0), fade);
-    let light = mix((255, 255, 255), fade);
+    let dark = mix((0, 0, 0), fade, th);
+    let light = mix((255, 255, 255), fade, th);
 
     let span = code.size + QUIET * 2;
     // `true` is a dark module. Outside the matrix is quiet zone, which is light.
@@ -3584,11 +3587,11 @@ fn wired(a: &Ask) -> String {
 /// still on it, drawn from the same table that does the refusing, is the claim
 /// and its evidence in one place. The dots are the gates in `gates.rs` -- if
 /// somebody opens one, this fills in without being edited.
-fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
+fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask, th: Theme) {
     let rule = |lines: &mut Vec<Vec<Span<'static>>>| {
         lines.push(vec![Span::styled(
             "\u{2500}".repeat(w as usize),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         )]);
     };
 
@@ -3601,9 +3604,9 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
     let right = wired(a);
     let gap = (w as usize).saturating_sub(title.chars().count() + right.chars().count());
     lines.push(vec![
-        Span::styled(title.to_string(), Style::default().fg(DIM)),
+        Span::styled(title.to_string(), Style::default().fg(th.faint())),
         Span::styled(" ".repeat(gap), Style::default()),
-        Span::styled(right, Style::default().fg(FAINT)),
+        Span::styled(right, Style::default().fg(th.ghost())),
     ]);
     rule(lines);
 
@@ -3611,12 +3614,12 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
     // only rows that get the accent: they are the whole grant.
     for t in crate::gates::TOOLS.iter().filter(|t| t.open) {
         lines.push(vec![
-            Span::styled(format!("  {OPEN} "), Style::default().fg(CYAN)),
+            Span::styled(format!("  {OPEN} "), Style::default().fg(th.cyan())),
             Span::styled(
                 format!("{:<12}", t.name),
-                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+                Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(t.blurb.to_string(), Style::default().fg(FAINT)),
+            Span::styled(t.blurb.to_string(), Style::default().fg(th.ghost())),
         ]);
     }
 
@@ -3650,7 +3653,7 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
         if gutter == 0 {
             lines.push(vec![Span::styled(
                 format!("  {label}"),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             )]);
         }
         let room = (w as usize).saturating_sub(gutter.max(4)).max(8);
@@ -3661,8 +3664,8 @@ fn panel_gates(lines: &mut Vec<Vec<Span<'static>>>, w: u16, a: &Ask) {
                 _ => " ".repeat(LABEL),
             };
             lines.push(vec![
-                Span::styled(head, Style::default().fg(FAINT)),
-                Span::styled(run, Style::default().fg(DIM)),
+                Span::styled(head, Style::default().fg(th.ghost())),
+                Span::styled(run, Style::default().fg(th.faint())),
             ]);
         }
     }
@@ -3728,7 +3731,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| render(f, f.area(), a)).unwrap();
+        term.draw(|f| render(f, f.area(), a, Theme::default())).unwrap();
         termap::snapshot::plain(term.backend().buffer())
     }
 
@@ -3899,7 +3902,7 @@ mod tests {
     #[test]
     fn a_code_is_drawn_square_with_a_quiet_zone() {
         let code = &crate::coffee::UPI;
-        let rows = qr_lines(code, 1.0);
+        let rows = qr_lines(code, 1.0, Theme::default());
         let span = code.size + QUIET * 2;
         assert_eq!(rows.len(), span.div_ceil(2), "wrong number of text rows");
         let width: usize = rows[0].iter().map(|s| s.content.chars().count()).sum();
@@ -4569,8 +4572,8 @@ mod tests {
         let text = |spans: &Vec<Span<'static>>| -> String {
             spans.iter().map(|s| s.content.to_string()).collect()
         };
-        let one = text(&settling(line, 100, 1.0));
-        let two = text(&settling(line, 100, 2.0));
+        let one = text(&settling(line, 100, 1.0, Theme::default()));
+        let two = text(&settling(line, 100, 2.0, Theme::default()));
         assert_ne!(one, two, "the churn is not moving");
 
         // The beginning of the line has stopped moving and the end has not.
@@ -5085,7 +5088,7 @@ mod look {
             use ratatui::Terminal;
             use ratatui::backend::TestBackend;
             let mut t = Terminal::new(TestBackend::new(130, 50)).unwrap();
-            t.draw(|f| render(f, f.area(), &a)).unwrap();
+            t.draw(|f| render(f, f.area(), &a, Theme::default())).unwrap();
             std::fs::write(to, termap::snapshot::ansi(t.backend().buffer())).unwrap();
         }
 

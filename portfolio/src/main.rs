@@ -398,7 +398,9 @@ fn idle_limit() -> Duration {
 /// The list is still there underneath because it was never taken down.
 fn audience_loop(term: &mut Term, mut browser: audience::Browser) -> io::Result<()> {
     loop {
-        term.draw(|f| browser.render(f))?;
+        // The visitor log is a local tool with no session behind it, so it takes
+        // the default rather than a visitor's choice.
+        term.draw(|f| browser.render(f, termap::canvas::Theme::default()))?;
         if !event::poll(Duration::from_millis(120))? {
             continue;
         }

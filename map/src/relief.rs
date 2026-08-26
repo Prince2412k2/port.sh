@@ -811,7 +811,7 @@ impl Relief {
 
         // Topmost projected point per grid column: (screen point, depth).
         let mut sky: Vec<Option<([f64; 2], f32)>> = vec![None; self.gw];
-        for gx in 0..self.gw {
+        for (gx, top) in sky.iter_mut().enumerate() {
             for gy in 0..self.gh {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
@@ -827,9 +827,9 @@ impl Relief {
                 if !depth.is_finite() || !sp[1].is_finite() {
                     continue;
                 }
-                match sky[gx] {
+                match *top {
                     Some((p, _)) if p[1] <= sp[1] => {}
-                    _ => sky[gx] = Some((sp, depth)),
+                    _ => *top = Some((sp, depth)),
                 }
             }
         }
@@ -851,8 +851,9 @@ impl Relief {
         let horizon = level[level.len() / 2];
 
         let mut drawn = 0usize;
-        for gx in 1..self.gw {
-            let (Some((a, da)), Some((b, db))) = (sky[gx - 1], sky[gx]) else { continue };
+        for pair in sky.windows(2) {
+            let [Some((a, da)), Some((b, db))] = pair else { continue };
+            let (a, b, da, db) = (*a, *b, *da, *db);
             // Screen y grows downward, so above the horizon is a smaller y.
             if a[1] > horizon - SKY_RISE && b[1] > horizon - SKY_RISE {
                 continue;
@@ -1371,9 +1372,7 @@ mod tests {
     /// dark, and the near side must not.
     #[test]
     fn a_ridge_darkens_the_ground_behind_it_and_not_in_front() {
-        let mut r = Relief::default();
-        r.gw = 32;
-        r.gh = 32;
+        let mut r = Relief { gw: 32, gh: 32, ..Default::default() };
         r.heights = vec![100.0; r.gw * r.gh];
         // A wall on the anti-diagonal, which is *across* the light rather than
         // along it. The first version of this test laid the wall down the same
@@ -1473,13 +1472,15 @@ mod tests {
     /// maximum across the fall thins it to something the eye can follow.
     #[test]
     fn only_the_crest_of_a_ridge_survives_the_thinning() {
-        let mut r = Relief::default();
-        r.gw = 9;
-        r.gh = 9;
-        // A roof: rises to the middle column and falls away again, so the
-        // curvature band spans the whole width and the crest is column 4.
-        r.heights = vec![0.0; 81];
-        r.lap = vec![0.0; 81];
+        let mut r = Relief {
+            gw: 9,
+            gh: 9,
+            // A roof: rises to the middle column and falls away again, so the
+            // curvature band spans the whole width and the crest is column 4.
+            heights: vec![0.0; 81],
+            lap: vec![0.0; 81],
+            ..Default::default()
+        };
         for y in 0..9 {
             for x in 0..9 {
                 let h = 100.0 - (x as f32 - 4.0).abs() * 20.0;

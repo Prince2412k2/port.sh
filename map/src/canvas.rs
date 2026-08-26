@@ -155,10 +155,20 @@ impl Theme {
         self.paint(TINT_MONO as usize, strength, false, false)
     }
 
-    /// A tint at full strength, exempt from monochrome: the two accents chrome
+    /// A tint at full strength, exempt from monochrome: the accents chrome
     /// uses to mean "this one" and "you are here".
     pub fn accent(self, tint: u8) -> Color {
         self.paint(tint as usize, 1.0, false, true)
+    }
+
+    /// The warm accent: headings, the thing being pointed at.
+    pub fn amber(self) -> Color {
+        self.accent(TINT_LANDMARK)
+    }
+
+    /// The cool accent: selection, the thing being edited.
+    pub fn cyan(self) -> Color {
+        self.accent(TINT_SELECT)
     }
 
     fn tints(self) -> &'static [(u8, u8, u8); 12] {
