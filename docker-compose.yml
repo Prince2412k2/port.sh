@@ -78,6 +78,7 @@ services:
 
       # Envoy's Codex credential store, shared by the web and SSH services.
       - agent:/app/agent
+      - ~/.codex/auth.json:/app/agent/codex/auth.json
 
     # Envoy's scratch space is ephemeral.
     #
