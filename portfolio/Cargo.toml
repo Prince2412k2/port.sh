@@ -30,4 +30,4 @@ futures-util = "0.3"
 # Pinned exactly: 0.8.9 wants tokio-tungstenite 0.29, which is not in the
 # offline registry. 0.8.4 resolves against what is cached.
 axum = { version = "=0.8.4", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal", "process"] }

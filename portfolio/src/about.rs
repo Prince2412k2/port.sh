@@ -17,6 +17,7 @@ pub struct About {
     pub email: String,
     pub github: String,
     pub ssh: String,
+    pub mosh: String,
 }
 
 pub fn load() -> About {
@@ -67,6 +68,7 @@ fn field_mut<'a>(a: &'a mut About, key: &str) -> Option<&'a mut String> {
         "email" => &mut a.email,
         "github" => &mut a.github,
         "ssh" => &mut a.ssh,
+        "mosh" => &mut a.mosh,
         _ => return None,
     })
 }

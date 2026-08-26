@@ -45,7 +45,7 @@ fn titlecase(s: &str) -> String {
 /// disagreeing with itself.
 fn contact_row(a: &About) -> Vec<Span<'static>> {
     let mut spans: Vec<Span> = Vec::new();
-    for (i, s) in [&a.github, &a.email, &a.ssh].iter().filter(|s| !s.is_empty()).enumerate() {
+    for (i, s) in [&a.github, &a.email, &a.ssh, &a.mosh].iter().filter(|s| !s.is_empty()).enumerate() {
         if i > 0 {
             spans.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
         }

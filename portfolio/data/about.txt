@@ -27,3 +27,7 @@
   # not read from that file, it is just text. No username: the binary speaks
   # SSH itself now, so there is no account for one to name.
   ssh       ssh -p 2222 <this-host>
+  # The same session over mosh, for a link that drops or an address that
+  # changes. Optional in every sense: nothing here needs it, and a visitor
+  # without mosh installed sees no difference.
+  mosh      mosh --ssh="ssh -p 2222" <this-host>

@@ -25,6 +25,7 @@ mod reach;
 mod servers;
 mod session;
 mod shell;
+mod stdio;
 mod web;
 mod wire;
 mod taste;
@@ -60,6 +61,7 @@ fn main() -> io::Result<()> {
     let mut host_key: Option<String> = None;
     let mut replay: Option<String> = None;
     let mut visitors = false;
+    let mut piped = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -82,6 +84,9 @@ fn main() -> io::Result<()> {
                 println!("  --ssh-port PORT          bind port for --serve (default 2222)");
                 println!("  --host-key PATH          where the SSH host key lives, generated on first run");
                 println!("                           (default $PORTFOLIO_HOST_KEY or ./data/ssh_host_key)");
+                println!();
+                println!("  --stdio                  run one session on this process's own stdin and");
+                println!("                           stdout. What mosh-server execs; not for typing at");
                 println!();
                 println!("  --web                    run the web terminal instead (same app, no shell)");
                 println!("  --web-addr ADDR          bind address for --web (default 0.0.0.0)");
@@ -116,6 +121,7 @@ fn main() -> io::Result<()> {
             }
             "--replay" => replay = args.next(),
             "--visitors" => visitors = true,
+            "--stdio" => piped = true,
             "--plain" => {
                 if let Some(s) = shot.as_mut() {
                     s.plain = true;
@@ -266,6 +272,16 @@ fn main() -> io::Result<()> {
     if let Some(mut o) = shot {
         o.section = start.or(o.section);
         return snapshot::render(&o);
+    }
+
+    // Ahead of the ordinary terminal build below, and it has to be: mosh hands
+    // this a real pty, so `is_terminal` is true and every check that uses it to
+    // tell a person from a pipe would wave this through into the wrong program.
+    if piped {
+        visits::boot();
+        mcp::serve();
+        mcp::warm_index();
+        return stdio::run().map_err(|e| io::Error::other(e.to_string()));
     }
 
     if web {

@@ -28,6 +28,13 @@ services:
       # something on 2222.
       - "${SSH_BIND:-0.0.0.0:2222}:2222"
 
+      # mosh. One udp port per live session, published one-to-one because the
+      # port a session lands on is the port mosh-server names to the client --
+      # remapped, the client would be told to talk to a port that is not there.
+      # The width of this range is the cap on concurrent mosh sessions; keep it
+      # in step with `MOSH_PORTS` in portfolio/src/net.rs.
+      - "60000-60010:60000-60010/udp"
+
     volumes:
       # The host key, generated on first run. Keep this volume: it is what
       # stops every returning visitor seeing a changed-fingerprint warning.
@@ -182,6 +189,7 @@ services:
       # somebody came to leave a message, and the agent logs in once.
       - messages:/app/messages
       - agent:/app/agent
+      - ~/.codex/auth.json:/app/agent/codex/auth.json
 
     # Envoy's scratch space is ephemeral.
     tmpfs:

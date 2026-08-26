@@ -3,6 +3,7 @@ services:
     ports: !override
       - "22:2222"
       - "1234:2222"
+      - "60000-60010:60000-60010/udp"
 
   portfolio-web:
     ports: !reset []

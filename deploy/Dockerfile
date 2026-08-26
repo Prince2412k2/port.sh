@@ -56,8 +56,21 @@ FROM debian:bookworm-slim
 
 # Third-party agent CLIs are not installed. Envoy talks directly to Codex and
 # Ollama through ai-sdk/parley.
+# `mosh` is here for `mosh-server` alone -- the third way in, alongside ssh
+# and the browser. The client half and the perl wrapper come with it in Debian
+# and are never run; `--no-install-recommends` is what keeps openssh-client out
+# with them, which matters, because an ssh client is exactly the thing this
+# image spent so much effort not having.
+#
+# Note what this costs, because it is the one place the paragraph at the top of
+# this file stops being true. A mosh session is a real pty with a real forked
+# child in it, where ssh and the browser have neither. What holds instead: the
+# command that child is started with is built in `net.rs` out of constants, so
+# no part of it comes from the visitor; it runs as the same unprivileged user
+# as everything else here; and the number that can exist at once is the width
+# of the published UDP range and nothing else.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates mosh \
  && rm -rf /var/lib/apt/lists/*
 
 # A system account with no shell, purely so the process is not root. Nothing
@@ -116,7 +129,16 @@ ENV ENVOY_CONFIG=/app/data/envoy.json
 # come from `command:` in docker-compose.yml, so the ssh and web containers
 # are the same image started two different ways -- rather than two images, or
 # one image with a wrapper script branching on an environment variable.
+# mosh-server refuses to start at all without a UTF-8 locale, and says so in a
+# sentence about character sets that reads like a warning rather than the hard
+# stop it is. `C.UTF-8` is built into glibc, so this needs no locales package.
+ENV LANG=C.UTF-8
+
+# 2222 ssh, 8222 http, and the udp range mosh sessions land on -- one port per
+# live session, and so also the ceiling on how many there can be. Kept in step
+# with `MOSH_PORTS` in portfolio/src/net.rs, which is what actually binds them.
 EXPOSE 2222 8222
+EXPOSE 60000-60010/udp
 ENTRYPOINT ["/usr/local/bin/portfolio"]
 CMD ["--serve", "--ssh-addr", "0.0.0.0", "--ssh-port", "2222", \
      "--host-key", "/app/keys/host_key"]

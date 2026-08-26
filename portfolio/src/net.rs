@@ -35,6 +35,58 @@ use crate::session;
 /// to grow the process without bound -- each session is a `Shell`, a decoder
 /// and a couple of channels, not large, but not nothing at a thousand of them.
 const MAX_SESSIONS: usize = 128;
+
+/// Whether this is a mosh client asking for its server.
+///
+/// Matched on the first two words rather than on the whole line, because the
+/// client builds that line with a shell quoter and it arrives as
+/// `mosh-server 'new' '-c' '256' '-s' '-l' 'LANG=en_US.UTF-8'`. The first
+/// version of this compared against the unquoted form, and the way that failed
+/// is worth keeping the test for: the request was simply refused, and the only
+/// thing the client said about it was to ask whether mosh was installed on the
+/// server at all.
+///
+/// Nothing past those two words is read. Everything mosh-server is actually
+/// run with is a constant.
+fn is_mosh_bootstrap(command: &str) -> bool {
+    let mut words = command.split_whitespace().map(unquote);
+    let Some(Some(program)) = words.next() else {
+        return false;
+    };
+    // A path is allowed, because `mosh --server=` accepts one. The name on the
+    // end of it is the part that has to be right.
+    let program = program.rsplit('/').next().unwrap_or(program);
+    program == "mosh-server" && words.next() == Some(Some("new"))
+}
+
+/// One shell word with its quotes taken off, or `None` if the quoting is not
+/// something a shell quoter would have produced.
+///
+/// Stricter than trimming quote characters off each end, and deliberately:
+/// trimming accepts `'mosh-server new'`, a single word that merely looks like
+/// two, which is not a thing any mosh client sends. Nothing downstream reads
+/// the visitor's command line, so that was never dangerous -- but a match this
+/// narrow should not be in the business of guessing.
+fn unquote(word: &str) -> Option<&str> {
+    let quoted = word.len() >= 2
+        && word.starts_with(['\'', '"'])
+        && word.ends_with(word.chars().next()?);
+    if quoted {
+        let inner = &word[1..word.len() - 1];
+        return (!inner.contains(['\'', '"'])).then_some(inner);
+    }
+    (!word.contains(['\'', '"'])).then_some(word)
+}
+
+/// The UDP ports mosh sessions are allowed to land on, and so also the number
+/// of them that can be running at once.
+///
+/// A range rather than a single port because mosh gives every session its own
+/// socket, and a narrow one because this has to be published in the compose
+/// file and opened in a firewall: every port here is a port somebody has to
+/// deliberately let through, and eleven concurrent mosh visitors is already
+/// more than this box has ever had at once by an order of magnitude.
+const MOSH_PORTS: &str = "60000:60010";
 const MAX_CONNECTIONS: usize = 192;
 const PER_ADDRESS_CONNECTIONS: usize = 4;
 
@@ -287,6 +339,56 @@ struct SessionHandler {
 }
 
 impl SessionHandler {
+    /// Start a mosh session and return the line its client is waiting for.
+    ///
+    /// There is no seat taken here and no crowd counted, because there is
+    /// nothing left to hold one against: `mosh-server` detaches, and this
+    /// connection is closed a moment later. The limit is the port range
+    /// instead -- `MOSH_PORTS` wide, and mosh-server refuses when every port
+    /// in it is busy -- which is a cap on concurrent mosh sessions that cannot
+    /// be leaked by a session ending badly, because it is just a socket.
+    async fn mosh(&self) -> (String, u32) {
+        let Ok(exe) = std::env::current_exe() else {
+            return ("mosh is not available here.\r\n".into(), 1);
+        };
+        let started = tokio::process::Command::new("mosh-server")
+            .args(["new", "-i", "0.0.0.0", "-p", MOSH_PORTS, "-c", "256", "-l", "LANG=C.UTF-8", "--"])
+            .arg(&exe)
+            .arg("--stdio")
+            // Who arrived, carried across the one gap where it would otherwise
+            // be lost: the ssh connection knows, the detached pty does not.
+            .env("PORTFOLIO_VIA_USER", &self.who.user)
+            .env("PORTFOLIO_VIA_ID", &self.who.id)
+            .env("PORTFOLIO_VIA_IP", &self.who.ip)
+            .env("PORTFOLIO_VIA_CLIENT", &self.who.client)
+            .output()
+            .await;
+        let Ok(out) = started else {
+            crate::visits::operational("warn", "mosh_missing", &self.peer);
+            return ("mosh is not installed on this host -- use `ssh -t` instead.\r\n".into(), 1);
+        };
+        let said = String::from_utf8_lossy(&out.stdout);
+        // Handed back untouched rather than reassembled, because the client
+        // matches this line against a regex of its own and a reformatted one
+        // it does not recognise is a hang rather than an error.
+        match said.lines().find(|l| l.starts_with("MOSH CONNECT ")) {
+            Some(line) => {
+                crate::visits::operational("info", "mosh_started", &self.who.ip);
+                (format!("{line}\r\n"), 0)
+            }
+            None => {
+                // Every port busy is the ordinary way this fails, and it is
+                // the visitor's cue to try the other door rather than a fault.
+                crate::visits::operational(
+                    "warn",
+                    "mosh_refused",
+                    String::from_utf8_lossy(&out.stderr).trim(),
+                );
+                ("mosh has no free port right now -- use `ssh -t` instead.\r\n".into(), 1)
+            }
+        }
+    }
+
     fn admit_identity(&mut self) -> bool {
         if !self.admitted {
             return false;
@@ -592,6 +694,29 @@ impl Handler for SessionHandler {
             return Ok(());
         }
         let command = std::str::from_utf8(data).unwrap_or_default().trim();
+        // mosh's bootstrap, and the only command here that runs a program.
+        //
+        // A mosh client opens an ordinary ssh connection, runs one command,
+        // reads a port and a key off its stdout, and then talks UDP straight
+        // to the box -- ssh is out of the picture from that point on. This is
+        // that one command.
+        //
+        // What the client *asked* to run is read for its first three words and
+        // then thrown away. The command line that actually runs is built below
+        // from constants, so a visitor chooses neither the binary, nor the
+        // bind address, nor the port range, nor a single argument. All that is
+        // taken from the request is the fact that it was a mosh bootstrap.
+        if is_mosh_bootstrap(command) {
+            self.started = true;
+            session.channel_success(channel)?;
+            let handle = session.handle();
+            let (line, code) = self.mosh().await;
+            let _ = handle.data(channel, bytes::Bytes::from(line)).await;
+            let _ = handle.exit_status_request(channel, code).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+            return Ok(());
+        }
         if !matches!(command, "portfolio" | "help" | "") {
             session.channel_failure(channel)?;
             return Ok(());
@@ -603,7 +728,7 @@ impl Handler for SessionHandler {
             .data(
                 channel,
                 bytes::Bytes::from_static(
-                    b"Prince Patel's portfolio. This endpoint executes no system commands.\nConnect with `ssh -t <host>` for the interactive version.\n",
+                    b"Prince Patel's portfolio. The only command this runs is mosh-server.\nConnect with `ssh -t <host>`, or with `mosh` for the same session over UDP.\n",
                 ),
             )
             .await;
@@ -802,6 +927,42 @@ async fn run_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact line a mosh client sends, quoting and all.
+    ///
+    /// Copied off the wire rather than written from the documentation, because
+    /// the documentation shows it unquoted and the client does not send it that
+    /// way. Matching the documented form is what the first version did.
+    #[test]
+    fn the_line_a_mosh_client_actually_sends_is_recognised() {
+        assert!(is_mosh_bootstrap(
+            "mosh-server 'new' '-c' '256' '-s' '-l' 'LANG=en_US.UTF-8' '-l' 'LANGUAGE=en_IN:en'"
+        ));
+        // And the unquoted form, which older clients and anyone testing by
+        // hand will send.
+        assert!(is_mosh_bootstrap("mosh-server new -s -c 256"));
+        // `mosh --server=` takes a path.
+        assert!(is_mosh_bootstrap("/usr/bin/mosh-server 'new' '-c' '256'"));
+    }
+
+    /// Everything else stays refused. This is the one request here that runs a
+    /// program, so what does *not* reach it is the point.
+    #[test]
+    fn nothing_else_is_taken_for_a_mosh_bootstrap() {
+        for command in [
+            "",
+            "portfolio",
+            "mosh-server",
+            "mosh-server list",
+            "mosh-serverX new",
+            "sh -c mosh-server new",
+            "mosh-server; rm -rf /",
+            "'mosh-server new'",
+            "/bin/sh 'new'",
+        ] {
+            assert!(!is_mosh_bootstrap(command), "accepted {command:?}");
+        }
+    }
 
     fn handler() -> SessionHandler {
         SessionHandler {
