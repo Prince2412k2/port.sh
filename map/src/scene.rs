@@ -622,8 +622,40 @@ fn rank_floor(zoom: f64) -> u16 {
 /// budgets so a dense cluster of amber cannot crowd the geography off the map --
 /// with one shared budget, an OSM extract's landmark ranks simply win every
 /// slot.
-const MAX_LANDMARK_LABELS: usize = 9;
 const MAX_PLACE_LABELS: usize = 20;
+
+/// Landmark labels at a full screen, by zoom.
+///
+/// One number could not serve both ends of the range. Nine is right for a
+/// region, where the names are competing with the shape of the coast and each
+/// one costs a chunk of it; down at a neighbourhood there is very little else
+/// on the screen and nine names across a whole district reads as a map that
+/// does not know where it is.
+fn max_landmark_labels(zoom: f64) -> usize {
+    match zoom {
+        z if z < 12.0 => 9,
+        z if z < 14.0 => 13,
+        _ => 18,
+    }
+}
+
+/// A building's height folded into a priority that sits under every named
+/// thing on the map.
+///
+/// `labels::place` sorts *all* candidates together by rank, and a building's
+/// rank is its height in metres. Left alone, a 200 m tower outranks a 155 and
+/// takes the slot -- which is exactly what happened the first time buildings
+/// were let into the label pass: four block names arrived and two museums left.
+/// Monotonic in height, so the tallest building still wins among buildings, but
+/// the whole band is below the landmarks it must never outbid.
+fn building_priority(height: u16) -> u16 {
+    60 + height.min(400) / 20
+}
+/// Buildings get few, and they are the last thing to survive a crowded frame.
+/// A street with every tower named is a directory, not a map -- but a street
+/// with none named is where you stop being able to tell one block from the
+/// next, which is the whole reason to be down at this zoom.
+const MAX_BUILDING_LABELS: usize = 5;
 
 /// The screen those ceilings were chosen against.
 const REFERENCE_CELLS: f64 = 160.0 * 44.0;
@@ -651,19 +683,33 @@ fn shorten(s: &str) -> String {
 }
 
 fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &[f64; 4]) -> usize {
-    let floor = rank_floor(o.vp.zoom);
     let mut cands: Vec<Candidate> = Vec::new();
     // Tiles are generated with a buffer, so a place near an edge is present in
     // every tile that overlaps it. Without this the map reads "Kurla East Kurla
     // East".
     let mut seen: std::collections::HashSet<(u64, u64, &str)> = std::collections::HashSet::new();
 
-    for layer in [Layer::Landmark, Layer::Place] {
+    // Buildings are in this list, and were not for a long time. 3,578 of the
+    // ones in `buildings.tmap` carry a name and not one of them had ever been
+    // drawn -- the loop simply did not visit the layer, so the names came all
+    // the way through the loader and stopped here.
+    for layer in [Layer::Landmark, Layer::Place, Layer::Building] {
         if !o.layers[layer.index()] {
             continue;
         }
+        // A building's `rank` is its height in metres -- see `fetch_buildings.py`
+        // -- not a measure of importance, and `rank_floor` is about importance.
+        // Comparing the two would silently mean "only label things over 105 m",
+        // which is a rule about skyscrapers pretending to be a rule about
+        // names. The budget below keeps the tallest few instead, which is the
+        // same intent said in the units this layer actually has.
+        let floor = if layer == Layer::Building { 0 } else { rank_floor(o.vp.zoom) };
         let budget = label_budget(
-            if layer == Layer::Landmark { MAX_LANDMARK_LABELS } else { MAX_PLACE_LABELS },
+            match layer {
+                Layer::Landmark => max_landmark_labels(o.vp.zoom),
+                Layer::Building => MAX_BUILDING_LABELS,
+                _ => MAX_PLACE_LABELS,
+            },
             canvas.cw,
             canvas.ch,
         );
@@ -702,7 +748,11 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
                 anchor: p,
                 text: shorten(name),
                 // A hovered label always wins its slot.
-                rank: if hot_feature { u16::MAX } else { f.rank },
+                rank: match () {
+                    _ if hot_feature => u16::MAX,
+                    _ if layer == Layer::Building => building_priority(f.rank),
+                    _ => f.rank,
+                },
                 tint: if hot_feature { TINT_SELECT } else { st.tint },
                 depth: o.depth.at(st.depth, p),
                 marker: (layer == Layer::Landmark).then_some('◦'),
@@ -761,4 +811,40 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
     }
 
     n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A building must never outbid a landmark for a label slot.
+    ///
+    /// `labels::place` sorts every candidate together, and a building's rank is
+    /// its height in metres -- so a 200 m tower came out ahead of a 155 museum
+    /// and took the slot. That is exactly what happened when buildings were
+    /// first let into the label pass: four block names arrived and two museums
+    /// left, and the frame came out with fewer names on it than before.
+    #[test]
+    fn a_tall_building_does_not_outrank_a_museum() {
+        // The whole band, against the lowest landmark rank there is.
+        let lowest_landmark = 105u16;
+        for height in [0u16, 40, 120, 250, 400, 9000] {
+            assert!(
+                building_priority(height) < lowest_landmark,
+                "a {height} m building scored {} and would take a landmark's slot",
+                building_priority(height)
+            );
+        }
+        // Still ordered by height among themselves, which is the only thing
+        // the rank is for once it is down in that band.
+        assert!(building_priority(250) > building_priority(40));
+    }
+
+    /// Close up there is little else on screen, so more names are affordable.
+    #[test]
+    fn a_neighbourhood_carries_more_names_than_a_region() {
+        assert!(max_landmark_labels(16.0) > max_landmark_labels(11.0));
+        // And the per-screen scaling still applies on top, never below two.
+        assert_eq!(label_budget(max_landmark_labels(16.0), 46, 12), 2);
+    }
 }

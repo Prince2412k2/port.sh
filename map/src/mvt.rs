@@ -10,7 +10,7 @@ use crate::pmtiles::TileId;
 
 /// Planetiler's default schema. Values come from probing a real archive rather
 /// than the docs -- see `scripts/probe_pmtiles.py`.
-fn classify(layer: &str, class: &str) -> Option<(Layer, u16)> {
+fn classify(layer: &str, class: &str, subclass: &str) -> Option<(Layer, u16)> {
     Some(match layer {
         "roads" => match class {
             "motorway" => (Layer::RoadMajor, 220),
@@ -47,17 +47,53 @@ fn classify(layer: &str, class: &str) -> Option<(Layer, u16)> {
         // Transit and culture are what you navigate by; restaurants, shops and
         // clinics are the bulk of the layer and are ranked below every zoom
         // floor so they surface only when you are right on top of them.
-        "pois" => match class {
-            "station" | "bus_station" | "airport" => (Layer::Landmark, 175),
-            "museum" | "theatre" | "attraction" => (Layer::Landmark, 155),
+        "pois" => match subclass {
+            "station" | "bus_station" | "airport" | "aerodrome" | "ferry_terminal" => {
+                (Layer::Landmark, 175)
+            }
+            "museum" | "theatre" | "attraction" | "gallery" => (Layer::Landmark, 155),
+            // The things a city is actually known by, and every one of them was
+            // invisible until this line existed.
+            "monument" | "memorial" | "fort" | "ruins" | "tower" | "viewpoint" | "artwork" => {
+                (Layer::Landmark, 152)
+            }
             "university" | "college" => (Layer::Landmark, 150),
             "place_of_worship" => (Layer::Landmark, 138),
-            "park" | "stadium" => (Layer::Landmark, 130),
+            "park" | "stadium" | "zoo" | "garden" => (Layer::Landmark, 130),
+            "cinema" | "library" | "marketplace" | "theme_park" => (Layer::Landmark, 122),
             "hospital" => (Layer::Landmark, 112),
-            _ => (Layer::Landmark, 70),
+            "police" | "post_office" | "fire_station" | "townhall" | "courthouse" => {
+                (Layer::Landmark, 108)
+            }
+            _ => (Layer::Landmark, poi_by_category(class)),
         },
         _ => return None,
     })
+}
+
+/// What a POI is worth when its `subcategory` is not one this knows.
+///
+/// The archive carries a coarse `category` beside the fine `subcategory`, and
+/// for a long time this threw it away: anything whose subcategory missed the
+/// list above scored 70, and `scene::rank_floor` never drops below 105. Not
+/// low-priority -- *unreachable*, at every zoom, for ever. Measured against a
+/// real 25-tile patch of Mumbai that was 73% of the POI layer, including 28 of
+/// the 41 features the archive itself files under `landmark`: monuments,
+/// memorials, towers, galleries, forts, ruins.
+///
+/// The categories left at 70 are the ones that would drown the map -- shops,
+/// food, lodging, clinics, schools -- and they are the bulk of the layer.
+/// They are still searchable and still label on hover; they just do not
+/// compete for space with a fort.
+fn poi_by_category(category: &str) -> u16 {
+    match category {
+        "transit" => 168,
+        "landmark" => 152,
+        "culture" => 122,
+        "recreation" => 118,
+        "civic" => 108,
+        _ => 70,
+    }
 }
 
 fn varint(b: &[u8], p: &mut usize) -> u64 {
@@ -152,7 +188,9 @@ fn decode_layer(b: &[u8], tile: TileId, out: &mut Vec<Feature>) {
 
     // Nothing in this layer maps onto a renderable layer -- skip the geometry
     // work entirely rather than decode and discard.
-    if classify(&name, "").is_none() && !matches!(name.as_str(), "roads" | "waterways" | "landcover" | "places") {
+    if classify(&name, "", "").is_none()
+        && !matches!(name.as_str(), "roads" | "waterways" | "landcover" | "places")
+    {
         return;
     }
 
@@ -231,10 +269,10 @@ fn decode_feature(
         }
     }
 
-    // POIs carry the useful distinction in subcategory ("station"), not in
-    // category ("transit").
-    let key = if layer_name == "pois" && !subclass.is_empty() { subclass } else { class };
-    let Some((layer, rank)) = classify(layer_name, key) else { return };
+    // POIs carry the useful distinction in subcategory ("station") and a coarse
+    // one in category ("transit"). Both go in: the fine one decides when it is
+    // recognised, the coarse one catches everything else.
+    let Some((layer, rank)) = classify(layer_name, class, subclass) else { return };
 
     let scale = 1.0 / (extent as f64 * (1u64 << tile.z) as f64);
     let ox = tile.x as f64 / (1u64 << tile.z) as f64;
@@ -303,4 +341,56 @@ fn signed_area(r: &[[f64; 2]]) -> f64 {
         a += p[0] * q[1] - q[0] * p[1];
     }
     a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The archive's coarse `category` is the fallback, and it has to be one.
+    ///
+    /// These are real subcategory values, counted off a 25-tile patch of Mumbai
+    /// in the shipped archive. Every one of them used to score 70 against a
+    /// label floor that never drops below 105 -- not deprioritised, unreachable,
+    /// at every zoom. Twenty-eight of the forty-one features the archive itself
+    /// files under `landmark` were invisible for that reason.
+    #[test]
+    fn a_landmark_the_subcategory_list_has_never_heard_of_still_ranks() {
+        for sub in ["monument", "memorial", "tower", "fort", "ruins", "gallery", "zoo"] {
+            let (layer, rank) = classify("pois", "landmark", sub).expect("classified");
+            assert_eq!(layer, Layer::Landmark);
+            assert!(rank >= 105, "{sub} scored {rank}, under every label floor");
+        }
+        // And through the category alone, for a subcategory nobody has listed.
+        let (_, rank) = classify("pois", "landmark", "obelisk").expect("classified");
+        assert!(rank >= 105, "an unlisted landmark scored {rank}");
+    }
+
+    /// The other half of the bargain: the bulk of the layer stays down.
+    ///
+    /// Widening the net is only safe because these do not come with it. A map
+    /// that names every restaurant is a directory.
+    #[test]
+    fn shops_and_restaurants_stay_under_the_floor() {
+        for (cat, sub) in [
+            ("shop", "clothes"),
+            ("food", "restaurant"),
+            ("food", "cafe"),
+            ("lodging", "hotel"),
+            ("health", "clinic"),
+            ("education", "school"),
+            ("service", "atm"),
+        ] {
+            let (_, rank) = classify("pois", cat, sub).expect("classified");
+            assert!(rank < 105, "{cat}/{sub} scored {rank} and would crowd the map");
+        }
+    }
+
+    /// A layer this does not render is skipped whole, and the archive has one:
+    /// there is no `buildings` layer in it at all.
+    #[test]
+    fn an_unknown_layer_is_declined() {
+        assert!(classify("buildings", "yes", "").is_none());
+        assert!(classify("aeroway", "runway", "").is_none());
+    }
 }
