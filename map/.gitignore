@@ -7,3 +7,17 @@ target/
 # which silently drops the tour sheet below.
 data/*
 !data/places.txt
+
+# The building footprints, and the reason they are the second exception.
+#
+# Everything else under data/ is a basemap that any machine can rebuild and
+# that no deployment reads from git -- the 1.7 GB PMTiles archive is mounted,
+# not committed. This one is different in every way that matters: three
+# megabytes, generated once from the tour's own stops, and the *only* source of
+# buildings there is, because the vector archive has no buildings layer at all.
+#
+# Left ignored it never reached production. The Dockerfile copies map data by
+# name and this was not one of the names, so the extrusion built into the
+# renderer -- Mode::Half3D, Mode::Full3D, the whole tilt ramp -- had never once
+# had anything to draw for a visitor.
+!data/buildings.tmap

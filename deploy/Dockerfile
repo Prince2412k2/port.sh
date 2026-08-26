@@ -88,6 +88,12 @@ COPY --from=build /out/envoy /usr/local/bin/envoy
 COPY ai-sdk/envoy.json /app/data/envoy.json
 COPY portfolio/data/ /app/data/
 COPY map/data/places.txt /app/data/places.txt
+# Building footprints for the tour's stops. Baked rather than mounted, unlike
+# the basemap: it is three megabytes against that archive's 1.7 GB, and a file
+# small enough to carry is a file that cannot be missing on the box. Without it
+# the map's three-dimensional half is dead code -- the camera leans over a flat
+# plane and there is nothing standing on it.
+COPY map/data/buildings.tmap /app/data/buildings.tmap
 RUN chown -R portfolio:portfolio /app
 USER portfolio
 
