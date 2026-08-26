@@ -48,7 +48,10 @@ pub fn render(app: &mut App, o: &Opts) -> std::io::Result<()> {
         app.ground = g;
     }
     if o.globe {
-        app.set_zoom(crate::globe::OPENING);
+        // The opening view is a globe anyway; this only undoes a pinned
+        // zoom, and the real value needs a sized canvas so it is left to the
+        // fit that runs at draw time.
+        app.open_on_the_globe();
     }
     if let Some(w) = o.weight {
         app.road_weight = w;

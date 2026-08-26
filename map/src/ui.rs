@@ -360,7 +360,7 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         let (lon, lat) = app.vp.center_lonlat();
         let g = crate::globe::Globe::fit(&app.canvas, lon, lat, app.vp.zoom);
         let overlays = app.source.overlay_tiles();
-        crate::globe::draw(&g, &mut app.canvas, &overlays);
+        crate::globe::draw(&g, &mut app.canvas, &overlays, app.vp.zoom);
         crate::globe::mark(&g, &mut app.canvas, &overlays);
         app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono);
         return;

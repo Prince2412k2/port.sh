@@ -20,9 +20,7 @@
 //! edge where the surface is turning away. Curvature comes from the way the
 //! parallels bunch, which is geometry the projection gives for free.
 
-use crate::canvas::{
-    Canvas, MAT_DOT, MAT_SHADE, MAT_SOLID, TINT_BORDER, TINT_COAST, TINT_GREEN, TINT_MONO,
-};
+use crate::canvas::{Canvas, MAT_DOT, MAT_SOLID, TINT_COAST, TINT_GREEN, TINT_MONO};
 use crate::data::Layer;
 use crate::raster::{self, Pen};
 
@@ -38,27 +36,60 @@ use crate::raster::{self, Pen};
 /// facing you".
 pub const UNTIL: f64 = 3.5;
 
-/// Where the app opens: far enough out to see the planet, close enough that it
-/// is not a marble. The camera is pointed at whatever the data covers, so the
-/// first thing on screen is a world with the one place we know about facing
-/// you, and zooming in goes there.
-pub const OPENING: f64 = 1.6;
-
 /// Whether this zoom is a globe.
 pub fn shows(zoom: f64) -> bool {
     zoom < UNTIL
 }
 
-/// How much of the frame the disc takes, across the globe's band of zoom.
+/// Disc radius for a zoom, in subpixels.
 ///
-/// Ramped rather than fixed so that zooming in on the planet does something --
-/// the disc grows towards the frame and the handoff to the ground reads as
-/// arriving rather than as a cut. It is not scale-continuous with Mercator and
-/// deliberately so: matching the sphere's centre scale to the map's makes the
-/// disc double in size every zoom step, which leaves about one step between a
-/// marble and a wall, and no room to turn the thing round and look at it.
-fn fill(zoom: f64) -> f64 {
-    0.60 + 0.34 * (zoom.max(0.0) / UNTIL).clamp(0.0, 1.0)
+/// This is the whole of the smooth handoff, and it is one line.
+///
+/// An orthographic sphere and a Mercator plane agree at the point under the
+/// camera exactly when the sphere's radius is the map's scale over a full turn:
+/// both are then `scale / TAU` subpixels per radian at the centre. Hold that
+/// and zooming is one continuous motion -- the disc grows, its limb leaves the
+/// frame, what is left is a patch of sphere, the patch flattens as it grows,
+/// and at the handoff the patch and the plane are the same picture.
+///
+/// The first version tied the radius to the *frame* instead and ramped it
+/// across the band. That kept the whole planet on screen for longer, and it
+/// made the handoff a cut: two projections at different scales swapping between
+/// one frame and the next.
+///
+/// Measured at the handoff on a 150x40 terminal, the sphere shows 38.0 degrees
+/// across the frame and the plane shows 37.3. Two percent, at a resolution
+/// where one cell is a quarter of a degree.
+pub fn radius_for(zoom: f64) -> f64 {
+    crate::geo::scale_of(zoom) / std::f64::consts::TAU
+}
+
+/// The zoom at which the disc just fits the frame with a little air.
+///
+/// Where the app opens, and necessarily a function of the terminal rather than
+/// a constant: the radius is now pinned to the map's scale, so how far back you
+/// have to stand to see the whole planet depends on how big the window is.
+pub fn opening(canvas: &Canvas) -> f64 {
+    let half = (canvas.sw.min(canvas.sh) as f64) * 0.5 * 0.86;
+    (half * std::f64::consts::TAU / crate::geo::scale_of(0.0))
+        .log2()
+        .clamp(crate::geo::MIN_ZOOM, UNTIL)
+}
+
+/// How present the planet's own furniture is, at a zoom.
+///
+/// The limb and the graticule belong to the globe and to nothing else -- the
+/// ground view has no grid on it and no edge to the world. Cutting them at the
+/// handoff would put a seam exactly where this is trying not to have one, so
+/// they fade out over the approach and are gone before the projection changes.
+/// By then the limb is off the frame anyway and the graticule is the last thing
+/// still saying "sphere" about a patch that has already flattened.
+fn structure_fade(zoom: f64) -> f32 {
+    const FROM: f64 = 1.8;
+    if zoom <= FROM {
+        return 1.0;
+    }
+    (1.0 - (zoom - FROM) / (UNTIL - FROM)).clamp(0.0, 1.0) as f32
 }
 
 /// Degrees between graticule lines.
@@ -91,13 +122,7 @@ impl Globe {
     /// A globe centred in `canvas`, sized for the zoom it is standing in for.
     pub fn fit(canvas: &Canvas, lon: f64, lat: f64, zoom: f64) -> Globe {
         let (w, h) = (canvas.sw as f64, canvas.sh as f64);
-        Globe {
-            lon,
-            lat,
-            radius: (w.min(h) * 0.5) * fill(zoom),
-            cx: w * 0.5,
-            cy: h * 0.5,
-        }
+        Globe { lon, lat, radius: radius_for(zoom), cx: w * 0.5, cy: h * 0.5 }
     }
 
     /// Orthographic projection.
@@ -142,10 +167,18 @@ fn limb_fade(facing: f64) -> f32 {
 }
 
 /// Draw the sphere. Returns how many segments were laid down.
-pub fn draw(g: &Globe, canvas: &mut Canvas, overlays: &[std::rc::Rc<crate::data::Tile>]) -> usize {
+pub fn draw(
+    g: &Globe,
+    canvas: &mut Canvas,
+    overlays: &[std::rc::Rc<crate::data::Tile>],
+    zoom: f64,
+) -> usize {
     let mut n = 0;
-    n += limb(g, canvas);
-    n += graticule(g, canvas);
+    let furniture = structure_fade(zoom);
+    if furniture > 0.01 {
+        n += limb(g, canvas, furniture);
+        n += graticule(g, canvas, furniture);
+    }
     n += regions(g, canvas, overlays);
     n
 }
@@ -159,7 +192,7 @@ fn pen(alpha: f32, tint: u8, mat: u8, depth: f32) -> Pen {
 /// Drawn first and drawn solid. Everything else here is a hairline, so the one
 /// mark that says "this is a body and it ends" has to be the heaviest thing on
 /// the screen -- silhouette over interior, the same rule the hachures follow.
-fn limb(g: &Globe, canvas: &mut Canvas) -> usize {
+fn limb(g: &Globe, canvas: &mut Canvas, fade: f32) -> usize {
     let steps = ((g.radius * 2.2) as usize).clamp(64, 720);
     let mut last: Option<[f64; 2]> = None;
     let mut n = 0;
@@ -172,7 +205,7 @@ fn limb(g: &Globe, canvas: &mut Canvas) -> usize {
             // stair-steps into a cog at exactly the angles where a circle most
             // needs to look like one. Full coverage on the finer grid reads
             // heavier than a coarse block does, and stays round.
-            raster::line(canvas, a, p, &pen(0.95, TINT_COAST, MAT_DOT, 0.5));
+            raster::line(canvas, a, p, &pen(0.95 * fade, TINT_COAST, MAT_DOT, 0.5));
             n += 1;
         }
         last = Some(p);
@@ -187,7 +220,7 @@ fn limb(g: &Globe, canvas: &mut Canvas) -> usize {
 /// the parallels towards the poles is the curvature -- geometry the projection
 /// hands over for nothing, which is exactly the kind of cue worth spending
 /// cells on when there are so few.
-fn graticule(g: &Globe, canvas: &mut Canvas) -> usize {
+fn graticule(g: &Globe, canvas: &mut Canvas, fade: f32) -> usize {
     let mut n = 0;
     let mut arc = |a: (f64, f64), b: (f64, f64), tint: u8, alpha: f32, canvas: &mut Canvas| {
         let (pa, fa) = g.project(a.0, a.1);
@@ -198,7 +231,7 @@ fn graticule(g: &Globe, canvas: &mut Canvas) -> usize {
         if fa <= 0.0 || fb <= 0.0 {
             return;
         }
-        let lit = alpha * limb_fade(fa.min(fb));
+        let lit = alpha * fade * limb_fade(fa.min(fb));
         raster::line(canvas, pa, pb, &pen(lit, tint, MAT_DOT, 0.5));
         n += 1;
     };
@@ -240,6 +273,15 @@ fn regions(
     overlays: &[std::rc::Rc<crate::data::Tile>],
 ) -> usize {
     let mut n = 0;
+    // The map's own style for this layer, and no thinning on top of it.
+    //
+    // There was a rank threshold here that dropped internal borders on a small
+    // disc, on the grounds that seventy-five state outlines in twenty cells are
+    // a smudge. They are -- but that smudge is exactly what the map's boundary
+    // style renders to at that scale, so the globe showing anything else is the
+    // seam this change exists to remove. Rank in a `.tmap` is whatever the bake
+    // script wrote, too, which is a poor thing to hang a visual decision on.
+    let st = crate::style::style(Layer::Boundary);
     for tile in overlays {
         for &i in &tile.by_layer[Layer::Boundary.index()] {
             let f = &tile.features[i as usize];
@@ -253,19 +295,13 @@ fn regions(
                 if fa <= 0.0 || fb <= 0.0 {
                     continue;
                 }
-                // Tone, not line work, and this is the one decision in the file
-                // that took seeing it to make.
-                //
-                // The overlay holds every internal boundary a region has -- for
-                // India that is seventy-five state outlines -- and at a
-                // centimetre across they do not read as borders, they read as
-                // a scribble. Drawn in braille it was a patch of speckle the
-                // eye tried and failed to resolve. The honest mark at this size
-                // is not a smaller line, it is a different kind of mark: a
-                // filled mass that says *a place is here* and leaves the
-                // borders for the zoom that can show them.
-                let lit = 0.75 * limb_fade(fa.min(fb));
-                raster::line(canvas, pa, pb, &pen(lit, TINT_BORDER, MAT_SHADE, 0.4));
+                // The map's own style for this layer -- its tint, its glyph
+                // family, its weight. A border should not change what it is
+                // made of because you stood further back, and when the handoff
+                // is smooth the two views are a frame apart: any difference in
+                // styling is a seam you can see.
+                let lit = st.alpha * limb_fade(fa.min(fb));
+                raster::line(canvas, pa, pb, &pen(lit, st.tint, st.mat, st.depth));
                 n += 1;
             }
         }
@@ -409,7 +445,7 @@ mod tests {
 
         let ink = |lon: f64, lat: f64| {
             let mut canvas = Canvas::new(60, 30);
-            let g = Globe::fit(&canvas, lon, lat, OPENING);
+            let g = Globe::fit(&canvas, lon, lat, 1.0);
             regions(&g, &mut canvas, &overlays)
         };
 
@@ -438,37 +474,104 @@ mod zoom_tests {
     /// The app opens on the planet, and zooming in leaves it.
     #[test]
     fn the_opening_view_is_the_globe_and_zooming_in_leaves_it() {
-        assert!(shows(OPENING), "the app should open on the globe");
+        let canvas = Canvas::new(150, 40);
+        assert!(shows(opening(&canvas)), "the app should open on the globe");
         assert!(shows(crate::geo::MIN_ZOOM), "and stay on it all the way out");
         assert!(!shows(UNTIL), "and hand over at the threshold");
         assert!(!shows(UNTIL + 4.0), "and stay handed over");
+    }
+
+    /// The opening disc fits the frame it is drawn in, whatever size that is.
+    ///
+    /// It has to be computed rather than fixed now that the radius follows the
+    /// map's scale: how far back you stand to see a whole planet depends on how
+    /// big the window is.
+    #[test]
+    fn the_opening_disc_fits_whatever_terminal_it_is_in() {
+        for (w, h) in [(60, 20), (100, 30), (150, 40), (240, 60), (400, 100)] {
+            let canvas = Canvas::new(w, h);
+            let z = opening(&canvas);
+            let r = radius_for(z);
+            let half = (canvas.sw.min(canvas.sh) as f64) * 0.5;
+            assert!(r <= half, "{w}x{h}: disc {r} does not fit a half-frame of {half}");
+            assert!(r > half * 0.5, "{w}x{h}: disc {r} is lost in a half-frame of {half}");
+        }
     }
 
     /// The zoom floor has to sit under the globe's band, or the globe is a
     /// view you can never reach. It used to be 2.5, which is inside it.
     #[test]
     fn the_zoom_floor_leaves_room_for_the_planet() {
-        assert!(
-            crate::geo::MIN_ZOOM < OPENING && OPENING < UNTIL,
-            "MIN_ZOOM {} / OPENING {OPENING} / UNTIL {UNTIL} are not in order",
-            crate::geo::MIN_ZOOM
-        );
+        for (w, h) in [(60, 20), (150, 40), (400, 100)] {
+            let open = opening(&Canvas::new(w, h));
+            assert!(
+                crate::geo::MIN_ZOOM <= open && open < UNTIL,
+                "{w}x{h}: MIN_ZOOM {} / opening {open} / UNTIL {UNTIL} are not in order",
+                crate::geo::MIN_ZOOM
+            );
+        }
     }
 
-    /// The disc grows as you come in, so zooming on the planet does something
-    /// and the handoff reads as arriving rather than as a cut. Bounded at both
-    /// ends: never a speck, never wider than the frame it has to sit in.
+    /// The sphere and the plane are the same size at the moment one hands to
+    /// the other. This is the smooth zoom, stated as an equation.
+    ///
+    /// Both are `scale / TAU` subpixels per radian at the point under the
+    /// camera, so a frame drawn either way covers the same ground. When this
+    /// was a ramp against the frame instead, the two disagreed by whatever the
+    /// ramp happened to end on, and the handoff was a visible cut.
     #[test]
-    fn the_disc_grows_towards_the_handoff() {
-        assert!(fill(UNTIL) > fill(0.0));
-        let mut z = 0.0;
+    fn the_sphere_and_the_plane_agree_where_they_meet() {
+        for z in [0.0, 1.0, 2.0, UNTIL, 6.0] {
+            let sphere = radius_for(z);
+            // The plane's scale over a full turn of longitude is the same
+            // quantity: subpixels per radian at the centre.
+            let plane = crate::geo::scale_of(z) / std::f64::consts::TAU;
+            assert!((sphere - plane).abs() < 1e-9, "at z{z}: {sphere} vs {plane}");
+        }
+    }
+
+    /// And it only ever grows as you come in. A disc that shrank on the way
+    /// down would read as falling away from the planet, not towards it.
+    #[test]
+    fn the_disc_only_grows_going_in() {
+        let mut z = crate::geo::MIN_ZOOM;
         let mut last = 0.0;
         while z <= UNTIL {
-            let f = fill(z);
-            assert!(f >= last, "the disc shrank going in, at z{z}");
-            assert!((0.4..=1.0).contains(&f), "z{z} gave {f} of the frame");
-            last = f;
+            let r = radius_for(z);
+            assert!(r > last, "the disc shrank going in, at z{z}");
+            last = r;
             z += 0.1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::*;
+
+    /// The planet's furniture is gone before the projection changes.
+    ///
+    /// A limb and a graticule belong to the globe and to nothing else, so
+    /// carrying them to the last globe frame and cutting them at the handoff
+    /// puts a seam exactly where the smooth zoom is trying not to have one.
+    #[test]
+    fn the_grid_is_gone_before_the_ground_arrives() {
+        assert_eq!(structure_fade(UNTIL), 0.0, "still drawing a grid at the handoff");
+        assert!(structure_fade(UNTIL - 0.05) < 0.05, "and it should already be almost gone");
+        assert_eq!(structure_fade(0.0), 1.0, "but fully there when you are off the planet");
+        assert_eq!(structure_fade(crate::geo::MIN_ZOOM), 1.0);
+    }
+
+    /// And it only ever fades one way, so zooming does not make the grid pulse.
+    #[test]
+    fn the_grid_never_comes_back_on_the_way_in() {
+        let mut z = crate::geo::MIN_ZOOM;
+        let mut last = 1.0;
+        while z <= UNTIL {
+            let f = structure_fade(z);
+            assert!(f <= last + 1e-6, "the grid brightened going in, at z{z}");
+            last = f;
+            z += 0.05;
         }
     }
 }

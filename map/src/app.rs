@@ -379,9 +379,14 @@ impl App {
             // in is how you get to it. `--zoom` still wins, because `set_zoom`
             // clears the pending flag before this runs.
             self.vp.fit(self.source.bounds());
-            self.vp.zoom = crate::globe::OPENING;
+            self.vp.zoom = crate::globe::opening(&self.canvas);
             self.fit_pending = false;
         }
+    }
+
+    /// Ask for the opening view again: pointed at the data, standing off it.
+    pub fn open_on_the_globe(&mut self) {
+        self.fit_pending = true;
     }
 
     /// Pin the zoom explicitly, suppressing the initial fit.
@@ -651,7 +656,7 @@ impl App {
             // Not a mode: which projection is drawn follows the zoom. This is
             // the way back out, the counterpart of zooming in on a country.
             KeyCode::Char(GLOBE_KEY) => {
-                self.vp.zoom = crate::globe::OPENING;
+                self.vp.zoom = crate::globe::opening(&self.canvas);
                 self.fit_pending = false;
                 self.toast = Some("the whole planet".into());
             }

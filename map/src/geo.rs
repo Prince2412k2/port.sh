@@ -31,8 +31,22 @@ const NEAR_CLIP: f64 = 1.0;
 /// only projection here, and the reason a globe had nowhere to live. The world
 /// is drawn as a sphere below `globe::UNTIL`, so the floor has to sit under
 /// that band rather than above it.
-pub const MIN_ZOOM: f64 = 0.0;
+/// Negative, and that is not a typo. Zoom is a log scale and nothing requires
+/// it to start at zero; the globe's radius follows the map's scale, so a small
+/// terminal has to stand *further* back than z0 to fit a whole planet in.
+pub const MIN_ZOOM: f64 = -1.5;
 pub const MAX_ZOOM: f64 = 18.0;
+
+/// Subpixels per world unit at a zoom, with no viewport needed.
+///
+/// Split out so the globe can match it. An orthographic sphere and this plane
+/// agree at the point under the camera exactly when the sphere's radius is this
+/// over a full turn, which is what makes one hand over to the other without a
+/// step.
+#[inline]
+pub fn scale_of(zoom: f64) -> f64 {
+    TILE * 2f64.powf(zoom)
+}
 
 pub fn lonlat_to_world(lon: f64, lat: f64) -> [f64; 2] {
     let x = (lon + 180.0) / 360.0;
@@ -91,7 +105,7 @@ impl Viewport {
     /// pixel, so zoom levels line up with what other map tools call z.
     #[inline]
     pub fn scale(&self) -> f64 {
-        TILE * 2f64.powf(self.zoom)
+        scale_of(self.zoom)
     }
 
     #[inline]
