@@ -217,7 +217,8 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
     use futures_util::{SinkExt, StreamExt};
 
     let (mut sink, mut stream) = socket.split();
-    let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
+    // One frame deep, matching ssh. See `session::FrameSink`.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let (in_tx, in_rx) = unbounded_channel::<session::In>();
 
     // Frames out. Binary, not text: these are ANSI bytes and some of them are

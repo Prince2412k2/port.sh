@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, ChannelOpenFailure, Pty};
+use russh::{Channel, ChannelId, ChannelOpenFailure, ChannelWriteHalf, Pty};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::Duration;
@@ -247,6 +247,7 @@ impl russh::server::Server for Listener {
             },
             peer,
             channel: None,
+            write: None,
             pty: None,
             started: false,
             tx: None,
@@ -265,6 +266,16 @@ struct SessionHandler {
     ip: Option<IpAddr>,
     peer: String,
     channel: Option<ChannelId>,
+    /// The half of the channel that frames are written through.
+    ///
+    /// `Handle::data` would be the obvious way to write them and is the wrong
+    /// one: it hands the bytes to the session loop, which parks anything the
+    /// client has no window for in an unbounded `VecDeque` and returns as if it
+    /// had sent them. Nothing upstream can tell a frame that left from a frame
+    /// that is being stockpiled. This half's `data_bytes` waits for the window
+    /// instead, which is what lets `session::run` find out that the far end is
+    /// behind and stop drawing.
+    write: Option<ChannelWriteHalf<Msg>>,
     pty: Option<(u16, u16)>,
     started: bool,
     tx: Option<UnboundedSender<Wire>>,
@@ -370,6 +381,15 @@ impl Handler for SessionHandler {
             return Ok(());
         }
         self.channel = Some(channel.id());
+        // The read half goes on the floor. Incoming bytes reach `data` below
+        // either way -- russh delivers them to the handler and to the channel
+        // both -- and a read half that is held but never read is worse than no
+        // read half at all: its queue is bounded, and once full it blocks the
+        // session's entire read loop. Dropped, russh's send to it simply fails
+        // and is ignored, which is what already happened before this kept the
+        // write half.
+        let (_read, write) = channel.split();
+        self.write = Some(write);
         reply.accept().await;
         Ok(())
     }
@@ -518,6 +538,12 @@ impl Handler for SessionHandler {
         let (tx, rx) = unbounded_channel();
         self.tx = Some(tx);
         self.started = true;
+        // Taken, not borrowed: the writing half goes to the session's thread
+        // and this handler keeps only the id, which is all it needs afterwards.
+        let Some(write) = self.write.take() else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
         session.channel_success(channel)?;
 
         let handle = session.handle();
@@ -542,7 +568,7 @@ impl Handler for SessionHandler {
             // the two decrements this replaced would have skipped.
             let _seat = seat;
             rt.block_on(async move {
-                if let Err(e) = run_session(handle.clone(), channel, cols, rows, rx, who).await {
+                if let Err(e) = run_session(write, cols, rows, rx, who).await {
                     crate::visits::operational(
                         "warn",
                         "ssh_session_error",
@@ -725,18 +751,23 @@ impl Handler for SessionHandler {
 /// Bridge one SSH channel to a session. The loop itself lives in `session`,
 /// shared with the web transport -- this only moves bytes.
 async fn run_session(
-    handle: russh::server::Handle,
-    channel: ChannelId,
+    write: ChannelWriteHalf<Msg>,
     cols: u16,
     rows: u16,
     mut wire: UnboundedReceiver<Wire>,
     who: crate::visits::Who,
 ) -> anyhow::Result<()> {
-    let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
-    let out_handle = handle.clone();
+    // One frame deep, on purpose. See `session::FrameSink`: this is the queue
+    // that must not exist, so it is made small enough that the loop upstream
+    // notices it is full and stops drawing rather than filling it.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if out_handle.data(channel, bytes::Bytes::from(frame)).await.is_err() {
+            // Waits for window rather than for a queue to accept it, so a frame
+            // is only finished here once the far end has room for it. That wait
+            // is the whole signal: it holds the one slot in `out_rx`, and
+            // `session::run` reads a full slot as "don't draw".
+            if write.data_bytes(bytes::Bytes::from(frame)).await.is_err() {
                 break;
             }
         }
@@ -786,6 +817,7 @@ mod tests {
             ip: Some("127.0.0.1".parse().unwrap()),
             peer: "127.0.0.1:22".into(),
             channel: None,
+            write: None,
             pty: None,
             started: false,
             tx: None,

@@ -20,7 +20,8 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
+use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 use tokio::time::{interval, Duration, Instant};
 
 use crate::shell::Shell;
@@ -72,14 +73,21 @@ pub fn max_limit() -> Duration {
 /// channel both want whole messages. Buffering until `flush` is what turns one
 /// into the other, and it means a frame crosses the network as one message
 /// rather than as however many small writes ratatui happened to make.
+///
+/// The channel out is deliberately one frame deep. It used to be unbounded,
+/// which sounds harmless and is not: russh's own handle is bounded and so is a
+/// socket, so an unbounded queue in front of them is a place for a slow link to
+/// pile up minutes of stale screen that the visitor then has to watch arrive.
+/// Bounded, the sink can be *asked* whether there is room, and the loop above
+/// declines to draw when there isn't.
 pub struct FrameSink {
-    tx: UnboundedSender<Vec<u8>>,
+    tx: Sender<Vec<u8>>,
     buf: Vec<u8>,
     ascii: Option<Arc<AtomicBool>>,
 }
 
 impl FrameSink {
-    pub fn new(tx: UnboundedSender<Vec<u8>>) -> Self {
+    pub fn new(tx: Sender<Vec<u8>>) -> Self {
         Self {
             tx,
             buf: Vec::new(),
@@ -87,7 +95,7 @@ impl FrameSink {
         }
     }
 
-    fn negotiating(tx: UnboundedSender<Vec<u8>>, ascii: Arc<AtomicBool>) -> Self {
+    fn negotiating(tx: Sender<Vec<u8>>, ascii: Arc<AtomicBool>) -> Self {
         let mut sink = Self::new(tx);
         sink.ascii = Some(ascii);
         sink
@@ -131,9 +139,26 @@ impl std::io::Write for FrameSink {
         if self.ascii.as_ref().is_some_and(|ascii| ascii.load(Ordering::Relaxed)) {
             payload = ascii_frame(payload);
         }
-        self.tx
-            .send(payload)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))
+        match self.tx.try_send(payload) {
+            Ok(()) => Ok(()),
+            // Still busy with the frame before this one. These bytes are not
+            // dropped -- a frame is a *diff* against what the client has on
+            // screen, so a lost one corrupts every frame after it. They go back
+            // in the buffer and leave with the next flush, concatenated in
+            // order, which is all the far end's parser wanted anyway.
+            //
+            // This is only ever the hand-written escape sequences: a frame from
+            // `draw` is only ever produced when `ready` has already said there
+            // is room for it.
+            Err(TrySendError::Full(payload)) => {
+                self.buf = payload;
+                Ok(())
+            }
+            Err(TrySendError::Closed(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the transport hung up",
+            )),
+        }
     }
 }
 
@@ -155,14 +180,34 @@ impl std::io::Write for FrameSink {
 pub struct SessionBackend {
     inner: CrosstermBackend<FrameSink>,
     size: Size,
+    /// A second handle on the sink's channel, kept only to be asked about it.
+    /// ratatui's crossterm backend does not lend its writer back out, so this
+    /// is how the loop reaches the one fact it needs: is there room.
+    out: Sender<Vec<u8>>,
 }
 
 impl SessionBackend {
     fn new(sink: FrameSink, cols: u16, rows: u16) -> Self {
         Self {
+            out: sink.tx.clone(),
             inner: CrosstermBackend::new(sink),
             size: Size::new(cols, rows),
         }
+    }
+
+    /// Whether the transport can take another frame right now.
+    ///
+    /// Only meaningful straight after a flush, and that is enough: a flush with
+    /// room always empties the buffer, so room left over means nothing is
+    /// pending either.
+    pub fn ready(&self) -> bool {
+        self.out.capacity() > 0
+    }
+
+    /// Wait until it can. False once the transport has gone, which is what
+    /// stops this from waiting forever on a visitor who has already left.
+    async fn room(&self) -> bool {
+        self.out.reserve().await.is_ok()
     }
 
     /// Tell the backend what the far end is now. Must happen before
@@ -251,7 +296,7 @@ pub type Term = Terminal<SessionBackend>;
 /// Drive one session to completion. Returns when the visitor quits, hangs up,
 /// or goes idle for long enough.
 pub async fn run(
-    out: UnboundedSender<Vec<u8>>,
+    out: Sender<Vec<u8>>,
     mut input: UnboundedReceiver<In>,
     cols: u16,
     rows: u16,
@@ -298,8 +343,31 @@ pub async fn run(
     // scroll until it was reset by hand. Best effort, and its error is dropped:
     // if this cannot be written the client has already gone, and there is
     // nothing left to put back.
+    // Room first. `restore` writes straight through the sink, and if the
+    // transport were still busy with the last frame those bytes would be held
+    // back for a flush that is never going to come -- the terminal left with
+    // mouse reporting on, which is the exact failure the comment above is
+    // about. Waiting is bounded: it returns as soon as the far end goes.
+    settle(&mut terminal).await;
     let _ = restore(&mut terminal);
     outcome
+}
+
+/// Wait until the transport can take a frame, pushing out anything written by
+/// hand that is still waiting for room.
+///
+/// Two passes: the first sends what is pending, the second waits for room for
+/// what comes next. Used either side of the loop, where there is no frame to
+/// skip and the bytes simply have to leave.
+async fn settle(terminal: &mut Term) {
+    for _ in 0..2 {
+        if !terminal.backend().room().await {
+            return;
+        }
+        if std::io::Write::flush(terminal.backend_mut()).is_err() {
+            return;
+        }
+    }
 }
 
 /// Undo everything the session did to the terminal on the way in.
@@ -335,6 +403,7 @@ async fn pump(
     let started = Instant::now();
     let mut last_input = Instant::now();
 
+    settle(terminal).await;
     terminal.draw(|f| shell.render(f))?;
 
     loop {
@@ -344,51 +413,34 @@ async fn pump(
         let mut ticker = interval(wait);
         ticker.tick().await; // the first tick fires immediately; skip it
 
+        let mut live = true;
         tokio::select! {
-            got = input.recv() => match got {
-                Some(In::Bytes(bytes)) => {
-                    last_input = Instant::now();
-                    for ev in decoder.feed(&bytes) {
-                        match ev {
-                            crossterm::event::Event::Key(k) => shell.on_key(k),
-                            crossterm::event::Event::Mouse(m) => shell.on_mouse(m),
-                            _ => {}
+            got = input.recv() => {
+                live = match got {
+                    Some(msg) => absorb(msg, terminal, shell, &mut decoder, &mut last_input, &Probe { until: probe_until, ascii })?,
+                    None => false,
+                };
+                // And everything already queued behind it, before the frame
+                // rather than after one apiece. A held-down arrow key arriving
+                // as ten separate reads used to cost ten frames -- ten diffs of
+                // the selection moving one row -- on a link that had just
+                // finished proving it could not keep up. It costs one frame
+                // now: row three straight to row thirteen. No input is
+                // discarded, only the pictures of the rows in between.
+                while live {
+                    match input.try_recv() {
+                        Ok(msg) => {
+                            live = absorb(msg, terminal, shell, &mut decoder, &mut last_input, &Probe { until: probe_until, ascii })?;
                         }
-                    }
-                    if decoder.take_da1()
-                        && Instant::now() <= probe_until
-                        && ascii.swap(false, Ordering::Relaxed)
-                    {
-                        terminal.backend_mut().write_all(ENABLE_MOUSE)?;
-                        std::io::Write::flush(terminal.backend_mut())?;
-                        terminal.clear()?;
-                    }
-                    if decoder.take_keyboard() && Instant::now() <= probe_until {
-                        terminal.backend_mut().write_all(ENABLE_KEYS)?;
-                        std::io::Write::flush(terminal.backend_mut())?;
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => live = false,
                     }
                 }
-                Some(In::Resize(c, r)) => {
-                    let (c, r) = (c.max(20), r.max(6));
-                    // Before the resize, not after: `resize` clears the
-                    // viewport on its way through and asks the backend how big
-                    // the screen is to decide how. Told afterwards, it would
-                    // clear against the *previous* size.
-                    terminal.backend_mut().set_size(c, r);
-                    terminal.resize(Rect::new(0, 0, c, r))?;
-                    // `draw` only sends cells that differ from the last frame,
-                    // and `resize` throws away the record it diffs against --
-                    // so without this the next frame computes "nothing
-                    // changed" against an empty baseline and sends nothing,
-                    // leaving whatever the client already had on screen.
-                    // `clear` forces the next draw to be a full repaint.
-                    terminal.clear()?;
-                }
-                Some(In::ReducedMotion(reduced)) => shell.set_reduced_motion(reduced),
-                Some(In::Gutter(cols)) => shell.set_gutter(cols),
-                Some(In::Hangup) | None => break,
-            },
+            }
             _ = ticker.tick() => {}
+        }
+        if !live {
+            break;
         }
 
         for question in shell.drain_submitted() {
@@ -409,9 +461,94 @@ async fn pump(
         for turn in shell.drain_logged() {
             visit.asked_with_panel(&turn.q, &turn.a, turn.spent, turn.panel.as_ref());
         }
-        terminal.draw(|f| shell.render(f))?;
+
+        // Push out whatever the arms above hand-wrote, then draw only if the
+        // transport can take the frame.
+        //
+        // When it can't, no frame is produced at all -- not produced and then
+        // queued, which is what turns a slow link into a time machine: the
+        // state is at frame 105 while the visitor watches 101 arrive. Skipping
+        // the draw leaves ratatui's record of the screen exactly as the client
+        // last saw it, so the next frame is a diff from *there* to wherever the
+        // state has got to by then. One frame, and no catching up to watch.
+        //
+        // That last part is why this is a gate before the draw and not a filter
+        // after it. Dropping a finished frame would be the cheaper-looking
+        // change and a corrupting one: ratatui would have already advanced its
+        // record to a screen the client never received, and every diff after it
+        // would be computed against a lie.
+        std::io::Write::flush(terminal.backend_mut())?;
+        if terminal.backend().ready() {
+            terminal.draw(|f| shell.render(f))?;
+        }
     }
     Ok(())
+}
+
+/// What the opening capability probe still needs from the loop, once its two
+/// halves stopped being local variables in it.
+struct Probe<'a> {
+    until: Instant,
+    ascii: &'a Arc<AtomicBool>,
+}
+
+/// Take one message from a transport into the shell.
+///
+/// Lifted out of the loop so that the messages already queued behind the one
+/// `select!` woke on can go through the very same path, rather than a second
+/// copy of it that drifts.
+///
+/// Returns false when the visitor has gone.
+fn absorb(
+    msg: In,
+    terminal: &mut Term,
+    shell: &mut Shell,
+    decoder: &mut Decoder,
+    last_input: &mut Instant,
+    probe: &Probe<'_>,
+) -> anyhow::Result<bool> {
+    match msg {
+        In::Bytes(bytes) => {
+            *last_input = Instant::now();
+            for ev in decoder.feed(&bytes) {
+                match ev {
+                    crossterm::event::Event::Key(k) => shell.on_key(k),
+                    crossterm::event::Event::Mouse(m) => shell.on_mouse(m),
+                    _ => {}
+                }
+            }
+            if decoder.take_da1()
+                && Instant::now() <= probe.until
+                && probe.ascii.swap(false, Ordering::Relaxed)
+            {
+                terminal.backend_mut().write_all(ENABLE_MOUSE)?;
+                std::io::Write::flush(terminal.backend_mut())?;
+                terminal.clear()?;
+            }
+            if decoder.take_keyboard() && Instant::now() <= probe.until {
+                terminal.backend_mut().write_all(ENABLE_KEYS)?;
+                std::io::Write::flush(terminal.backend_mut())?;
+            }
+        }
+        In::Resize(c, r) => {
+            let (c, r) = (c.max(20), r.max(6));
+            // Before the resize, not after: `resize` clears the viewport on its
+            // way through and asks the backend how big the screen is to decide
+            // how. Told afterwards, it would clear against the *previous* size.
+            terminal.backend_mut().set_size(c, r);
+            terminal.resize(Rect::new(0, 0, c, r))?;
+            // `draw` only sends cells that differ from the last frame, and
+            // `resize` throws away the record it diffs against -- so without
+            // this the next frame computes "nothing changed" against an empty
+            // baseline and sends nothing, leaving whatever the client already
+            // had on screen. `clear` forces the next draw to be a full repaint.
+            terminal.clear()?;
+        }
+        In::ReducedMotion(reduced) => shell.set_reduced_motion(reduced),
+        In::Gutter(cols) => shell.set_gutter(cols),
+        In::Hangup => return Ok(false),
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -433,7 +570,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let log = std::env::temp_dir().join("portfolio-session-test-visits.jsonl");
         std::env::set_var("PORTFOLIO_VISITS", &log);
-        let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
         let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
         in_tx
             .send(In::Bytes(b"\x1b[?1;2c".to_vec()))
@@ -443,28 +580,40 @@ mod tests {
         }
         in_tx.send(In::Hangup).expect("session not started yet");
 
+        // Drained as it goes, the way a transport does. The channel out is one
+        // frame deep and the loop waits for room in it at both ends of a
+        // session, so a test that collected only after `run` returned would
+        // wait for a reader that had not started yet -- and never return.
+        //
+        // The receiver still outlives the session either way: `FrameSink`
+        // reports a dropped one as a broken pipe, which would fail the session
+        // for the wrong reason.
+        let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let filling = Arc::clone(&collected);
         let worker = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("runtime");
-            rt.block_on(run(
+            let draining = rt.spawn(async move {
+                while let Some(frame) = out_rx.recv().await {
+                    filling.lock().expect("frames").extend_from_slice(&frame);
+                }
+            });
+            let outcome = rt.block_on(run(
                 out_tx,
                 in_rx,
                 cols,
                 rows,
                 crate::visits::Who::default(),
-            ))
+            ));
+            // `run` has dropped its sender by now, so this ends on its own.
+            let _ = rt.block_on(draining);
+            outcome
         });
         worker.join().expect("session thread panicked")?;
 
-        // Kept alive until now: `FrameSink` reports a dropped receiver as a
-        // broken pipe, so draining early would fail the session for the wrong
-        // reason.
-        let mut bytes = Vec::new();
-        while let Ok(frame) = out_rx.try_recv() {
-            bytes.extend_from_slice(&frame);
-        }
+        let bytes = collected.lock().expect("frames").clone();
         Ok(bytes)
     }
 
@@ -522,7 +671,7 @@ mod tests {
     /// This checks the step itself, whatever route reached it.
     #[test]
     fn restoring_emits_both_halves_even_with_nothing_drawn() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let options = TerminalOptions {
             viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
         };
@@ -571,11 +720,87 @@ mod tests {
         assert!(drive(100, 30, vec![In::Resize(0, 0)]).is_ok());
     }
 
+    /// A frame is a *diff* against what the client has on screen. Drop one and
+    /// every frame after it is measured from a screen that never existed, so a
+    /// full channel has to mean "later" and can never mean "no".
+    #[test]
+    fn a_frame_the_transport_cannot_take_yet_is_deferred_not_dropped() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let mut sink = FrameSink::new(tx);
+
+        sink.write_all(b"first").expect("write");
+        sink.flush().expect("flush");
+        sink.write_all(b"second").expect("write");
+        sink.flush().expect("flush");
+
+        assert_eq!(rx.try_recv().expect("first frame"), b"first".to_vec());
+        assert!(
+            rx.try_recv().is_err(),
+            "the second frame went out while the first was still in flight"
+        );
+
+        // It left with the next one, concatenated in order, which is all the
+        // far end's parser ever wanted.
+        sink.write_all(b"third").expect("write");
+        sink.flush().expect("flush");
+        assert_eq!(
+            rx.try_recv().expect("the deferred bytes"),
+            b"secondthird".to_vec()
+        );
+    }
+
+    /// The gate the render loop opens on. Room in the channel means room for a
+    /// whole frame, because a flush that finds room always empties the buffer.
+    #[test]
+    fn the_backend_says_it_is_full_until_the_frame_has_been_taken() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        let mut b = SessionBackend::new(FrameSink::new(tx), 80, 24);
+        assert!(b.ready(), "nothing has been sent yet");
+
+        b.write_all(b"a frame").expect("write");
+        std::io::Write::flush(&mut b).expect("flush");
+        assert!(!b.ready(), "a frame is still in flight");
+
+        rx.try_recv().expect("frame");
+        assert!(b.ready(), "the transport has taken it");
+    }
+
+    /// Ten messages waiting when the loop wakes up are ten changes to the
+    /// state, not ten pictures of it.
+    ///
+    /// Measured in bytes, because that is where it showed. Each resize forces a
+    /// full repaint, so drawing them one apiece put ten screens on the wire to
+    /// arrive at the screen one would have reached. The two runs differ only in
+    /// how much input is queued ahead of the session, which makes this a
+    /// self-calibrating ratio rather than a number that has to be guessed: with
+    /// neither the drain nor the gate it measured 72 KB against 307 KB.
+    ///
+    /// It cannot say which of the two is doing the work -- either alone is
+    /// enough to flatten it -- only that the backlog is gone. The two tests
+    /// above pin the gate's own mechanism.
+    #[test]
+    fn a_burst_of_queued_input_costs_one_pass_not_one_apiece() {
+        let once = drive(100, 30, vec![In::Resize(120, 40)]).expect("session failed");
+        let ten = drive(
+            100,
+            30,
+            (0..10).map(|_| In::Resize(120, 40)).collect(),
+        )
+        .expect("session failed");
+        assert!(
+            ten.len() < once.len() * 2,
+            "ten queued resizes cost {} bytes against {} for one -- \
+             each is still being drawn separately",
+            ten.len(),
+            once.len()
+        );
+    }
+
     /// The backend answers about the session, not about whatever tty this
     /// process was started from -- which is the whole point of wrapping it.
     #[test]
     fn the_backend_reports_the_sessions_size_and_never_asks_a_tty() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
         let mut b = SessionBackend::new(FrameSink::new(tx), 133, 47);
         assert_eq!(b.size().expect("size"), Size::new(133, 47));
         b.set_size(90, 25);
