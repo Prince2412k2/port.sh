@@ -402,6 +402,10 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
                     strength: ground,
                 },
             );
+            // The ground's outline, straight off the depth buffer the relief
+            // pass just wrote, and before the features go down so that this
+            // outlines terrain rather than everything on the frame.
+            app.canvas.rim(crate::canvas::RIM_STEP, ground);
         }
     }
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);

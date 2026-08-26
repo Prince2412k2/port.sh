@@ -24,6 +24,22 @@ const Z_BIAS: f32 = 0.004;
 /// Coverage a dot needs before it is switched on.
 const DOT_ON: f32 = 0.34;
 
+/// The quietest a cell with any ink in it can be.
+///
+/// Small on purpose. See the note where `tone` is computed: this was 0.40 and
+/// it cost the bottom of the ramp, which is most of what made a frame of
+/// terrain read as one flat texture.
+const INK_FLOOR: f32 = 0.06;
+
+/// How far the ground has to step, in normalised depth, before the near side
+/// of the step is outlined. Roughly one `VEIL_STEP`: the same distance the
+/// veil already treats as "a layer further back".
+pub const RIM_STEP: f32 = 0.03;
+
+/// Shapes coverage into tone. Below 1 it lifts faint marks, which is what
+/// makes a low floor survivable.
+const INK_GAMMA: f32 = 0.5;
+
 /// Same, for quadrants. Higher because a quadrant is four times the area: at the
 /// braille threshold a one-subpixel-wide road would bloom into a solid block.
 const QUAD_ON: f32 = 0.52;
@@ -633,6 +649,81 @@ impl Canvas {
         }
     }
 
+    /// Draw the edge of the ground: everywhere it stops, or steps.
+    ///
+    /// The thing that makes a braille surface read as a *surface* rather than
+    /// as texture. A field of dots has no boundary, so the eye has nothing to
+    /// segment on and reads the whole frame as one material -- which is the
+    /// entire complaint about terrain here, and it is not a complaint about
+    /// braille. Give the same dots an outline and they become a mass with an
+    /// inside and an outside.
+    ///
+    /// Two kinds of edge, and both come off the depth buffer rather than out
+    /// of the heightmap, so this needs no geometry and no detection:
+    ///
+    /// * ground next to no ground -- the outer boundary,
+    /// * ground next to ground a long way further off -- a step, which is one
+    ///   landform standing in front of another. That is the outline that makes
+    ///   a near ridge separate from the range behind it instead of merging
+    ///   into it.
+    ///
+    /// The near side is the one that gets the mark. An outline belongs to the
+    /// thing in front; drawn on the far side it reads as a shadow cast by
+    /// nothing.
+    ///
+    /// Collected before anything is drawn, because plotting writes coverage
+    /// and tint that the scan would otherwise pick up as it went and trail an
+    /// edge along behind itself.
+    pub fn rim(&mut self, jump: f32, alpha: f32) {
+        let mut edge: Vec<(usize, f32, u8)> = Vec::new();
+        let mark = |a: usize, b: usize, this: &Self, out: &mut Vec<(usize, f32, u8)>| {
+            let (za, zb) = (this.zbuf[a], this.zbuf[b]);
+            match (za.is_finite(), zb.is_finite()) {
+                (true, false) => out.push((a, za, this.tint[a])),
+                (false, true) => out.push((b, zb, this.tint[b])),
+                (true, true) if (za - zb).abs() > jump => {
+                    let near = if za < zb { a } else { b };
+                    out.push((near, this.zbuf[near], this.tint[near]));
+                }
+                _ => {}
+            }
+        };
+        for y in 0..self.sh {
+            for x in 0..self.sw {
+                let i = y * self.sw + x;
+                if x + 1 < self.sw {
+                    mark(i, i + 1, self, &mut edge);
+                }
+                if y + 1 < self.sh {
+                    mark(i, i + self.sw, self, &mut edge);
+                }
+            }
+        }
+        for (i, depth, tint) in edge {
+            let (x, y) = ((i % self.sw) as isize, (i / self.sw) as isize);
+            self.plot(
+                x,
+                y,
+                alpha,
+                &Brush {
+                    depth,
+                    tint,
+                    // Braille, deliberately. The ask was for the ground to
+                    // have a border, not for it to stop being braille -- and
+                    // a run of dots along an edge reads as a line for the same
+                    // reason a dotted road does.
+                    mat: MAT_DOT,
+                    pick: u32::MAX,
+                    // It is the boundary of the nearest thing in its column,
+                    // so there is nothing it could be behind, and a z-fight
+                    // with the surface it is the edge of would break the line
+                    // exactly where it has to hold.
+                    behind: Behind::Ignore,
+                },
+            );
+        }
+    }
+
     /// Claim a subpixel as solid without painting it.
     ///
     /// Terrain is drawn as a stipple but is geometrically opaque; without this
@@ -857,6 +948,24 @@ impl Canvas {
                 }
 
                 let mean = sum / lit as f32;
+                // The tone this cell's ink is worth, over the whole range the
+                // terminal has rather than the top three fifths of it.
+                //
+                // This used to be `0.40 + 0.60 * mean^0.55` -- a 40% floor, on
+                // the reasoning that anything which tripped `DOT_ON` deserved
+                // to be seen. The cost of that reasoning was the entire bottom
+                // of the ramp: no cell could ever be quiet, so a hillside and
+                // the one road crossing it arrived within a few steps of each
+                // other and the frame had no depth in it. It is also why
+                // dimming a mark did nothing measurable -- halving alpha moved
+                // a Himalayan frame by 0.04%, because half of almost-full is
+                // still almost-full once the floor is added back.
+                //
+                // The floor is now just enough that a lit dot is not literally
+                // the background, and the gamma is what keeps faint marks
+                // legible instead.
+                let tone = (INK_FLOOR + (1.0 - INK_FLOOR) * mean.powf(INK_GAMMA))
+                    * fog.factor(near);
                 let tint = weight
                     .iter()
                     .enumerate()
@@ -905,7 +1014,7 @@ impl Canvas {
                         // stroke falling to the right.
                         let theta = 0.5 * (2.0 * vxy).atan2(vxx - vyy);
                         if let Some(cell) = buf.cell_mut((sx, sy)) {
-                            let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
+                            let lum = tone;
                             let keep =
                                 tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
                             cell.set_char(hatch_of(theta))
@@ -922,7 +1031,7 @@ impl Canvas {
                     let fill = sum / (SUB_X * SUB_Y) as f32;
                     let k = ((fill * 4.0) as usize).min(3);
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
-                        let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
+                        let lum = tone;
                         let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
                         cell.set_char(SHADES[k]).set_fg(theme.paint(tint, lum, mono, keep));
                     }
@@ -964,8 +1073,7 @@ impl Canvas {
 
                 // Opacity axis (mean coverage) times depth axis (fog). The
                 // floor keeps a lit dot from ever being invisible -- if it made
-                // it through DOT_ON it should be seen.
-                let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
+                let lum = tone;
                 // Same exemption as labels: selection and position answer
                 // "which one" and "where am I", so they keep their colour even
                 // when the map is deliberately monochrome.
@@ -978,6 +1086,52 @@ impl Canvas {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod rim_tests {
+    use super::*;
+
+    /// Ground that stops gets an edge; ground that goes on does not.
+    #[test]
+    fn the_rim_marks_where_the_ground_ends() {
+        let mut c = Canvas::new(8, 4);
+        // A block of surface occupying the left half, at one depth.
+        for y in 0..c.sh {
+            for x in 0..c.sw / 2 {
+                c.occlude_at(x as isize, y as isize, 0.5);
+            }
+        }
+        c.rim(0.03, 1.0);
+        // The last covered column is the boundary and gets marked; the middle
+        // of the slab is interior and must stay clean, or the outline is not
+        // an outline, it is a wash.
+        let at = |x: usize, y: usize| c.cov[y * c.sw + x];
+        assert!(at(c.sw / 2 - 1, 2) > 0.0, "the edge of the ground was not drawn");
+        assert_eq!(at(1, 2), 0.0, "the inside of the ground was drawn as edge");
+        assert_eq!(at(c.sw / 2, 2), 0.0, "the empty side was drawn as edge");
+    }
+
+    /// A step in the ground is outlined on the near side of the step.
+    ///
+    /// An outline belongs to the thing in front. Put it on the far side and it
+    /// reads as a shadow cast by nothing.
+    #[test]
+    fn a_step_in_the_ground_is_outlined_on_the_near_side() {
+        let mut c = Canvas::new(8, 4);
+        for y in 0..c.sh {
+            for x in 0..c.sw {
+                // Near ground on the left, far ground on the right.
+                let z = if x < c.sw / 2 { 0.2 } else { 0.8 };
+                c.occlude_at(x as isize, y as isize, z);
+            }
+        }
+        c.rim(0.03, 1.0);
+        let at = |x: usize, y: usize| c.cov[y * c.sw + x];
+        assert!(at(c.sw / 2 - 1, 2) > 0.0, "the near side of the step is bare");
+        assert_eq!(at(c.sw / 2, 2), 0.0, "the far side of the step was outlined");
+    }
+
 }
 
 #[cfg(test)]
