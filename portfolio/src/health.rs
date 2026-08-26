@@ -19,9 +19,9 @@
 //! costs a single one-word prompt.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::Child;
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::json;
@@ -205,8 +205,20 @@ pub fn watch() {
 pub fn check() {
     let mut tried = Vec::new();
     for t in tiers() {
-        let live: Vec<String> =
-            t.models.iter().filter(|m| ask_one_word(&t.server, m)).cloned().collect();
+        let mut live = Vec::new();
+        let mut refused = Vec::new();
+        for m in &t.models {
+            match ask_one_word(&t.server, m) {
+                Ok(()) => live.push(m.clone()),
+                Err(why) => refused.push((m.clone(), why)),
+            }
+        }
+        // Said whatever happens, and said per model, because "the tier is up"
+        // and "one of its two models is up" are different facts and the second
+        // one is the one that explains a slow answer later.
+        for (model, why) in &refused {
+            eprintln!("portfolio: `{}` model `{model}` did not answer: {why}", t.name);
+        }
         if !live.is_empty() {
             eprintln!(
                 "portfolio: agent tier `{}` answering via `{}` ({}/{} models)",
@@ -237,9 +249,33 @@ fn reap(mut c: Child) {
     let _ = c.wait();
 }
 
-/// Ask one model one word, through the server its tier names. True if it
-/// answered at all.
-fn ask_one_word(server: &Server, model: &str) -> bool {
+/// Whether a turn that came back `Ok` actually failed, and why.
+///
+/// This is the hole the credential problem fell through for as long as it did.
+/// A prompt that could not run does not come back as a JSON-RPC error: envoy
+/// answers `{"stopReason":"end_turn","_meta":{"error":"no credential ..."}}`,
+/// a perfectly well-formed *success* carrying the failure in a side channel.
+/// The check here asked only whether a result had arrived, so a tier with no
+/// credential at all -- not a wrong one, none -- was reported as answering, and
+/// `--probe` printed `using: envoy ollama` on a box that could not have
+/// answered a single question.
+fn turn_failed(result: &json::Value) -> Option<String> {
+    let why = result.get("_meta")?.get("error")?.as_str()?.trim();
+    (!why.is_empty()).then(|| why.to_string())
+}
+
+/// How many lines of an agent's complaint to keep. The useful one is the last.
+const KEPT_LINES: usize = 8;
+
+/// Ask one model one word, through the server its tier names.
+///
+/// `Ok` if it answered at all. `Err` carries why it did not, in the agent's own
+/// words where it had any -- which is the whole reason this reads its stderr.
+/// `spawn_command` sends that to `/dev/null`, correctly, because for a real
+/// session it would land in the middle of a drawn frame. A probe has no frame,
+/// and "no tier answered" with the reason deleted is a sentence that has cost
+/// more debugging time than everything else in this file put together.
+fn ask_one_word(server: &Server, model: &str) -> Result<(), String> {
     // The same tool server a real session is handed, for a server that takes it
     // in the environment rather than in `session/new`. Same principle as the
     // `mcpServers` block below: a probe that negotiates differently from the
@@ -247,13 +283,36 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
     // page, so a call would be refused -- what is being checked is whether the
     // agent starts and answers with our server configured.
     let ours = crate::mcp::url_for("health-check-no-page");
-    let Ok(mut child) = server.spawn_command(model, ours.as_deref()).spawn() else {
-        return false;
+    let mut command = server.spawn_command(model, ours.as_deref());
+    command.stderr(Stdio::piped());
+    let Ok(mut child) = command.spawn() else {
+        return Err(format!("`{}` would not start -- is it on PATH?", server.label()));
     };
+
+    // Whatever the agent has to say for itself, kept to the last few lines.
+    let said = Arc::new(Mutex::new(Vec::<String>::new()));
+    let (done_tx, done_rx) = channel::<()>();
+    if let Some(errors) = child.stderr.take() {
+        let said = Arc::clone(&said);
+        std::thread::spawn(move || {
+            for line in BufReader::new(errors).lines().map_while(Result::ok) {
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                let mut kept = said.lock().unwrap_or_else(|e| e.into_inner());
+                if kept.len() == KEPT_LINES {
+                    kept.remove(0);
+                }
+                kept.push(line);
+            }
+            let _ = done_tx.send(());
+        });
+    }
 
     let Some(stdout) = child.stdout.take() else {
         reap(child);
-        return false;
+        return Err("the agent gave us no stdout to read".into());
     };
     let (tx, rx) = channel::<json::Value>();
     std::thread::spawn(move || {
@@ -269,7 +328,7 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
 
     let Some(mut w) = child.stdin.take() else {
         reap(child);
-        return false;
+        return Err("the agent gave us no stdin to write".into());
     };
     let deadline = Instant::now() + PATIENCE;
 
@@ -294,16 +353,16 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
         }
     };
 
-    let ok = (|| {
+    let step = (|| -> Result<(), String> {
         // The same handshake acp.rs performs, built by the same functions --
         // a probe that negotiates differently is not a probe of the thing being
         // asked about. That used to be a comment asking the reader to keep two
         // copies in step; now there is one copy.
         if !send(&mut w, &crate::acp::initialize_request(1)) {
-            return false;
+            return Err("could not write to the agent".into());
         }
         let Some(hello) = wait(1, deadline) else {
-            return false;
+            return Err("no answer to `initialize`".into());
         };
         // What this agent says it needs before it will work, kept for the one
         // failure that is worth explaining.
@@ -326,7 +385,7 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
             .then(|| crate::mcp::url_for("health-check-no-page"))
             .flatten();
         if !send(&mut w, &crate::acp::session_new_request(2, tools.as_deref())) {
-            return false;
+            return Err("could not ask for a session".into());
         }
         let mut opened = wait(2, deadline);
         // Refused with tools attached: say so loudly and carry on without them,
@@ -340,7 +399,7 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
                 server.label()
             );
             if !send(&mut w, &crate::acp::session_new_request(6, None)) {
-                return false;
+                return Err("could not ask for a session".into());
             }
             opened = wait(6, deadline);
         }
@@ -353,16 +412,16 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
                 let hint = if m.description.is_empty() { &m.name } else { &m.description };
                 eprintln!("portfolio: `{}` needs authenticating -- {hint}", server.label());
             }
-            return false;
+            return Err("would not open a session".into());
         };
         let Some(sid) = res.get("sessionId").and_then(|v| v.as_str()).map(str::to_string) else {
-            return false;
+            return Err("opened a session without giving it an id".into());
         };
         // Restrained here too, and this is also where a model that offers a
         // mode and then refuses to enter it gets caught.
         if let Some(r) = crate::acp::restraint(&res) {
             if !send(&mut w, &r.request(3, &sid)) || wait(3, deadline).is_none() {
-                return false;
+                return Err("offered a mode and then refused to enter it".into());
             }
         }
         // The actual question. One word, and the answer is thrown away: what
@@ -371,18 +430,68 @@ fn ask_one_word(server: &Server, model: &str) -> bool {
             r#"{{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{{"sessionId":{},"prompt":[{{"type":"text","text":"ping"}}]}}}}"#,
             json::quote(&sid)
         )) {
-            return false;
+            return Err("could not put the question".into());
         }
-        wait(4, deadline).is_some()
+        match wait(4, deadline) {
+            Some(answer) => match turn_failed(&answer) {
+                Some(why) => Err(why),
+                None => Ok(()),
+            },
+            None => Err("no answer to a one-word prompt".into()),
+        }
     })();
 
     reap(child);
-    ok
+    let Err(step) = step else {
+        return Ok(());
+    };
+    // The child is dead, so its stderr is at EOF and the reader is finishing.
+    // Bounded, because a grandchild holding the pipe open would otherwise hang
+    // the hourly check for ever.
+    let _ = done_rx.recv_timeout(Duration::from_millis(250));
+    let kept = said.lock().unwrap_or_else(|e| e.into_inner());
+    // The agent's own last word, when it had one. `no credential for none of
+    // OLLAMA_API_KEY is set` is worth a hundred of `no tier answered`.
+    Err(match kept.last() {
+        Some(last) => format!("{step} -- {last}"),
+        None => step.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn that failed quietly is not a working tier.
+    ///
+    /// The exact payload envoy sends when it has no credential. It is a
+    /// *successful* JSON-RPC result -- `stopReason: end_turn`, no error field
+    /// anywhere the protocol looks -- with the reason tucked into `_meta`.
+    /// Reading only "did a result arrive" made `--probe` print
+    /// `using: envoy ollama` on a box that could not answer a single question,
+    /// which is worse than printing nothing at all.
+    #[test]
+    fn a_turn_that_failed_in_a_side_channel_is_not_an_answer() {
+        let starved = json::parse(
+            r#"{"stopReason":"end_turn","_meta":{"error":"no credential for none of OLLAMA_API_KEY is set"}}"#,
+        )
+        .expect("json");
+        assert_eq!(
+            turn_failed(&starved).as_deref(),
+            Some("no credential for none of OLLAMA_API_KEY is set")
+        );
+
+        // A real answer, with and without an unrelated `_meta`.
+        for good in [
+            r#"{"stopReason":"end_turn"}"#,
+            r#"{"stopReason":"end_turn","_meta":{"name":"locate_place"}}"#,
+            // An empty complaint is not a complaint.
+            r#"{"stopReason":"end_turn","_meta":{"error":"   "}}"#,
+        ] {
+            let v = json::parse(good).expect("json");
+            assert!(turn_failed(&v).is_none(), "{good} was read as a failure");
+        }
+    }
 
     #[test]
     fn the_shipped_file_parses_into_ordered_tiers() {
