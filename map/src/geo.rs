@@ -249,9 +249,42 @@ impl Viewport {
     /// World-space bounds of what is currently on screen, grown by `pad`
     /// subpixels so features crossing the edge still get drawn.
     pub fn world_bounds(&self, pad: f64) -> [f64; 4] {
-        let a = self.unproject([-pad, -pad]);
-        let b = self.unproject([self.sw + pad, self.sh + pad]);
-        [a[0], a[1], b[0], b[1]]
+        // All four corners, and that is the whole point of this function.
+        //
+        // `unproject` applies the bearing, so with the camera turned the screen
+        // rectangle maps to a *rotated quad* in world space and two opposite
+        // corners stop bounding it. They are symmetric about the centre, so
+        // past roughly fifty degrees -- the exact angle depends on the aspect
+        // of the viewport -- they cross over and minx comes out greater than
+        // maxx. The box is then inverted rather than merely wrong, and
+        // `Feature::visible_in` passes only features big enough to span the
+        // whole inverted range. Which is exactly how this failed: rotating past
+        // 57 degrees dropped every road and left the coastline and the state
+        // borders, because those were the only things large enough to qualify,
+        // and a few degrees later it dropped those too.
+        let corners = [
+            self.unproject([-pad, -pad]),
+            self.unproject([self.sw + pad, -pad]),
+            self.unproject([-pad, self.sh + pad]),
+            self.unproject([self.sw + pad, self.sh + pad]),
+        ];
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for c in corners {
+            if !c[0].is_finite() || !c[1].is_finite() {
+                continue;
+            }
+            b[0] = b[0].min(c[0]);
+            b[1] = b[1].min(c[1]);
+            b[2] = b[2].max(c[0]);
+            b[3] = b[3].max(c[1]);
+        }
+        // A tilted camera can put a corner past the horizon, where unprojecting
+        // has no answer to give. Cull nothing rather than everything: a frame
+        // that draws too much is a frame somebody can see.
+        if b[0] > b[2] || b[1] > b[3] {
+            return [f64::MIN, f64::MIN, f64::MAX, f64::MAX];
+        }
+        b
     }
 
     /// Centre and zoom so `b` (world minx,miny,maxx,maxy) fills the viewport
@@ -448,5 +481,64 @@ mod tests {
         assert!(p1[0] <= v.sw && p1[1] <= v.sh, "bottom-right off screen: {p1:?}");
         let fill = ((p1[0] - p0[0]) / v.sw).max((p1[1] - p0[1]) / v.sh);
         assert!(fill > 0.85, "fit left too much slack: {fill}");
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+
+    fn viewport() -> Viewport {
+        let mut v = Viewport::new(lonlat_to_world(72.8777, 19.0760), 12.0);
+        v.sw = 400.0;
+        v.sh = 200.0;
+        v
+    }
+
+    /// Turning the camera must not empty the map.
+    ///
+    /// The two-corner box was symmetric about the centre, so past about fifty
+    /// degrees of bearing it inverted -- minx greater than maxx -- and
+    /// `visible_in` then admitted only features large enough to span the whole
+    /// inverted range. Rotating dropped the roads first and the coastline a few
+    /// degrees later. Swept rather than spot-checked, because the angle it
+    /// broke at depended on the shape of the viewport.
+    #[test]
+    fn the_view_box_stays_sane_all_the_way_round() {
+        let mut v = viewport();
+        for deg in 0..360 {
+            v.bearing = (deg as f64).to_radians();
+            let b = v.world_bounds(64.0);
+            assert!(b[0] <= b[2], "at {deg} degrees minx {} > maxx {}", b[0], b[2]);
+            assert!(b[1] <= b[3], "at {deg} degrees miny {} > maxy {}", b[1], b[3]);
+            // The centre of the screen is on screen at every bearing, so the
+            // box has to contain it. An inverted box passes the two checks
+            // above if it is merely empty; this is what catches that.
+            let c = v.center;
+            assert!(
+                c[0] >= b[0] && c[0] <= b[2] && c[1] >= b[1] && c[1] <= b[3],
+                "at {deg} degrees the box excludes the point under the crosshair"
+            );
+        }
+    }
+
+    /// And it must actually contain what is drawn, not merely be non-empty.
+    ///
+    /// Every screen pixel unprojects to a world point that the box has to
+    /// admit, or that point is culled while visibly on screen.
+    #[test]
+    fn everything_on_screen_is_inside_the_view_box() {
+        let mut v = viewport();
+        for deg in [0, 30, 57, 63, 90, 145, 200, 315] {
+            v.bearing = (deg as f64).to_radians();
+            let b = v.world_bounds(0.0);
+            for (fx, fy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)] {
+                let p = v.unproject([v.sw * fx, v.sh * fy]);
+                assert!(
+                    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3],
+                    "at {deg} degrees the corner ({fx}, {fy}) falls outside the box"
+                );
+            }
+        }
     }
 }
