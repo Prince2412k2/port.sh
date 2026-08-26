@@ -437,6 +437,18 @@ impl Canvas {
     /// road reads as a smooth run of varying brightness rather than a staircase.
     #[inline]
     pub fn splat(&mut self, x: f64, y: f64, a: f32, b: &Brush) {
+        // Nothing non-finite gets into the buffer.
+        //
+        // This is a net rather than a diagnosis: the caller that hands over a
+        // NaN has a bug of its own and should be fixed there. But a NaN here is
+        // uniquely nasty. `NaN as isize` saturates to zero, so the write lands
+        // on a real subpixel rather than being caught by a bounds check, and
+        // the coverage it stores is NaN. The frame then draws fine and the
+        // renderer panics later and elsewhere -- in the resolve pass, sorting
+        // tint weights, with nothing left to say which draw call was at fault.
+        if !x.is_finite() || !y.is_finite() || !a.is_finite() {
+            return;
+        }
         let fx = x.floor();
         let fy = y.floor();
         let tx = (x - fx) as f32;
@@ -645,7 +657,7 @@ impl Canvas {
                 let tint = weight
                     .iter()
                     .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .max_by(|a, b| a.1.total_cmp(b.1))
                     .map(|(i, _)| i)
                     .unwrap_or(0);
 
@@ -731,7 +743,7 @@ impl Canvas {
                         let best = quad
                             .iter()
                             .enumerate()
-                            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                            .max_by(|a, b| a.1.total_cmp(b.1))
                             .map(|(i, _)| i)
                             .unwrap_or(0);
                         if quad[best] < 0.12 {
@@ -836,5 +848,61 @@ mod brush_tests {
         for g in HATCH {
             assert!(seen.contains(&g), "{g} is unreachable");
         }
+    }
+}
+
+#[cfg(test)]
+mod nan_tests {
+    use super::*;
+
+    fn brush() -> Brush {
+        Brush { depth: 0.5, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, occlude: false }
+    }
+
+    /// A NaN position must not reach the buffer.
+    ///
+    /// The reason this is worth a guard rather than a comment: `NaN as isize`
+    /// saturates to zero, so the write lands on a real subpixel instead of
+    /// being caught by the bounds check, and it stores NaN coverage. The frame
+    /// still draws. The renderer then panics later and somewhere else -- in the
+    /// resolve pass, comparing tint weights -- with nothing left to say which
+    /// draw call put it there.
+    #[test]
+    fn a_mark_at_no_position_is_not_drawn_at_the_origin() {
+        for (x, y, a) in [
+            (f64::NAN, 4.0, 1.0f32),
+            (4.0, f64::NAN, 1.0),
+            (f64::INFINITY, 4.0, 1.0),
+            (4.0, 4.0, f32::NAN),
+        ] {
+            let mut c = Canvas::new(8, 4);
+            c.splat(x, y, a, &brush());
+            assert!(
+                c.cov.iter().all(|v| *v == 0.0),
+                "({x}, {y}, {a}) put something in the buffer"
+            );
+        }
+        // And an ordinary mark still lands, so the guard is not simply off.
+        let mut c = Canvas::new(8, 4);
+        c.splat(4.0, 4.0, 1.0, &brush());
+        assert!(c.cov.iter().any(|v| *v > 0.0), "the guard rejected a real mark");
+    }
+
+    /// And if one ever does get in, the frame must still draw.
+    ///
+    /// `partial_cmp(..).unwrap()` on tint weights was the crash site. It is a
+    /// total order now, so a bad value upstream costs one wrong-coloured cell
+    /// instead of the whole program.
+    #[test]
+    fn a_nan_already_in_the_buffer_does_not_bring_the_frame_down() {
+        let mut c = Canvas::new(8, 4);
+        c.splat(4.0, 4.0, 1.0, &brush());
+        // Straight past `splat`, the way a NaN would have arrived before it
+        // was guarded.
+        c.cov[2 * c.sw + 2] = f32::NAN;
+        c.cov[2 * c.sw + 3] = 0.9;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+        let fog = Fog { near: 1.0, far: 0.3, gamma: 1.0 };
+        c.resolve(&mut buf, Rect::new(0, 0, 8, 4), &fog, false);
     }
 }

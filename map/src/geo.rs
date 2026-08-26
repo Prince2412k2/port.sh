@@ -542,3 +542,54 @@ mod bounds_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod behind_the_eye_tests {
+    use super::*;
+
+    /// `project` cannot report a point it has no answer for, and callers have
+    /// to use `project3` when the camera has a near plane.
+    ///
+    /// With perspective on, a point behind the eye is rejected rather than
+    /// clamped -- pinning it would fling it across the frame in a radial fan.
+    /// `project3` says so with an infinite depth beside a NaN position, but
+    /// `project` throws the depth away and returns the NaN alone. Every
+    /// comparison against a NaN is false, so an on-screen bounds check waves it
+    /// straight through, and the NaN travels on into the drawing code.
+    #[test]
+    fn a_point_behind_the_eye_is_nan_and_project_does_not_say_so() {
+        let mut v = Viewport::new(lonlat_to_world(72.8777, 19.0760), 16.0);
+        v.sw = 400.0;
+        v.sh = 200.0;
+        v.tilt = 58f64.to_radians();
+        v.persp = 0.85;
+
+        // Somewhere south of the centre is somewhere behind the camera.
+        let mut found = None;
+        for step in 1..4000 {
+            let w = [v.center[0], v.center[1] + step as f64 * 1e-6];
+            if !v.project3(w, 0.0).1.is_finite() {
+                found = Some(w);
+                break;
+            }
+        }
+        let w = found.expect("no point behind the eye was reachable");
+
+        let (p, z) = v.project3(w, 0.0);
+        assert!(!z.is_finite(), "project3 should refuse this point");
+        assert!(p[0].is_nan() && p[1].is_nan(), "and hand back no position");
+
+        // The trap: the same point through `project`, with the depth gone.
+        let q = v.project(w);
+        assert!(q[0].is_nan(), "project returns the NaN with nothing to flag it");
+        // And this is why a bounds check does not catch it. Written in the
+        // negated form on purpose -- clippy dislikes it for exactly the reason
+        // being demonstrated, that these values may not be comparable at all,
+        // and it is the shape the real check in `draw_labels` had.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        {
+            assert!(!(q[0] < 0.0), "a NaN is not less than zero");
+            assert!(!(q[0] >= v.sw), "nor greater than the screen");
+        }
+    }
+}

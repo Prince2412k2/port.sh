@@ -731,7 +731,18 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
             if f.rank < floor && !hot_feature {
                 continue;
             }
-            let p = o.vp.project(f.pts[0]);
+            // `project3` and not `project`, for the depth. A point behind the
+            // eye has no screen position and `project3` says so by handing back
+            // NaN with an infinite depth -- but `project` drops the depth on the
+            // floor, and every comparison against a NaN is false, so the bounds
+            // check below waved it straight through. The anchor then became a
+            // leader line, and a line drawn to nowhere splats NaN coverage into
+            // the buffer, where it sat until the resolve pass tried to sort the
+            // tints and found two weights that would not compare.
+            let (p, z) = o.vp.project3(f.pts[0], 0.0);
+            if !z.is_finite() {
+                continue;
+            }
             if p[0] < 0.0 || p[1] < 0.0 || p[0] >= canvas.sw as f64 || p[1] >= canvas.sh as f64 {
                 continue;
             }
