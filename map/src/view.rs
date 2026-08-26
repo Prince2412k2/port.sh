@@ -253,20 +253,8 @@ pub fn ground_strength(zoom: f64) -> f32 {
 }
 
 /// Ground fills are texture, and texture at region scale is just noise.
-///
-/// They used to arrive with `Mode::Relief`, at z10, which is a frame five
-/// kilometres across. Over a forested mountain state that is a thousand
-/// landuse polygons of woodland laid over the whole view -- measured at Shimla
-/// z10.5, a thousand of the frame's 1061 features -- and the terrain the frame
-/// is *about* was left holding a seventh of the ink underneath it. Turning
-/// terrain off there changed the picture hardly at all, which is how the
-/// problem was finally found: everything I had been tuning was the seventh.
-///
-/// A landuse polygon earns its place when it distinguishes this block from the
-/// one beside it. That is a neighbourhood question, so it waits for
-/// neighbourhood scale.
 pub fn draws_fills(mode: Mode) -> bool {
-    mode.buildings()
+    mode != Mode::Flat
 }
 
 #[cfg(test)]
