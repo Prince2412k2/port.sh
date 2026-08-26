@@ -10,7 +10,8 @@ use crate::data::Layer;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
-    /// Country to region. Flat, sparse, no terrain: a reference map.
+    /// Country to region. Untilted, no ground fills: a reference map. The
+    /// terrain is not the mode's to decide -- see `ground_strength`.
     Flat,
     /// City scale. Ground relief and a slight lean.
     Relief,
@@ -37,10 +38,6 @@ impl Mode {
             Mode::Half3D => "2.5D",
             Mode::Full3D => "3D",
         }
-    }
-
-    pub fn terrain(self) -> bool {
-        !matches!(self, Mode::Flat)
     }
 
     pub fn buildings(self) -> bool {
@@ -173,6 +170,31 @@ pub fn exaggeration(zoom: f64) -> f64 {
         z if z >= 14.0 => 2.0,
         z => 14.0 - (z - 9.0) / 5.0 * 12.0,
     }
+}
+
+/// How firmly the ground is drawn at a zoom, 0 (not at all) to 1.
+///
+/// This used to be `Mode::terrain()`, which is to say a switch at z10, and two
+/// things were wrong with that. The frame whose scalebar reads 10 km sits just
+/// under z10 -- the scale at which a mountain range *is* the subject, and the
+/// one scale that had no ground on it at all. And a switch put a whole
+/// hillside on in one wheel notch: measured over Zanskar on a 150x40 frame,
+/// 726 marks of ink at z9.5 and 5192 at z10.
+///
+/// So it comes up over a zoom instead, and is full before the bar can read
+/// 10 km at all. "Before it can" and not "when it does": the bar is picked
+/// from the cell size and the frame width, so which zoom shows 10 km moves
+/// with the terminal and the latitude -- across 80- to 300-cell frames over
+/// India it is anywhere from z8.15 to z10.1. `NOON` sits under the whole of
+/// that range rather than in the middle of it.
+pub fn ground_strength(zoom: f64) -> f32 {
+    /// First light: below this the ground is not drawn. About a 50 km bar,
+    /// which is roughly where a 30 arcsec heightmap stops having anything to
+    /// say that is not already the shape of the coastline.
+    const DAWN: f64 = 7.0;
+    /// Full strength, under every zoom at which the bar can read 10 km.
+    const NOON: f64 = 8.0;
+    (((zoom - DAWN) / (NOON - DAWN)) as f32).clamp(0.0, 1.0)
 }
 
 /// Ground fills are texture, and texture at region scale is just noise.

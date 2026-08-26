@@ -36,6 +36,34 @@ fn interval(range: f32) -> f32 {
 const MAX_ELEV: f32 = 6000.0;
 
 
+/// What a relief pass needs to know besides the ground itself: where zero is,
+/// how far the height is stretched, which way of drawing to use, and how
+/// firmly to draw at all.
+///
+/// A struct rather than four more parameters because the contour and hachure
+/// passes want the same four, and threading them one by one down two levels
+/// was how the signatures got to eight arguments.
+#[derive(Clone, Copy)]
+pub struct Plot {
+    /// Elevation treated as ground level, metres.
+    pub datum: f32,
+    /// Vertical exaggeration.
+    pub exag: f64,
+    /// How the surface is drawn.
+    pub ground: Ground,
+    /// 0 to 1: see `view::ground_strength`.
+    pub strength: f32,
+}
+
+/// The same, once the pass has resolved what the camera does to it.
+#[derive(Clone, Copy)]
+struct Lift {
+    datum: f32,
+    exag: f64,
+    m_per_world: f64,
+    strength: f32,
+}
+
 #[derive(Default)]
 pub struct Relief {
     /// Sample heights, reused across frames to avoid reallocating.
@@ -51,10 +79,9 @@ impl Relief {
         t: &Terrain,
         canvas: &mut Canvas,
         vp: &Viewport,
-        datum: f32,
-        exag: f64,
-        ground: Ground,
+        plot: Plot,
     ) -> usize {
+        let Plot { datum, ground, strength, .. } = plot;
         // Sampling in screen space rather than world space keeps the grid
         // uniform on the display no matter how the camera is turned.
         self.gw = (canvas.sw as f64 / STEP).ceil() as usize + 3;
@@ -95,7 +122,10 @@ impl Relief {
         let m_per_world = meters_per_world_unit(clat);
         // Flat views have no vertical axis to displace along, and `Shade` is the
         // mode that chooses not to use the one it has.
-        let exag = if vp.is_flat() || !ground.displaces() { 0.0 } else { exag };
+        let exag = if vp.is_flat() || !ground.displaces() { 0.0 } else { plot.exag };
+        let lift = Lift { datum, exag, m_per_world, strength };
+        // Fully drawn ground is a surface; ground fading in is not yet one.
+        let solid = strength >= 1.0;
         let mut plotted = 0usize;
 
         // Column-major, marching far to near. That ordering is the whole trick:
@@ -148,7 +178,7 @@ impl Relief {
                 if relief < 0.06 && band < 0.10 {
                     continue;
                 }
-                let alpha = (0.10 + 0.80 * relief) * (0.55 + 0.45 * band) * fade;
+                let alpha = (0.10 + 0.80 * relief) * (0.55 + 0.45 * band) * fade * strength;
 
                 let hw = (h - datum) as f64 * exag / m_per_world;
                 let (sp, depth) = vp.project3(world[i], hw);
@@ -169,7 +199,15 @@ impl Relief {
                         MAT_DOT
                     },
                     pick: u32::MAX,
-                    behind: crate::canvas::Behind::Hide,
+                    // Ground drawn at full strength is opaque and takes what
+                    // is behind it away. Ground still coming up is a hint, and
+                    // a hint that deletes the road behind it leaves a hole
+                    // with nothing visible to explain the hole.
+                    behind: if solid {
+                        crate::canvas::Behind::Hide
+                    } else {
+                        crate::canvas::Behind::Veil
+                    },
                 };
 
                 // The next row nearer: the ribbon spans the gap to it, so the
@@ -202,7 +240,7 @@ impl Relief {
                     py += 1.0;
                 }
                 let mut y = y0;
-                while y <= y1 {
+                while solid && y <= y1 {
                     // Join the projected samples, not merely their y values.
                     // With the stagger above, fixing x here would recreate the
                     // vertical ribbons the sampling pattern exists to remove.
@@ -222,10 +260,10 @@ impl Relief {
         }
 
         if ground == Ground::Contour {
-            self.contours(canvas, vp, &world, datum, exag, m_per_world);
+            self.contours(canvas, vp, &world, &lift);
         }
         if ground == Ground::Hachure {
-            plotted = self.hachures(canvas, vp, &world, datum, exag, m_per_world);
+            plotted = self.hachures(canvas, vp, &world, &lift);
         }
         plotted
     }
@@ -259,10 +297,9 @@ impl Relief {
         canvas: &mut Canvas,
         vp: &Viewport,
         world: &[[f64; 2]],
-        datum: f32,
-        exag: f64,
-        m_per_world: f64,
+        lift: &Lift,
     ) -> usize {
+        let &Lift { datum, exag, m_per_world, strength } = lift;
         let mut drawn = 0usize;
         // Every other sample, both ways. At full density the strokes touch and
         // the whole hillside greys over into the wash this mode exists to avoid.
@@ -353,7 +390,8 @@ impl Relief {
                         // back, and a crest is never faint.
                         alpha: (((0.30 + 0.55 * steep) * (1.0 - 0.5 * far as f64)) as f32
                             + if crest { 0.20 } else { 0.0 })
-                        .clamp(0.08, 0.95),
+                        .clamp(0.08, 0.95)
+                            * strength,
                         depth: da.min(db),
                         tint: TINT_GREEN,
                         // Three families in one mode, and distance chooses
@@ -400,10 +438,9 @@ impl Relief {
         canvas: &mut Canvas,
         vp: &Viewport,
         world: &[[f64; 2]],
-        datum: f32,
-        exag: f64,
-        m_per_world: f64,
+        lift: &Lift,
     ) {
+        let &Lift { datum, exag, m_per_world, strength } = lift;
         let (lo, hi) = self
             .heights
             .iter()
@@ -478,7 +515,7 @@ impl Relief {
                             pb,
                             &crate::raster::Pen {
                                 width: 1.0,
-                                alpha: if index { 0.55 } else { 0.28 },
+                                alpha: if index { 0.55 } else { 0.28 } * strength,
                                 depth: da.min(db),
                                 tint: TINT_GREEN,
                                 mat: MAT_DOT,
@@ -532,7 +569,10 @@ impl Relief {
         // that keeps its place is the one the eye was going to look at anyway.
         labelled.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let mut taken: Vec<(usize, usize, usize)> = Vec::new();
-        for &(_, _, level, cx, cy) in &labelled {
+        // A number is either legible or it is litter, so heights wait until the
+        // lines they belong to are properly drawn rather than fading up with
+        // them.
+        for &(_, _, level, cx, cy) in labelled.iter().filter(|_| strength >= 1.0) {
             let text = format!("{}", level as i32);
             let (cx, cy) = (cx as usize, cy as usize);
             if cx + text.len() + 1 >= canvas.cw || cy >= canvas.ch {
