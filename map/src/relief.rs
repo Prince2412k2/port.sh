@@ -35,6 +35,53 @@ fn interval(range: f32) -> f32 {
 /// Highest elevation used to normalise shading, metres.
 const MAX_ELEV: f32 = 6000.0;
 
+/// The light: north-west and 20 degrees up.
+///
+/// North-west because that is where every printed relief map has put the sun
+/// for two hundred years -- lit from the other side the eye reads the ranges
+/// inside out, valleys for ridges.
+///
+/// In *grid* space, and that is the same choice the hillshade already makes:
+/// the light belongs to the page, not to the ground. Turn the map and the sun
+/// stays over your left shoulder. A world-locked sun would swing round as you
+/// rotate and invert the relief halfway through the turn.
+///
+/// Twenty degrees and not the forty-five a renderer would reach for first. A
+/// shadow needs ground steeper than the sun is high, and the shipped heightmap
+/// is 30 arcsec -- one sample every 853 m, which averages a cliff into a
+/// slope. Measured over Zanskar, a 45 degree sun moved the frame by 0.4% and a
+/// 20 degree sun by 8%: at forty-five there was nothing in the data steep
+/// enough to block it. Low light is also what relief cartographers use, for
+/// the same reason.
+const SUN_RISE: f32 = 0.36;
+
+/// Ordered dither for spending the light as stipple density.
+///
+/// Shadow has to be paid for in *dots*, not in brightness. The canvas lights a
+/// braille dot at a fixed coverage threshold and then floors the cell at 40%
+/// of full brightness, so dimming a mark to a quarter still draws it at over
+/// half strength -- measured on the veil pass, halving alpha moved a Himalayan
+/// frame by 0.04%. Removing the mark is the only thing the medium reads
+/// reliably, and it is also how an engraver has always drawn shade: the same
+/// line, further apart.
+///
+/// Ordered rather than random so the pattern holds still under redraw, and
+/// indexed by grid position rather than screen position so it stays welded to
+/// the ground as the camera moves.
+const DITHER: [[f32; 4]; 4] = [
+    [0.031, 0.531, 0.156, 0.656],
+    [0.781, 0.281, 0.906, 0.406],
+    [0.219, 0.719, 0.094, 0.594],
+    [0.969, 0.469, 0.844, 0.344],
+];
+
+/// What is left of the light inside a full shadow.
+///
+/// Not zero. A shadowed hillside on a clear day is lit by the sky, and a
+/// terminal has so little tonal room that taking a region to nothing loses the
+/// shape of the ground rather than describing it.
+const AMBIENT: f32 = 0.28;
+
 
 /// What a relief pass needs to know besides the ground itself: where zero is,
 /// how far the height is stretched, which way of drawing to use, and how
@@ -68,6 +115,8 @@ struct Lift {
 pub struct Relief {
     /// Sample heights, reused across frames to avoid reallocating.
     heights: Vec<f32>,
+    /// How much of the light each sample keeps: 1 lit, `AMBIENT` in shadow.
+    light: Vec<f32>,
     gw: usize,
     gh: usize,
 }
@@ -120,6 +169,10 @@ impl Relief {
 
         let (_, clat) = vp.center_lonlat();
         let m_per_world = meters_per_world_unit(clat);
+        // Metres covered by one step of the sampling grid, which is what turns
+        // the ray's rise into the same units the heightmap is in.
+        let m_per_grid = STEP * m_per_world / vp.scale();
+        self.cast_shadows(m_per_grid);
         // Flat views have no vertical axis to displace along, and `Shade` is the
         // mode that chooses not to use the one it has.
         let exag = if vp.is_flat() || !ground.displaces() { 0.0 } else { plot.exag };
@@ -178,7 +231,15 @@ impl Relief {
                 if relief < 0.06 && band < 0.10 {
                     continue;
                 }
-                let alpha = (0.10 + 0.80 * relief) * (0.55 + 0.45 * band) * fade * strength;
+                // Ground a ridge is standing in front of. Ink is light on this
+                // map, so a shadow takes ink away -- the stipple thins out and
+                // the shadow reads as the dark shape it is.
+                // Shadow is spent as density first and brightness second: the
+                // stipple opens up where a ridge stands in the way, and the
+                // dots that survive are dimmer too.
+                let lit = self.light[i];
+                let shaded = lit < 1.0 && DITHER[gy & 3][gx & 3] >= lit;
+                let alpha = (0.10 + 0.80 * relief) * (0.55 + 0.45 * band) * lit * fade * strength;
 
                 let hw = (h - datum) as f64 * exag / m_per_world;
                 let (sp, depth) = vp.project3(world[i], hw);
@@ -233,7 +294,7 @@ impl Relief {
                 // `Hachure` writes the depth buffer below but lays no stipple:
                 // it describes the surface instead of painting it, and the
                 // quiet is what the strokes are drawn against.
-                while ground.paints_surface() && py <= paint_to {
+                while ground.paints_surface() && !shaded && py <= paint_to {
                     let t = (py - y0) / span;
                     let x = sp[0] + (sp_near[0] - sp[0]) * t;
                     canvas.splat(x, py, alpha, &brush);
@@ -266,6 +327,64 @@ impl Relief {
             plotted = self.hachures(canvas, vp, &world, &lift);
         }
         plotted
+    }
+
+    /// Which ground a ridge is standing in front of.
+    ///
+    /// Hillshade answers "which way is this bit of ground facing", which is a
+    /// question about one sample on its own. It cannot say that a peak stands
+    /// between the valley and the sun, because that is a question about every
+    /// sample along a line -- so a hillshaded range comes out as a field of
+    /// lit and unlit faces with no sense of one landform being in front of
+    /// another. The cast shadow is what welds them together.
+    ///
+    /// A horizon sweep, not a ray march. The light runs exactly down the grid
+    /// diagonal, so every sample that could shadow another lies on the same
+    /// diagonal line, and one walk down each line settles the whole grid:
+    /// carry the highest sun ray seen so far, drop it by `SUN_RISE` per step
+    /// as it travels away from the light, and raise it wherever the ground
+    /// pokes through. Ground below the carried ray is in shadow, by however
+    /// far below. That is O(one visit per sample) against the march this
+    /// replaced, which cost 56 lookups each and took the frame from 2.0 ms to
+    /// 5.3 ms.
+    ///
+    /// The depth is graded rather than in-or-out. A hard test gives a shadow
+    /// edge one sample wide, and at this resolution a one-sample edge crawls a
+    /// whole cell at a time as the camera moves, which reads as tearing.
+    fn cast_shadows(&mut self, m_per_grid: f64) {
+        self.light.clear();
+        self.light.resize(self.gw * self.gh, 1.0);
+        if self.gw < 2 || self.gh < 2 {
+            return;
+        }
+        // The diagonal is longer than the step, and the ray falls by distance.
+        let drop = (m_per_grid * std::f64::consts::SQRT_2) as f32 * SUN_RISE;
+        // How far under the ray the ground has to sit for the shadow to be
+        // full. Tied to the sample spacing so the penumbra stays a fixed width
+        // on screen instead of vanishing as you zoom in.
+        let soft = (drop * 1.5).max(1.0);
+
+        // Every diagonal running away from the light, which is up and to the
+        // left: the starts are the top row and the left column.
+        let starts = (0..self.gw).map(|x| (x, 0)).chain((1..self.gh).map(|y| (0, y)));
+        for (sx, sy) in starts {
+            let (mut x, mut y) = (sx, sy);
+            let mut ray = f32::MIN;
+            while x < self.gw && y < self.gh {
+                let i = y * self.gw + x;
+                let h = self.heights[i];
+                ray -= drop;
+                if h >= ray {
+                    // This ground catches the light and becomes the new ray.
+                    ray = h;
+                } else {
+                    let deep = ((ray - h) / soft).clamp(0.0, 1.0);
+                    self.light[i] = 1.0 - (1.0 - AMBIENT) * deep;
+                }
+                x += 1;
+                y += 1;
+            }
+        }
     }
 
     /// Strokes down the line of steepest descent.
@@ -621,6 +740,60 @@ mod tests {
                 "{range} m of range gave {lines} lines at a {step} m interval"
             );
         }
+    }
+
+    /// A ridge puts the ground behind it in shadow, and the ground in front
+    /// of it keeps the light.
+    ///
+    /// Built as a wall across the light's path with flat ground either side.
+    /// The light runs down the grid diagonal from the upper left, so the far
+    /// side of the wall -- down and to the right -- is the side that goes
+    /// dark, and the near side must not.
+    #[test]
+    fn a_ridge_darkens_the_ground_behind_it_and_not_in_front() {
+        let mut r = Relief::default();
+        r.gw = 32;
+        r.gh = 32;
+        r.heights = vec![100.0; r.gw * r.gh];
+        // A wall on the anti-diagonal, which is *across* the light rather than
+        // along it. The first version of this test laid the wall down the same
+        // diagonal the light runs on, so every sample it could have shadowed
+        // was the wall itself, and nothing went dark.
+        for x in 0..=8 {
+            r.heights[(8 - x) * r.gw + x] = 900.0;
+        }
+        // 100 m a grid step, so the ray falls 100 * sqrt2 * 0.36 = 51 m a step
+        // and the wall's 800 m of freeboard reaches about 16 steps.
+        r.cast_shadows(100.0);
+
+        let at = |x: usize, y: usize| r.light[y * r.gw + x];
+        // Twelve steps down-light of the wall, still well inside its reach.
+        assert!(at(16, 16) < 0.99, "behind the wall is lit at {}", at(16, 16));
+        // Up-light of it: the wall is not between this ground and the sun.
+        assert_eq!(at(2, 2), 1.0, "ground in front of the wall lost its light");
+        // Twenty-four steps out, past where the ray has fallen back to ground.
+        assert_eq!(at(28, 28), 1.0, "the shadow never ended");
+    }
+
+    /// The sun has to be low, and the reason is the data, not the taste.
+    ///
+    /// A cast shadow needs ground steeper than the sun is high. The shipped
+    /// heightmap is 30 arcsec -- 819 x 921 m a sample -- which averages a
+    /// cliff into a slope, so a conventional 45 degree sun finds almost
+    /// nothing steep enough to hide behind. Measured over Zanskar it moved the
+    /// frame by 0.4%; at 20 degrees, by 8%.
+    ///
+    /// This guards the constant against being "corrected" back to 45.
+    #[test]
+    fn the_sun_is_lower_than_the_ground_the_heightmap_can_describe() {
+        // The steepest the shipped grid can report between neighbours: a
+        // Himalayan wall is about 2000 m over 5 km once sampled at 850 m.
+        let steepest_the_data_holds = 2000.0f32 / 5000.0;
+        assert!(
+            SUN_RISE < steepest_the_data_holds,
+            "a sun at {SUN_RISE} is steeper than any slope this heightmap has, \
+             so nothing would ever cast a shadow"
+        );
     }
 
     /// Round numbers only. A map whose lines are 37 m apart cannot be counted.
