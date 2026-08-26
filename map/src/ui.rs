@@ -7,16 +7,17 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{App, LAYER_KEYS, TOGGLES};
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Theme};
 use crate::geo::PIXEL_ASPECT;
 use crate::scene::{self, SceneOpts};
 
-const BG: Color = Color::Rgb(8, 9, 11);
-const FG: Color = Color::Rgb(196, 200, 206);
-const DIM: Color = Color::Rgb(96, 102, 112);
-const FAINT: Color = Color::Rgb(58, 62, 70);
-const ACCENT: Color = Color::Rgb(255, 176, 64);
-const CYAN: Color = Color::Rgb(110, 224, 255);
+// The chrome's three greys. Functions of the theme rather than constants,
+// because the map is drawn on two different grounds now and a fixed
+// near-black background under paper-coloured ink is just a black rectangle.
+//
+// Threaded rather than kept in a global: one process serves many sessions over
+// SSH, and a global theme would be whichever visitor toggled it last.
+
 
 const PANEL_W: u16 = 26;
 /// Below this the panel is more trouble than it is worth.
@@ -33,11 +34,12 @@ pub fn render(f: &mut Frame, app: &mut App) {
 /// and two footers, which is precisely how a combined app announces that it is
 /// three apps in a trench coat.
 pub fn render_map_only(f: &mut Frame, area: Rect, app: &mut App) {
-    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    let th = app.theme;
+    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
     map_view(f, area, app);
     overlays(f, area, app);
     if app.show_help {
-        help(f, area);
+        help(f, area, th);
     }
 }
 
@@ -70,11 +72,12 @@ pub struct Camera {
 }
 
 pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin: Option<f32>) {
+    let th = app.theme;
     let Camera { lonlat, zoom, tilt, persp, bearing } = cam;
     if area.width < 8 || area.height < 4 {
         return;
     }
-    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
     let mut vp = crate::geo::Viewport::new(crate::geo::lonlat_to_world(lonlat.0, lonlat.1), zoom);
     vp.tilt = tilt;
     vp.persp = persp;
@@ -84,7 +87,7 @@ pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin
     app.unpark_camera(was);
 
     if let Some(drop) = pin {
-        drop_pin(f, area, drop);
+        drop_pin(f, area, drop, th);
     }
 }
 
@@ -94,7 +97,7 @@ pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin
 /// once it has landed, with a ring that opens and fades. Bounded, like
 /// everything else that moves in this project: it plays once on arrival and then
 /// it is a marker sitting on a point.
-fn drop_pin(f: &mut Frame, area: Rect, drop: f32) {
+fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
     let (cx, cy) = (area.x + area.width / 2, area.y + area.height / 2);
     let k = drop.clamp(0.0, 1.0);
 
@@ -116,9 +119,9 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32) {
                 );
             }
         };
-        cell(f, y, "\u{25be}", ACCENT, true);
+        cell(f, y, "\u{25be}", th.accent(crate::canvas::TINT_LANDMARK), true);
         if up > 0 {
-            cell(f, y.saturating_sub(1), "\u{2502}", DIM, false);
+            cell(f, y.saturating_sub(1), "\u{2502}", th.faint(), false);
         }
         return;
     }
@@ -128,7 +131,7 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32) {
     f.render_widget(
         Paragraph::new(Span::styled(
             "\u{25c8}".to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)).add_modifier(Modifier::BOLD),
         )),
         Rect { x: cx, y: cy, width: 1, height: 1 },
     );
@@ -140,7 +143,8 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32) {
 /// with it: they are the map's instruments — zoom, mode, what is under the
 /// pointer — and belong to the view, not to the shell around it.
 pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
-    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    let th = app.theme;
+    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
 
     let [head, body, foot] = Layout::vertical([
         Constraint::Length(1),
@@ -167,39 +171,40 @@ pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
     status(f, foot, app);
 
     if app.show_help {
-        help(f, area);
+        help(f, area, th);
     }
 }
 
 fn header(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let (lon, lat) = app.vp.center_lonlat();
     let ns = if lat >= 0.0 { 'N' } else { 'S' };
     let ew = if lon >= 0.0 { 'E' } else { 'W' };
 
     let left = Line::from(vec![
-        Span::styled(" termap ", Style::default().fg(BG).bg(FG).add_modifier(Modifier::BOLD)),
-        Span::styled(" 0.1.0", Style::default().fg(DIM)),
-        Span::styled("  │  ", Style::default().fg(FAINT)),
-        Span::styled(app.mode().label(), Style::default().fg(FG)),
+        Span::styled(" termap ", Style::default().fg(th.page()).bg(th.ink()).add_modifier(Modifier::BOLD)),
+        Span::styled(" 0.1.0", Style::default().fg(th.faint())),
+        Span::styled("  │  ", Style::default().fg(th.ghost())),
+        Span::styled(app.mode().label(), Style::default().fg(th.ink())),
         // The zoom mode and the ground style are different things and both were
         // called RELIEF here, which made comparing the three impossible: the
         // header said the same word whichever one was on screen.
         Span::styled(
             format!(" {}", app.ground.label()),
-            Style::default().fg(if app.show_terrain { DIM } else { FAINT }),
+            Style::default().fg(if app.show_terrain { th.faint() } else { th.ghost() }),
         ),
-        Span::styled("  │  ", Style::default().fg(FAINT)),
-        Span::styled(app.source.label().to_string(), Style::default().fg(DIM)),
+        Span::styled("  │  ", Style::default().fg(th.ghost())),
+        Span::styled(app.source.label().to_string(), Style::default().fg(th.faint())),
     ]);
 
     let right = Line::from(vec![
         Span::styled(
             format!("{:.4} {ns}  {:.4} {ew}", lat.abs(), lon.abs()),
-            Style::default().fg(FG),
+            Style::default().fg(th.ink()),
         ),
-        Span::styled("  │  ", Style::default().fg(FAINT)),
-        Span::styled(format!("z{:.1}", app.vp.zoom), Style::default().fg(FG)),
-        Span::styled("  │  ", Style::default().fg(FAINT)),
+        Span::styled("  │  ", Style::default().fg(th.ghost())),
+        Span::styled(format!("z{:.1}", app.vp.zoom), Style::default().fg(th.ink())),
+        Span::styled("  │  ", Style::default().fg(th.ghost())),
         Span::styled(
             if app.vp.is_flat() {
                 String::new()
@@ -210,11 +215,11 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
                     app.vp.bearing.to_degrees().rem_euclid(360.0)
                 )
             },
-            Style::default().fg(DIM),
+            Style::default().fg(th.faint()),
         ),
         Span::styled(
             format!("depth:{} ", app.focus.label()),
-            Style::default().fg(ACCENT),
+            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)),
         ),
     ]);
 
@@ -223,10 +228,11 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn side_panel(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(FAINT));
+        .border_style(Style::default().fg(th.ghost()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -234,7 +240,7 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
     let hdr = |s: &str| {
         Line::from(Span::styled(
             s.to_string(),
-            Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.faint()).add_modifier(Modifier::BOLD),
         ))
     };
 
@@ -245,17 +251,17 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", if on { "▣" } else { "▢" }),
-                Style::default().fg(if on { FG } else { FAINT }),
+                Style::default().fg(if on { th.ink() } else { th.ghost() }),
             ),
             // The key that actually toggles it, straight from the table the key
             // handler reads. This printed `i + 1` and so advertised a digit --
             // which, embedded in the portfolio, moved you to another section.
-            Span::styled(format!("{} ", LAYER_KEYS[i]), Style::default().fg(FAINT)),
+            Span::styled(format!("{} ", LAYER_KEYS[i]), Style::default().fg(th.ghost())),
             Span::styled(
                 format!("{:<13}", layer.label()),
-                Style::default().fg(if on { FG } else { FAINT }),
+                Style::default().fg(if on { th.ink() } else { th.ghost() }),
             ),
-            Span::styled(format!("{n:>5}"), Style::default().fg(FAINT)),
+            Span::styled(format!("{n:>5}"), Style::default().fg(th.ghost())),
         ]));
     }
 
@@ -271,14 +277,15 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         (0.95, "far"),
     ] {
         let l = app.fog.factor(d).clamp(0.0, 1.0);
-        let c = Color::Rgb(
-            (232.0 * l) as u8,
-            (232.0 * l) as u8,
-            (226.0 * l) as u8,
-        );
+        // Through the theme, not composited here: this is a key to the map, so
+        // it has to be wrong in exactly the same direction the map is. Written
+        // out longhand it drew the paper ramp upside down -- near faint, far
+        // solid -- and a legend that disagrees with the thing it explains is
+        // worse than no legend.
+        let c = th.paint(crate::canvas::TINT_MONO as usize, l, true, false);
         lines.push(Line::from(vec![
             Span::styled(" ⣿⣿⣿⣿⣿⣿⣿⣿ ", Style::default().fg(c)),
-            Span::styled(tag.to_string(), Style::default().fg(FAINT)),
+            Span::styled(tag.to_string(), Style::default().fg(th.ghost())),
         ]));
     }
 
@@ -299,6 +306,7 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         ("(", "terrain"),
         ("x", "my location"),
         ("c", "colour / mono"),
+        ("i", "ink / light"),
         ("t", "labels"),
         ("p", "panel"),
         ("g", "recentre"),
@@ -306,8 +314,8 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         ("q", "quit"),
     ] {
         lines.push(Line::from(vec![
-            Span::styled(format!(" {k:<6}"), Style::default().fg(FG)),
-            Span::styled(v.to_string(), Style::default().fg(DIM)),
+            Span::styled(format!(" {k:<6}"), Style::default().fg(th.ink())),
+            Span::styled(v.to_string(), Style::default().fg(th.faint())),
         ]));
     }
 
@@ -315,6 +323,7 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -397,7 +406,7 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);
     app.stats.relief = relief_pts;
-    app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono);
+    app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono, th);
     app.frame_us = t0.elapsed().as_micros();
 
 }
@@ -409,13 +418,14 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
 /// place, and a picture of a place with somebody else's tour caption across it
 /// -- which is what it drew at first -- is a picture of nothing in particular.
 fn overlays(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     // The scalebar is an instrument, and instruments are chrome. It stayed in
     // `map_view` on the grounds that scale belongs to the map -- true of a map
     // you are driving, and wrong for a thumbnail that is trying to read as part
     // of the page rather than as a window onto one. A ruled bar in the corner is
     // the most frame-like thing on it.
     if let Some(sb) = scalebar_geom(area, app) {
-        draw_scalebar(f, area, &sb);
+        draw_scalebar(f, area, &sb, th);
     }
     place_card(f, area, app);
     search_box(f, area, app);
@@ -424,6 +434,7 @@ fn overlays(f: &mut Frame, area: Rect, app: &App) {
 
 /// The one-time nudge that says the map is not a picture.
 fn hint(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let a = app.hint_alpha();
     if a <= 0.01 || app.query.is_some() || area.width < 50 || area.height < 10 {
         return;
@@ -445,7 +456,7 @@ fn hint(f: &mut Frame, area: Rect, app: &App) {
         .map(|(s, key)| {
             Span::styled(
                 (*s).to_string(),
-                Style::default().fg(fade(if *key { CYAN } else { DIM }, a)),
+                Style::default().fg(fade(if *key { th.accent(crate::canvas::TINT_SELECT) } else { th.faint() }, a, th)),
             )
         })
         .collect();
@@ -453,8 +464,14 @@ fn hint(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Blend toward the page ground, for anything that fades in and out.
-fn fade(c: Color, a: f32) -> Color {
-    let (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) = (c, BG) else { return c };
+fn fade(c: Color, a: f32, th: Theme) -> Color {
+    // `rgb_of`, not a `Color::Rgb` pattern: the page comes back as a grey-ramp
+    // index, so matching on the variant silently returned the colour unfaded
+    // and the fade band stopped working entirely.
+    let (Some((r, g, b)), Some((br, bg, bb))) = (crate::canvas::rgb_of(c), crate::canvas::rgb_of(th.page()))
+    else {
+        return c;
+    };
     let mix = |v: u8, t: u8| (t as f32 + (v as f32 - t as f32) * a) as u8;
     crate::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
 }
@@ -465,6 +482,7 @@ fn fade(c: Color, a: f32) -> Color {
 /// looking for is usually somewhere on screen already, and a dialogue in the
 /// centre covers the thing you are trying to find.
 fn search_box(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let Some(q) = &app.query else { return };
     if area.width < 30 || area.height < 8 {
         return;
@@ -479,16 +497,16 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
     for row in 0..h {
         for col in 0..w {
             if let Some(c) = f.buffer_mut().cell_mut((x + col, y + row)) {
-                c.set_char(' ').set_style(Style::default().bg(BG));
+                c.set_char(' ').set_style(Style::default().bg(th.page()));
             }
         }
     }
 
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("find ", Style::default().fg(FAINT)),
-            Span::styled(q.clone(), Style::default().fg(FG).add_modifier(Modifier::BOLD)),
-            Span::styled("▌", Style::default().fg(CYAN)),
+            Span::styled("find ", Style::default().fg(th.ghost())),
+            Span::styled(q.clone(), Style::default().fg(th.ink()).add_modifier(Modifier::BOLD)),
+            Span::styled("▌", Style::default().fg(th.accent(crate::canvas::TINT_SELECT))),
         ])),
         Rect { x, y, width: w, height: 1 },
     );
@@ -500,7 +518,7 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
             "nothing by that name in what is loaded"
         };
         f.render_widget(
-            Paragraph::new(Span::styled(msg.to_string(), Style::default().fg(FAINT))),
+            Paragraph::new(Span::styled(msg.to_string(), Style::default().fg(th.ghost()))),
             Rect { x, y: y + 1, width: w, height: 1 },
         );
         return;
@@ -512,11 +530,11 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     if on { "› " } else { "  " },
-                    Style::default().fg(if on { ACCENT } else { FAINT }),
+                    Style::default().fg(if on { th.accent(crate::canvas::TINT_LANDMARK) } else { th.ghost() }),
                 ),
                 Span::styled(
                     hit.name.clone(),
-                    Style::default().fg(if on { FG } else { DIM }),
+                    Style::default().fg(if on { th.ink() } else { th.faint() }),
                 ),
             ])),
             Rect { x, y: y + 1 + i as u16, width: w.saturating_sub(10), height: 1 },
@@ -524,7 +542,7 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Span::styled(
                 hit.what.to_string(),
-                Style::default().fg(FAINT),
+                Style::default().fg(th.ghost()),
             ))
             .right_aligned(),
             Rect { x, y: y + 1 + i as u16, width: w, height: 1 },
@@ -540,6 +558,7 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
 /// chrome"; ground running out says "there is nothing up here but sky", which
 /// is also what the far distance of a tilted map actually looks like.
 fn place_card(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let Some((p, alpha)) = app.tour.card() else { return };
     if alpha <= 0.004 || area.width < 34 || area.height < 12 {
         return;
@@ -556,7 +575,7 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
 
     let rows = 4 + note.len() as u16;
     let band = rows + 2;
-    fade_band(f, area, band, 4, alpha);
+    fade_band(f, area, band, 4, alpha, th);
 
     let x = area.x + PAD;
     let mut y = area.y + 1;
@@ -581,7 +600,7 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
             [
                 Span::styled(
                     if here { "\u{25cf}" } else { "\u{00b7}" },
-                    Style::default().fg(dim(if here { ACCENT } else { FAINT }, alpha)),
+                    Style::default().fg(dim(if here { th.accent(crate::canvas::TINT_LANDMARK) } else { th.ghost() }, alpha, th)),
                 ),
                 Span::styled(" ", Style::default()),
             ]
@@ -590,35 +609,35 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
     line(f, y, pips.into_iter().map(|s| s.to_owned()).collect());
     right(f, y, vec![Span::styled(
         p.kind.to_uppercase(),
-        Style::default().fg(dim(FAINT, alpha)),
+        Style::default().fg(dim(th.ghost(), alpha, th)),
     )]);
 
     y += 1;
     line(f, y, vec![Span::styled(
         p.name.to_uppercase(),
-        Style::default().fg(dim(FG, alpha)).add_modifier(Modifier::BOLD),
+        Style::default().fg(dim(th.ink(), alpha, th)).add_modifier(Modifier::BOLD),
     )]);
     right(f, y, vec![Span::styled(
         p.years.clone(),
-        Style::default().fg(dim(ACCENT, alpha)),
+        Style::default().fg(dim(th.accent(crate::canvas::TINT_LANDMARK), alpha, th)),
     )]);
 
     y += 1;
     let (lon, lat) = p.lonlat;
     line(f, y, vec![Span::styled(
         format!("{}  \u{00b7}  {}", p.role, p.where_),
-        Style::default().fg(dim(DIM, alpha)),
+        Style::default().fg(dim(th.faint(), alpha, th)),
     )]);
     right(f, y, vec![Span::styled(
         format!("{:.3}\u{00b0}N {:.3}\u{00b0}E", lat, lon),
-        Style::default().fg(dim(FAINT, alpha)),
+        Style::default().fg(dim(th.ghost(), alpha, th)),
     )]);
 
     y += 2;
     for l in note {
         line(f, y, vec![Span::styled(
             l.clone(),
-            Style::default().fg(dim(DIM, alpha)),
+            Style::default().fg(dim(th.faint(), alpha, th)),
         )]);
         y += 1;
     }
@@ -633,7 +652,7 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
 ///
 /// `alpha` scales the whole effect, so as the caption fades out the map closes
 /// back over it instead of leaving a bald strip.
-fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32) {
+fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32, th: Theme) {
     let buf = f.buffer_mut();
     for dy in 0..(solid + ramp).min(area.height) {
         // How much of the map survives at this row, before alpha.
@@ -649,7 +668,7 @@ fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32) {
         }
         for dx in 0..area.width {
             let Some(cell) = buf.cell_mut((area.x + dx, area.y + dy)) else { continue };
-            let (fg, bg) = (toward_bg(cell.fg, k), toward_bg(cell.bg, k));
+            let (fg, bg) = (toward_bg(cell.fg, k, th), toward_bg(cell.bg, k, th));
             cell.set_style(Style::default().fg(fg).bg(bg));
         }
     }
@@ -661,16 +680,16 @@ fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32) {
 /// the renderer emits palette indices for neutral cells, and a match that only
 /// understood truecolor would leave the entire monochrome map unfaded while
 /// appearing to work on everything else.
-fn toward_bg(c: Color, k: f32) -> Color {
+fn toward_bg(c: Color, k: f32, th: Theme) -> Color {
     let Some((r, g, b)) = crate::canvas::rgb_of(c) else { return c };
-    let Color::Rgb(br, bg_, bb) = BG else { return c };
+    let Some((br, bg_, bb)) = crate::canvas::rgb_of(th.page()) else { return c };
     let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * k).round().clamp(0.0, 255.0) as u8;
     crate::canvas::ink(mix(r, br), mix(g, bg_), mix(b, bb))
 }
 
 /// Fade a colour toward the background by an opacity.
-fn dim(c: Color, alpha: f32) -> Color {
-    toward_bg(c, alpha.clamp(0.0, 1.0))
+fn dim(c: Color, alpha: f32, th: Theme) -> Color {
+    toward_bg(c, alpha.clamp(0.0, 1.0), th)
 }
 
 struct ScaleBar {
@@ -755,9 +774,9 @@ fn scalebar_geom(area: Rect, app: &App) -> Option<ScaleBar> {
     })
 }
 
-fn draw_scalebar(f: &mut Frame, area: Rect, sb: &ScaleBar) {
+fn draw_scalebar(f: &mut Frame, area: Rect, sb: &ScaleBar, th: Theme) {
     // A background strip keeps the map's braille from showing through the text.
-    let backing = Style::default().fg(DIM).bg(BG);
+    let backing = Style::default().fg(th.faint()).bg(th.page());
     let strip = Rect {
         x: area.x + sb.local.x,
         y: area.y + sb.local.y,
@@ -775,26 +794,27 @@ fn draw_scalebar(f: &mut Frame, area: Rect, sb: &ScaleBar) {
 }
 
 fn status(f: &mut Frame, area: Rect, app: &App) {
+    let th = app.theme;
     let mut left = vec![Span::styled(
         if app.pinned.is_some() { " PINNED " } else { " NORMAL " },
         Style::default()
-            .fg(BG)
-            .bg(if app.pinned.is_some() { CYAN } else { FG })
+            .fg(th.page())
+            .bg(if app.pinned.is_some() { th.accent(crate::canvas::TINT_SELECT) } else { th.ink() })
             .add_modifier(Modifier::BOLD),
     )];
     left.push(Span::styled("  ", Style::default()));
 
     if let Some(msg) = &app.toast {
-        left.push(Span::styled(msg.clone(), Style::default().fg(ACCENT)));
+        left.push(Span::styled(msg.clone(), Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK))));
     } else if let Some(info) = app.highlight().and_then(|id| app.feature_info(id)) {
         left.push(Span::styled(
             info,
-            Style::default().fg(if app.pinned.is_some() { CYAN } else { FG }),
+            Style::default().fg(if app.pinned.is_some() { th.accent(crate::canvas::TINT_SELECT) } else { th.ink() }),
         ));
     } else {
         left.push(Span::styled(
             "drag to pan · wheel to zoom · ? for help",
-            Style::default().fg(DIM),
+            Style::default().fg(th.faint()),
         ));
     }
 
@@ -807,11 +827,11 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
                 app.stats.labels,
                 app.source.resident() / 1000
             ),
-            Style::default().fg(FAINT),
+            Style::default().fg(th.ghost()),
         ),
         Span::styled(
             format!("{:.1} ms ", app.frame_us as f64 / 1000.0),
-            Style::default().fg(DIM),
+            Style::default().fg(th.faint()),
         ),
     ]);
 
@@ -819,7 +839,7 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(right).right_aligned(), area);
 }
 
-fn help(f: &mut Frame, area: Rect) {
+fn help(f: &mut Frame, area: Rect, th: Theme) {
     let w = 60.min(area.width.saturating_sub(4));
     let h = 24.min(area.height.saturating_sub(4));
     let popup = Rect {
@@ -833,26 +853,26 @@ fn help(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(DIM))
-        .style(Style::default().bg(BG))
+        .border_style(Style::default().fg(th.faint()))
+        .style(Style::default().bg(th.page()))
         .title(Span::styled(
             " termap ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(popup);
     f.render_widget(block, popup);
 
     let row = |k: &str, v: &str| {
         Line::from(vec![
-            Span::styled(format!("  {k:<12}"), Style::default().fg(FG)),
-            Span::styled(v.to_string(), Style::default().fg(DIM)),
+            Span::styled(format!("  {k:<12}"), Style::default().fg(th.ink())),
+            Span::styled(v.to_string(), Style::default().fg(th.faint())),
         ])
     };
 
     let lines = vec![
         Line::from(Span::styled(
             "  A map drawn in braille subpixels.",
-            Style::default().fg(DIM).add_modifier(Modifier::ITALIC),
+            Style::default().fg(th.faint()).add_modifier(Modifier::ITALIC),
         )),
         Line::default(),
         row("drag", "pan the map"),
@@ -868,6 +888,7 @@ fn help(f: &mut Frame, area: Rect) {
         row("(", "terrain relief"),
         row("v", "relief / contour / hachure / shade"),
         row("x", "my location"),
+        row("i", "ink on paper / light on black"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),
         row("g", "recentre on the data"),
@@ -876,7 +897,7 @@ fn help(f: &mut Frame, area: Rect) {
         Line::default(),
         Line::from(Span::styled(
             "  The experience tour",
-            Style::default().fg(ACCENT),
+            Style::default().fg(th.accent(crate::canvas::TINT_LANDMARK)),
         )),
         row("e", "fly the tour / leave it"),
         row("n  tab", "next place"),
@@ -945,8 +966,8 @@ mod tests {
 
         for c in cases {
             assert_eq!(
-                toward_bg(c, 0.0),
-                crate::canvas::ink(8, 9, 11),
+                toward_bg(c, 0.0, Theme::Night),
+                Theme::Night.page(),
                 "{c:?} survived a full fade"
             );
         }
@@ -959,7 +980,7 @@ mod tests {
     #[test]
     fn the_band_dissolves_whatever_was_under_it() {
         let ground = crate::canvas::ink(200, 200, 196);
-        let cleared = crate::canvas::ink(8, 9, 11);
+        let cleared = Theme::Night.page();
         let mut term = Terminal::new(TestBackend::new(40, 20)).unwrap();
 
         term.draw(|f| {
@@ -971,7 +992,7 @@ mod tests {
                     }
                 }
             }
-            fade_band(f, area, 4, 3, 1.0);
+            fade_band(f, area, 4, 3, 1.0, Theme::Night);
         })
         .unwrap();
 

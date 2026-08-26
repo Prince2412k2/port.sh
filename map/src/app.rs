@@ -81,6 +81,8 @@ pub struct App {
     pub show_labels: bool,
     /// Force the whole map to the paper-white tint.
     pub mono: bool,
+    /// Which ground the map is drawn on: light on black, or ink on paper.
+    pub theme: crate::canvas::Theme,
     pub show_terrain: bool,
     /// How the ground surface is drawn -- see `view::Ground`.
     pub ground: crate::view::Ground,
@@ -152,6 +154,7 @@ impl App {
             show_panel: true,
             show_labels: true,
             mono: true,
+            theme: Default::default(),
             show_terrain: true,
             ground: Default::default(),
             relief: Default::default(),
@@ -674,6 +677,10 @@ impl App {
                 self.toast = Some(
                     if self.mono { "colour: mono" } else { "colour: by kind" }.into(),
                 );
+            }
+            KeyCode::Char('i') => {
+                self.theme = self.theme.next();
+                self.toast = Some(format!("theme: {}", self.theme.label()));
             }
             KeyCode::Char('p') => {
                 self.show_panel = !self.show_panel;

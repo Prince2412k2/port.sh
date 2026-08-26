@@ -16,6 +16,7 @@ pub struct Opts {
     pub width: u16,
     pub height: u16,
     pub plain: bool,
+    pub theme: Option<crate::canvas::Theme>,
     pub zoom: Option<f64>,
     pub cursor: Option<(u16, u16)>,
     pub focus: Option<FocusMode>,
@@ -39,6 +40,9 @@ pub fn render(app: &mut App, o: &Opts) -> std::io::Result<()> {
     }
     if let Some(m) = o.focus {
         app.focus = m;
+    }
+    if let Some(t) = o.theme {
+        app.theme = t;
     }
     if let Some(g) = o.roads {
         app.road_glyph = g;

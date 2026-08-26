@@ -63,12 +63,125 @@ pub const TINT_COAST: u8 = 9;
 pub const TINT_BORDER: u8 = 10;
 pub const TINT_HOME: u8 = 11;
 
-/// Base colour per tint, at full brightness.
+/// Which way round the map is drawn.
+///
+/// Not a palette swap. On a dark terminal a mark is *added* to the ground --
+/// more of it means brighter -- and on paper a mark is taken out of the page,
+/// so more of it means darker. Every colour in the renderer is computed as a
+/// strength between 0 and 1, and the two themes spend that strength in
+/// opposite directions. Swapping only the numbers would give white ink on
+/// white paper.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Theme {
+    /// Light on black: the terminal's own ground.
+    #[default]
+    Night,
+    /// Ink on paper.
+    Paper,
+}
+
+/// The page: what a cell looks like where nothing was drawn.
+///
+/// The paper is warm on purpose and it is not free. `ink()` encodes neutral
+/// greys as xterm ramp indices, twelve bytes, and anything with hue as
+/// truecolor, twenty -- and a cream page puts hue into every cell of the map,
+/// background included. A full repaint of Ahmedabad goes 48 KB to 71 KB.
+///
+/// Taken knowingly. A neutral page would ride the ramp and be cheap, but the
+/// ramp *is* neutral, so it would render as flat light grey and the one thing
+/// asked for here was that the background look like paper. Night is untouched
+/// and stays the default, so nobody pays this who did not ask for it.
+const PAGE: [(u8, u8, u8); 2] = [
+    (8, 9, 11),      // night: near-black, a touch cool
+    (238, 234, 224), // paper: warm cream, off-white so it is not a glare
+];
+
+impl Theme {
+    pub fn next(self) -> Theme {
+        match self {
+            Theme::Night => Theme::Paper,
+            Theme::Paper => Theme::Night,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Night => "night",
+            Theme::Paper => "paper",
+        }
+    }
+
+    /// The colour of an untouched cell.
+    pub fn page(self) -> Color {
+        let (r, g, b) = PAGE[self as usize];
+        ink(r, g, b)
+    }
+
+    /// The colour of a mark at full strength: chrome text, the strongest rule.
+    pub fn ink(self) -> Color {
+        self.grey(1.0)
+    }
+
+    /// A mark at the strength chrome uses for things it is not asking you to
+    /// read yet -- key hints, inactive rows, the scalebar's rule.
+    pub fn faint(self) -> Color {
+        self.grey(0.42)
+    }
+
+    /// Quieter still: rules, separators, the things that are structure rather
+    /// than content.
+    pub fn ghost(self) -> Color {
+        self.grey(0.26)
+    }
+
+    /// Neutral ink at an arbitrary strength.
+    pub fn grey(self, strength: f32) -> Color {
+        self.paint(TINT_MONO as usize, strength, false, false)
+    }
+
+    /// A tint at full strength, exempt from monochrome: the two accents chrome
+    /// uses to mean "this one" and "you are here".
+    pub fn accent(self, tint: u8) -> Color {
+        self.paint(tint as usize, 1.0, false, true)
+    }
+
+    fn tints(self) -> &'static [(u8, u8, u8); 12] {
+        match self {
+            Theme::Night => &TINT_NIGHT,
+            Theme::Paper => &TINT_PAPER,
+        }
+    }
+
+    /// A tint at a strength, as the colour that actually goes on the cell.
+    ///
+    /// `lum` is how much of the mark is there: coverage times depth haze. On
+    /// night that scales the tint up from black. On paper it pulls the page
+    /// down toward the ink. Same number, opposite direction, and this is the
+    /// only place in the renderer that needs to know which way round it is.
+    ///
+    /// `keep` exempts a tint from monochrome. Selection and position answer
+    /// "which one" and "where am I", not "what kind of thing is this".
+    pub fn paint(self, tint: usize, lum: f32, mono: bool, keep: bool) -> Color {
+        let table = self.tints();
+        let (r, g, b) = if mono && !keep { table[0] } else { table[tint] };
+        let l = quantise_for(lum, r, g, b);
+        match self {
+            Theme::Night => ink((r as f32 * l) as u8, (g as f32 * l) as u8, (b as f32 * l) as u8),
+            Theme::Paper => {
+                let (pr, pg, pb) = PAGE[1];
+                let mix = |page: u8, tint: u8| (page as f32 + (tint as f32 - page as f32) * l) as u8;
+                ink(mix(pr, r), mix(pg, g), mix(pb, b))
+            }
+        }
+    }
+}
+
+/// Base colour per tint, at full brightness, on black.
 ///
 /// Every hue is heavily desaturated and they sit in a narrow luminance band, so
 /// the map reads as a tinted technical drawing rather than a chart. Hue carries
 /// *kind*; brightness still carries depth.
-const TINT_RGB: [(u8, u8, u8); 12] = [
+const TINT_NIGHT: [(u8, u8, u8); 12] = [
     (232, 232, 226), // mono: paper white, a hair warm so it doesn't glare
     (255, 176, 64),  // landmark amber
     (110, 224, 255), // selection cyan
@@ -81,6 +194,29 @@ const TINT_RGB: [(u8, u8, u8); 12] = [
     (196, 220, 236), // coastline: cool and bright, the structural line
     (214, 158, 178), // administrative border: dusty rose, not a road, not water
     (255, 108, 92),  // your position: the one thing that is never terrain
+];
+
+/// The same twelve on paper: what the mark is at full strength, which here
+/// means the darkest the page gets rather than the brightest.
+///
+/// Not the night table inverted. Inverting hue gives the complementary colour,
+/// so water comes out orange. These are the same hues taken down instead of
+/// up, and the luminance order is deliberately *reversed*: the motorway is the
+/// brightest thing on black and the darkest on paper, because on both grounds
+/// the answer to "which is loudest" has to be the same road.
+const TINT_PAPER: [(u8, u8, u8); 12] = [
+    (34, 32, 30),    // mono: warm near-black, the pen
+    (168, 96, 8),    // landmark amber
+    (0, 104, 140),   // selection cyan
+    (64, 108, 156),  // water
+    (28, 26, 24),    // motorway / trunk: the darkest line on the page
+    (92, 68, 36),    // primary / secondary: sepia
+    (118, 116, 112), // tertiary / residential: plain grey, and it stays quiet
+    (86, 60, 132),   // railway: violet
+    (56, 100, 56),   // parks and green landuse
+    (52, 92, 124),   // coastline: the structural line
+    (140, 62, 92),   // administrative border: dusty rose
+    (206, 36, 20),   // your position
 ];
 
 /// How hard a tint argues for the cell's colour, against how much of it it
@@ -629,7 +765,7 @@ impl Canvas {
     }
 
     /// Collapse the subpixel buffer into glyphs and colours.
-    pub fn resolve(&self, buf: &mut Buffer, area: Rect, fog: &Fog, mono: bool) {
+    pub fn resolve(&self, buf: &mut Buffer, area: Rect, fog: &Fog, mono: bool, theme: Theme) {
         for cy in 0..self.ch.min(area.height as usize) {
             for cx in 0..self.cw.min(area.width as usize) {
                 let (sx, sy) = (area.x + cx as u16, area.y + cy as u16);
@@ -638,19 +774,11 @@ impl Canvas {
                     // Selection and position keep their colour in monochrome:
                     // they are answers to "which one" and "where am I", not
                     // part of the map's palette.
-                    let (r, g, b) = if mono && o.tint != TINT_SELECT && o.tint != TINT_HOME {
-                        TINT_RGB[0]
-                    } else {
-                        TINT_RGB[o.tint as usize]
-                    };
+                    let keep = o.tint == TINT_SELECT || o.tint == TINT_HOME;
                     // Labels are exempt from the haze and the outline on
                     // purpose: they are ink on the page, not things in it.
-                    let l = quantise_for(o.lum, r, g, b);
-                    let mut style = Style::default().fg(ink(
-                        (r as f32 * l) as u8,
-                        (g as f32 * l) as u8,
-                        (b as f32 * l) as u8,
-                    ));
+                    let mut style =
+                        Style::default().fg(theme.paint(o.tint as usize, o.lum, mono, keep));
                     if o.bold {
                         style = style.add_modifier(Modifier::BOLD);
                     }
@@ -662,14 +790,9 @@ impl Canvas {
 
                 if let Some(l) = self.lines[cy * self.cw + cx] {
                     let table = if l.heavy { &LINE_HEAVY } else { &LINE_LIGHT };
-                    let (r, g, b) = if mono { TINT_RGB[0] } else { TINT_RGB[l.tint as usize] };
-                    let lum = quantise_for(fog.factor(l.depth), r, g, b);
+                    let fg = theme.paint(l.tint as usize, fog.factor(l.depth), mono, false);
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
-                        cell.set_char(table[(l.mask & 15) as usize]).set_fg(ink(
-                            (r as f32 * lum) as u8,
-                            (g as f32 * lum) as u8,
-                            (b as f32 * lum) as u8,
-                        ));
+                        cell.set_char(table[(l.mask & 15) as usize]).set_fg(fg);
                     }
                     continue;
                 }
@@ -679,7 +802,7 @@ impl Canvas {
                 let mut sum = 0.0f32;
                 let mut lit = 0u32;
                 let mut near = DEPTH_CLEAR;
-                let mut weight = [0.0f32; TINT_RGB.len()];
+                let mut weight = [0.0f32; TINT_NIGHT.len()];
                 let mut solid_w = 0.0f32;
                 let mut dot_w = 0.0f32;
                 let mut hatch_w = 0.0f32;
@@ -777,14 +900,8 @@ impl Canvas {
                             let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
                             let keep =
                                 tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
-                            let (r, g, b) =
-                                if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
-                            let l = quantise_for(lum, r, g, b);
-                            cell.set_char(hatch_of(theta)).set_fg(ink(
-                                (r as f32 * l) as u8,
-                                (g as f32 * l) as u8,
-                                (b as f32 * l) as u8,
-                            ));
+                            cell.set_char(hatch_of(theta))
+                                .set_fg(theme.paint(tint, lum, mono, keep));
                         }
                         continue;
                     }
@@ -799,13 +916,7 @@ impl Canvas {
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
                         let lum = (0.40 + 0.60 * mean.powf(0.55)) * fog.factor(near);
                         let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
-                        let (r, g, b) = if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
-                        let l = quantise_for(lum, r, g, b);
-                        cell.set_char(SHADES[k]).set_fg(ink(
-                            (r as f32 * l) as u8,
-                            (g as f32 * l) as u8,
-                            (b as f32 * l) as u8,
-                        ));
+                        cell.set_char(SHADES[k]).set_fg(theme.paint(tint, lum, mono, keep));
                     }
                     continue;
                 }
@@ -851,13 +962,7 @@ impl Canvas {
                 // "which one" and "where am I", so they keep their colour even
                 // when the map is deliberately monochrome.
                 let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
-                let (r, g, b) = if mono && !keep { TINT_RGB[0] } else { TINT_RGB[tint] };
-                let l = quantise_for(lum, r, g, b);
-                let color = ink(
-                    (r as f32 * l) as u8,
-                    (g as f32 * l) as u8,
-                    (b as f32 * l) as u8,
-                );
+                let color = theme.paint(tint, lum, mono, keep);
 
                 if let Some(cell) = buf.cell_mut((sx, sy)) {
                     cell.set_char(ch).set_fg(color);
@@ -865,6 +970,79 @@ impl Canvas {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod theme_tests {
+    use super::*;
+
+    fn lum_of(c: Color) -> f32 {
+        let (r, g, b) = rgb_of(c).expect("the renderer emitted a colour with no rgb");
+        0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+    }
+
+    /// A mark that fades out has to disappear into the ground it is on.
+    ///
+    /// The bug this guards is the whole reason `Theme` exists rather than a
+    /// swapped palette: every colour here is a strength between 0 and 1, and
+    /// the two themes spend it in opposite directions. Spend it the night way
+    /// on paper and a mark at zero strength comes out black -- the faintest
+    /// possible thing becoming the loudest.
+    #[test]
+    fn a_mark_at_no_strength_is_the_page_it_is_drawn_on() {
+        for theme in [Theme::Night, Theme::Paper] {
+            for tint in 0..TINT_NIGHT.len() {
+                let gone = lum_of(theme.paint(tint, 0.0, false, false));
+                let page = lum_of(theme.page());
+                assert!(
+                    (gone - page).abs() <= 12.0,
+                    "{theme:?} tint {tint} at zero strength is {gone} against a page of {page}"
+                );
+            }
+        }
+    }
+
+    /// Strength means "more of the mark" on both grounds, which is more ink on
+    /// paper and more light on black -- opposite directions on the same axis.
+    #[test]
+    fn strength_moves_away_from_the_page_whichever_ground_it_is() {
+        for theme in [Theme::Night, Theme::Paper] {
+            let page = lum_of(theme.page());
+            let mut last = 0.0f32;
+            for step in 1..=5 {
+                let away = (lum_of(theme.grey(step as f32 / 5.0)) - page).abs();
+                assert!(
+                    away >= last,
+                    "{theme:?} at {step}/5 is {away} from the page, less than {last} before it"
+                );
+                last = away;
+            }
+            assert!(last > 60.0, "{theme:?} never gets far from its page: {last}");
+        }
+    }
+
+    /// The loudest road is the same road on both grounds.
+    ///
+    /// The paper table is not the night table inverted -- inverting hue turns
+    /// water orange -- so the ordering has to be asserted rather than assumed.
+    /// A motorway is the brightest thing on black and has to be the darkest on
+    /// paper, because on both the answer to "which line is shouting" is the
+    /// same line.
+    #[test]
+    fn the_motorway_is_the_loudest_line_on_either_ground() {
+        for theme in [Theme::Night, Theme::Paper] {
+            let page = lum_of(theme.page());
+            let contrast = |t: u8| (lum_of(theme.paint(t as usize, 1.0, false, false)) - page).abs();
+            let road = contrast(TINT_MAJOR);
+            for quieter in [TINT_MEDIUM, TINT_MINOR, TINT_GREEN, TINT_WATER] {
+                assert!(
+                    road > contrast(quieter),
+                    "{theme:?}: tint {quieter} argues louder than the motorway"
+                );
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -984,7 +1162,7 @@ mod nan_tests {
         c.cov[2 * c.sw + 3] = 0.9;
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
         let fog = Fog { near: 1.0, far: 0.3, gamma: 1.0 };
-        c.resolve(&mut buf, Rect::new(0, 0, 8, 4), &fog, false);
+        c.resolve(&mut buf, Rect::new(0, 0, 8, 4), &fog, false, Theme::Night);
     }
 }
 
@@ -1075,7 +1253,7 @@ mod tint_tests {
         let mut c = Canvas::new(2, 1);
         cell_paint(&mut c);
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
-        c.resolve(&mut buf, Rect::new(0, 0, 2, 1), &Fog { near: 1.0, far: 1.0, gamma: 1.0 }, false);
+        c.resolve(&mut buf, Rect::new(0, 0, 2, 1), &Fog { near: 1.0, far: 1.0, gamma: 1.0 }, false, Theme::Night);
         buf.cell((0, 0)).unwrap().fg
     }
 
@@ -1155,7 +1333,8 @@ mod tint_tests {
     /// not -- and it would be whichever was added last.
     #[test]
     fn every_tint_has_a_pull() {
-        assert_eq!(TINT_PULL.len(), TINT_RGB.len());
+        assert_eq!(TINT_PULL.len(), TINT_NIGHT.len());
+        assert_eq!(TINT_PAPER.len(), TINT_NIGHT.len());
         for (i, p) in TINT_PULL.iter().enumerate() {
             assert!(*p > 0.0, "tint {i} would never win a cell it was alone in");
         }

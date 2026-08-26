@@ -30,6 +30,7 @@ fn main() -> io::Result<()> {
                 println!("usage: termap [PATH.tmap] [options]\n");
                 println!("  --snapshot WxH   draw one frame to stdout and exit");
                 println!("  --plain          snapshot without colour");
+                println!("  --theme MODE     night | paper");
                 println!("  --zoom Z         start at zoom Z");
                 println!("  --cursor X,Y     place the focus cursor (snapshot only)");
                 println!("  --focus MODE     depth focus: off | subtle | strong");
@@ -56,6 +57,7 @@ fn main() -> io::Result<()> {
                     width: w.parse().unwrap_or(180),
                     height: h.parse().unwrap_or(48),
                     plain: false,
+                    theme: None,
                     zoom: None,
                     cursor: None,
                     focus: None,
@@ -69,6 +71,16 @@ fn main() -> io::Result<()> {
                     from: None,
                     at: None,
                 });
+            }
+            "--theme" => {
+                let t = match args.next().as_deref() {
+                    Some("paper") | Some("light") => Some(canvas::Theme::Paper),
+                    Some("night") | Some("dark") => Some(canvas::Theme::Night),
+                    _ => None,
+                };
+                if let Some(s) = shot.as_mut() {
+                    s.theme = t;
+                }
             }
             "--plain" => {
                 if let Some(s) = shot.as_mut() {

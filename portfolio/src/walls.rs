@@ -36,7 +36,7 @@
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
-use termap::canvas::{Brush, Canvas, Fog, MAT_DOT, MAT_SOLID, TINT_MONO};
+use termap::canvas::{Brush, Canvas, Fog, Theme, MAT_DOT, MAT_SOLID, TINT_MONO};
 use termap::raster::{self, Pen};
 
 /// The three planes, as depths.
@@ -156,6 +156,7 @@ pub fn draw(
         // twenty. A third is the point where a far hill is still a hill.
         &Fog { near: 1.0, far: 0.36, gamma: 1.15 },
         true,
+        Theme::Night,
     );
     true
 }

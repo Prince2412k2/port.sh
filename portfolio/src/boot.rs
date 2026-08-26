@@ -75,7 +75,7 @@ pub fn render(f: &mut Frame, area: Rect, t: f64) {
 
 /// The horizon: contour lines that start choppy and lie down.
 fn sea(f: &mut Frame, area: Rect, t: f64, swell: f64, alpha: f32) {
-    use termap::canvas::{Canvas, Fog, MAT_DOT, TINT_MONO};
+    use termap::canvas::{Canvas, Fog, Theme, MAT_DOT, TINT_MONO};
     use termap::raster::{self, Pen};
 
     if alpha <= 0.01 {
@@ -115,5 +115,5 @@ fn sea(f: &mut Frame, area: Rect, t: f64, swell: f64, alpha: f32) {
             prev = Some(p);
         }
     }
-    canvas.resolve(f.buffer_mut(), area, &Fog::default(), true);
+    canvas.resolve(f.buffer_mut(), area, &Fog::default(), true, Theme::Night);
 }
