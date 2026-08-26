@@ -175,16 +175,6 @@ const FLAT_LIGHT: f32 = 0.70;
 const RIDGE_SHARE: f32 = 0.07;
 const VALLEY_SHARE: f32 = 0.05;
 
-/// How far the skyline may jump between one grid column and the next before
-/// the gap is read as the edge of the slab rather than as a cliff, in
-/// subpixels.
-const SKY_BREAK: f64 = 24.0;
-const SKY_ALPHA: f32 = 0.98;
-
-/// How far above the horizon ground has to stand to count as a peak rather
-/// than as the cut edge of the sampled slab, in subpixels.
-const SKY_RISE: f64 = 3.0;
-
 const RIDGE_ALPHA: f32 = 0.92;
 const VALLEY_ALPHA: f32 = 0.30;
 
@@ -701,121 +691,8 @@ impl Relief {
             }
         }
 
-        strokes += self.skyline(canvas, vp, world, lift);
         self.contours(canvas, vp, world, lift);
         masses + strokes
-    }
-
-    /// The edge where the ground stops and the sky starts.
-    ///
-    /// The one cue the reference pictures lean on hardest and the one thing
-    /// this renderer had no way to draw. Every mark in a frame of terrain says
-    /// "there is ground here"; not one of them says "and none above this
-    /// line", which is what actually makes a photograph of a mountain read as
-    /// a mountain in one glance.
-    ///
-    /// It needs no detection and no threshold, which is the good part. Once
-    /// the camera is tilted the skyline is just the upper envelope of the
-    /// projected surface: walk each column of the sampling grid, keep the
-    /// topmost point, join them up. Exact, and one pass over samples that have
-    /// already been projected.
-    ///
-    /// Nothing is drawn in plan view, and that is not a limitation to fix
-    /// later. Looking straight down there is no "behind the mountain" for a
-    /// silhouette to be an edge against -- the frame is ground everywhere by
-    /// definition. A skyline is a thing an oblique view has and a map does not.
-    fn skyline(
-        &self,
-        canvas: &mut Canvas,
-        vp: &Viewport,
-        world: &[[f64; 2]],
-        lift: &Lift,
-    ) -> usize {
-        if vp.is_flat() {
-            return 0;
-        }
-        let &Lift { datum, exag, m_per_world, strength } = lift;
-        let plate = vp.plate();
-
-        // Topmost projected point per grid column: (screen point, depth).
-        let mut sky: Vec<Option<([f64; 2], f32)>> = vec![None; self.gw];
-        for (gx, top) in sky.iter_mut().enumerate() {
-            for gy in 0..self.gh {
-                let i = gy * self.gw + gx;
-                let h = self.heights[i];
-                if h < 1.0 {
-                    continue;
-                }
-                let m = vp.plane_of(world[i]);
-                if m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2] {
-                    continue;
-                }
-                let hw = (h - datum) as f64 * exag / m_per_world;
-                let (sp, depth) = vp.project3(world[i], hw);
-                if !depth.is_finite() || !sp[1].is_finite() {
-                    continue;
-                }
-                match *top {
-                    Some((p, _)) if p[1] <= sp[1] => {}
-                    _ => *top = Some((sp, depth)),
-                }
-            }
-        }
-
-        // Where the ground merely *stops* rather than rises.
-        //
-        // The slab is a rectangular clip in plane coords, so its far edge
-        // projects to a straight line and the raw envelope is that line for
-        // most of its length -- a ruled bar across the frame, which is what
-        // the first version drew. That edge is a fact about the clip, not
-        // about the mountain. The silhouette worth drawing is only the part
-        // that stands above it, so the flat majority sets the datum and
-        // anything that clears it by a margin is a peak.
-        let mut level: Vec<f64> = sky.iter().flatten().map(|(p, _)| p[1]).collect();
-        if level.is_empty() {
-            return 0;
-        }
-        level.sort_by(f64::total_cmp);
-        let horizon = level[level.len() / 2];
-
-        let mut drawn = 0usize;
-        for pair in sky.windows(2) {
-            let [Some((a, da)), Some((b, db))] = pair else { continue };
-            let (a, b, da, db) = (*a, *b, *da, *db);
-            // Screen y grows downward, so above the horizon is a smaller y.
-            if a[1] > horizon - SKY_RISE && b[1] > horizon - SKY_RISE {
-                continue;
-            }
-            // A step taller than this is the edge of the sampled slab rather
-            // than a cliff, and joining across it draws a wall out of nothing.
-            if (b[1] - a[1]).abs() > SKY_BREAK {
-                continue;
-            }
-            crate::raster::line(
-                canvas,
-                a,
-                b,
-                &crate::raster::Pen {
-                    width: 1.0,
-                    alpha: SKY_ALPHA * strength,
-                    depth: da.min(db),
-                    tint: TINT_GREEN,
-                    // Solid, and the only place in the ground pass that asks
-                    // for it. The skyline is the top of the hierarchy: if one
-                    // mark on the frame is going to be a whole cell of ink,
-                    // it is this one.
-                    mat: crate::canvas::MAT_SOLID,
-                    pick: u32::MAX,
-                    // Nothing can be in front of the topmost thing in its
-                    // column, so there is nothing to test against -- and a
-                    // z-fight with the ground it is the edge of would break
-                    // the line exactly where it matters.
-                    behind: crate::canvas::Behind::Ignore,
-                },
-            );
-            drawn += 1;
-        }
-        drawn
     }
 
     /// Is this the top of its ridge, measured across the ridge?
@@ -1427,68 +1304,6 @@ mod tests {
         for x in [2, 3, 5, 6] {
             assert!(!crest(x), "the flank at {x} was taken as a crest");
         }
-    }
-
-    /// A tilted view of a range gets a skyline; a map looking straight down
-    /// does not, and that is geometry rather than a gap.
-    ///
-    /// Counted off the resolved buffer rather than from the pass's return
-    /// value, so what is asserted is that the silhouette reached the screen.
-    /// Quadrant blocks are the tell: the skyline is the only thing the ground
-    /// pass draws in `MAT_SOLID`, and there is no basemap in this test to
-    /// contribute any.
-    ///
-    /// Run against the shipped heightmap over Zanskar, because the question is
-    /// whether real ground produces an edge -- a synthetic hill would only
-    /// prove the arithmetic, and the arithmetic was never the part in doubt.
-    /// Skipped, not failed, where the data is absent.
-    #[test]
-    fn a_tilted_range_has_a_skyline_and_a_plan_view_has_none() {
-        let Some(p) = crate::paths::data_file("india.tmhg") else { return };
-        let t = crate::terrain::Terrain::open(&p).unwrap();
-
-        let solids = |tilt: f64| {
-            let mut vp = Viewport::new(crate::geo::lonlat_to_world(76.89, 33.47), 11.0);
-            vp.sw = 300.0;
-            vp.sh = 152.0;
-            vp.tilt = tilt;
-            let mut canvas = Canvas::new(150, 38);
-            Relief::default().draw(
-                &t,
-                &mut canvas,
-                &vp,
-                Plot {
-                    datum: 3500.0,
-                    exag: crate::view::exaggeration(11.0),
-                    ground: Ground::Massif,
-                    strength: 1.0,
-                },
-            );
-            let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(
-                0, 0, 150, 38,
-            ));
-            canvas.resolve(
-                &mut buf,
-                ratatui::layout::Rect::new(0, 0, 150, 38),
-                &crate::canvas::Fog::default(),
-                true,
-                crate::canvas::Theme::Night,
-            );
-            // Block elements, minus the shade ladder the mass layer draws
-            // with. `░▒▓█` live in the same Unicode block as the quadrants,
-            // so counting the block wholesale counted the masses too and the
-            // plan view came back with 466 "silhouette" cells.
-            buf.content()
-                .iter()
-                .filter(|c| {
-                    c.symbol().chars().next().is_some_and(|ch| {
-                        ('\u{2580}'..='\u{259F}').contains(&ch) && !"░▒▓█".contains(ch)
-                    })
-                })
-                .count()
-        };
-        assert_eq!(solids(0.0), 0, "a plan view drew a silhouette against nothing");
-        assert!(solids(30.0_f64.to_radians()) > 8, "a tilted range drew no skyline");
     }
 
     /// Round numbers only. A map whose lines are 37 m apart cannot be counted.
