@@ -427,6 +427,14 @@ impl Relief {
             Some(([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], level as f64))
         };
 
+        // Where each index contour's height gets written, and whether it has
+        // been written yet. A contour map without numbers on it is a map of
+        // shape, not of height: you can see that the ground rises without ever
+        // learning what to. One label per index line is the printed-map
+        // convention and it is also all there is room for.
+        // (level index, distance from mid-screen, height, cell x, cell y)
+        let mut labelled: Vec<(i32, f64, f32, f64, f64)> = Vec::new();
+
         let first = (lo / step).ceil() as i32;
         let last = (hi / step).floor() as i32;
         for k in first..=last {
@@ -478,9 +486,73 @@ impl Relief {
                                 occlude: false,
                             },
                         );
+
+
+                        // The height itself, once per index contour.
+                        //
+                        // Placed on a near-horizontal run of the line: numbers
+                        // set across a steep segment sit at an angle to it and
+                        // read as though they belong to something else, and a
+                        // contour is nearly always horizontal *somewhere* on
+                        // screen. Nothing is drawn if there is no such run, and
+                        // a level with no room simply goes unlabelled -- an
+                        // unlabelled line is a small loss, a number in the wrong
+                        // place is a wrong answer.
+                        // A candidate spot for this level's number. Collected
+                        // rather than drawn, because the scan runs top-down and
+                        // taking the first hit put every label in the top row
+                        // of the frame -- six heights in a line along the sky,
+                        // none of them near the contour it belonged to.
+                        //
+                        // Only near-horizontal runs qualify: a number set
+                        // across a steep segment sits at an angle to it and
+                        // reads as belonging to something else.
+                        if (pb[1] - pa[1]).abs() < 2.0 {
+                            let cw = crate::canvas::SUB_X as f64;
+                            let chh = crate::canvas::SUB_Y as f64;
+                            let (cx, cy) = ((pa[0] + pb[0]) * 0.5 / cw, pa[1] / chh);
+                            if cx >= 0.0 && cy >= 0.0 {
+                                let (mid_x, mid_y) =
+                                    (canvas.cw as f64 * 0.5, canvas.ch as f64 * 0.5);
+                                let d = (cx - mid_x).hypot(cy - mid_y);
+                                match labelled.iter().position(|c| c.0 == k) {
+                                    Some(at) if labelled[at].1 <= d => {}
+                                    Some(at) => labelled[at] = (k, d, level, cx, cy),
+                                    None => labelled.push((k, d, level, cx, cy)),
+                                }
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        // The numbers, once every level is known and the best spot for each has
+        // been found. Nearest the middle first, so that when two collide the one
+        // that keeps its place is the one the eye was going to look at anyway.
+        labelled.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut taken: Vec<(usize, usize, usize)> = Vec::new();
+        for &(_, _, level, cx, cy) in &labelled {
+            let text = format!("{}", level as i32);
+            let (cx, cy) = (cx as usize, cy as usize);
+            if cx + text.len() + 1 >= canvas.cw || cy >= canvas.ch {
+                continue;
+            }
+            // One clear cell either side, so a height never abuts another and
+            // reads as a longer number than it is.
+            if taken.iter().any(|&(tx, ty, tw)| {
+                ty == cy && cx <= tx + tw + 1 && tx <= cx + text.len() + 1
+            }) {
+                continue;
+            }
+            for (n, c) in text.chars().enumerate() {
+                canvas.set_overlay(
+                    cx + n,
+                    cy,
+                    crate::canvas::Overlay { ch: c, tint: TINT_GREEN, lum: 0.85, bold: false },
+                );
+            }
+            taken.push((cx, cy, text.len()));
         }
     }
 }
