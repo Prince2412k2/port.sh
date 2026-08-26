@@ -18,6 +18,9 @@ const STEP: f64 = 3.0;
 /// Half the ground each sample is answerable for, in subpixels, rounded up.
 const HALF_STEP: isize = (STEP as isize + 1) / 2;
 
+/// Half the width the *stipple* covers, which is the footprint exactly.
+const PAINT_HALF: isize = (STEP as isize - 1) / 2;
+
 /// Grid rows in the order they must be drawn: nearest first.
 ///
 /// This is not a detail. The canvas composites alpha-over -- `cov += a * (1 -
@@ -129,9 +132,6 @@ const RING: [(f64, f64); 8] = [
 /// Mahesana stands about 8 m over 3 km and the Aravalli edge about 180 m.
 const STANDS_M: f64 = 3000.0;
 
-/// Highest elevation used to normalise shading, metres.
-const MAX_ELEV: f32 = 6000.0;
-
 /// The light: north-west and 20 degrees up.
 ///
 /// North-west because that is where every printed relief map has put the sun
@@ -191,6 +191,13 @@ const SHADE_ALPHA: [f32; 5] = [0.0, 0.18, 0.38, 0.62, 0.88];
 /// out one flat tone. Exaggerated lighting is the standard answer in relief
 /// cartography and it is more necessary here, not less.
 const LIGHT_GAIN: f32 = 3.4;
+
+/// Blur passes behind the light. Enough that a face is a face.
+const LIGHT_BLUR: usize = 3;
+
+/// Shapes the lit ramp. Above 1 it holds the shadowed side down, which widens
+/// the gap between a sunlit flank and a shaded one -- the gap is the reading.
+const LIGHT_SHAPE: f32 = 1.5;
 
 /// Share of the frame's samples that are allowed a mass block.
 ///
@@ -281,6 +288,14 @@ pub struct Relief {
     stands: Vec<f32>,
     /// Curvature per sample: positive on a crest, negative in a hollow.
     lap: Vec<f32>,
+    /// Heights with the fine detail taken out, for lighting.
+    ///
+    /// Light computed at grid resolution flips between neighbouring samples,
+    /// and a hillside lit at grid resolution is a texture. A face is a
+    /// low-frequency thing -- that is what makes it a face -- so the normal
+    /// that lights it comes off a field smoothed until it varies at the scale
+    /// of a landform rather than a sample.
+    smooth: Vec<f32>,
     gw: usize,
     gh: usize,
 }
@@ -353,6 +368,7 @@ impl Relief {
         // the ray's rise into the same units the heightmap is in.
         let m_per_grid = STEP * m_per_world / vp.scale();
         self.cast_shadows(m_per_grid);
+        self.smooth_field();
         // Flat views have no vertical axis to displace along, and `Shade` is the
         // mode that chooses not to use the one it has.
         let exag = if vp.is_flat() || !ground.displaces() { 0.0 } else { plot.exag };
@@ -400,22 +416,48 @@ impl Relief {
                 let dzdx = self.heights[i + 1] - self.heights[i - 1];
                 let dzdy = self.heights[i + self.gw] - self.heights[i - self.gw];
 
-                // Lambert shading against a fixed north-west light, the
-                // convention every printed relief map uses.
-                let nx = -dzdx;
-                let ny = -dzdy;
+                // Lambert against a fixed north-west light, the convention
+                // every printed relief map uses -- off the *smoothed* field, so
+                // what is lit is a hillside and not a sample.
+                let (lx, ly) = (
+                    self.smooth[i + 1] - self.smooth[i - 1],
+                    self.smooth[i + self.gw] - self.smooth[i - self.gw],
+                );
                 let nz = 60.0;
-                let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
-                let lambert = ((nx * -0.5 + ny * -0.5 + nz * 0.7) / len).clamp(0.0, 1.0);
+                let len = (lx * lx + ly * ly + nz * nz).sqrt().max(1e-6);
+                let lambert = ((lx * 0.5 + ly * 0.5 + nz * 0.7) / len).clamp(0.0, 1.0);
 
-                // Weighted towards slope rather than height. Terrain drawn by
-                // elevation alone fills a whole city with texture and buries
-                // the map; drawn by slope, flat ground stays empty and only
-                // real relief shows, which is what the eye wants from it.
+                // Ink follows the *light*, and this is the change that makes a
+                // range read as a range.
+                //
+                // It used to be `0.72 * slope + 0.28 * (1 - lambert)`, and both
+                // terms were wrong for the job. Slope is symmetric -- the two
+                // flanks of a ridge are equally steep -- so it puts identical
+                // ink on both sides and carries no shape at all. And
+                // `1 - lambert` carries the shape backwards on a dark
+                // terminal: ink is light here, so giving more of it to the
+                // face turned *away* from the sun draws the shadowed side
+                // brighter. A frame of that is texture with a silhouette round
+                // it, which is exactly what it looked like.
+                //
+                // Now: the sunlit flank is dense, the shaded flank thins out to
+                // the page, and the ridge between them is a line the eye finds
+                // without being told. Stretched about the value flat ground
+                // takes, because real Lambert over an 850 m heightmap lives in
+                // a narrow band and the terminal cannot spend what it is given.
                 let slope = ((dzdx * dzdx + dzdy * dzdy).sqrt() / 260.0).clamp(0.0, 1.0);
-                let band = (h / MAX_ELEV).clamp(0.0, 1.0).powf(0.6);
-                let relief = 0.72 * slope + 0.28 * (1.0 - lambert);
-                if relief < 0.06 && band < 0.10 {
+                // Stepped, on the same rungs the hypsometric tints use.
+                //
+                // It was `(h / MAX_ELEV)^0.6` -- continuous, so it shaded
+                // imperceptibly from one height to the next and the eye had
+                // nothing to segment on. Stepped, the ladder reads as bands
+                // even with the map in monochrome, which is how it ships: hue
+                // carries the height where there is colour, and density
+                // carries it where there is not.
+                let band = crate::canvas::rung_of(h) as f32 / 4.0;
+                let sunlit = ((lambert - FLAT_LIGHT) * LIGHT_GAIN + 0.5).clamp(0.0, 1.0);
+                let relief = sunlit.powf(LIGHT_SHAPE);
+                if relief < 0.04 && slope < 0.02 {
                     continue;
                 }
                 // Ground a ridge is standing in front of. Ink is light on this
@@ -424,9 +466,18 @@ impl Relief {
                 // Shadow is spent as density first and brightness second: the
                 // stipple opens up where a ridge stands in the way, and the
                 // dots that survive are dimmer too.
-                let lit = self.light[i];
-                let shaded = lit < 1.0 && DITHER[gy & 3][gx & 3] >= lit;
-                let alpha = (0.10 + 0.80 * relief) * (0.55 + 0.45 * band) * lit * fade * strength;
+                let unshadowed = self.light[i];
+                let shaded =
+                    unshadowed < 1.0 && DITHER[gy & 3][gx & 3] >= unshadowed;
+                // No floor term. The old `0.10 + 0.80 * relief` gave every
+                // sample a tenth of an alpha whatever the light said, which
+                // laid a grey wash over the shaded side and capped the lit
+                // side around a fifth -- the two ended within a step of each
+                // other, and the face contrast the lighting exists for never
+                // reached the screen. Sunlit ground goes essentially solid
+                // now, and shaded ground goes to nothing.
+                let alpha =
+                    relief * (0.45 + 0.55 * band) * unshadowed * fade * strength;
 
                 let hw = (h - datum) as f64 * exag / m_per_world;
                 let (sp, depth) = vp.project3(world[i], hw);
@@ -436,7 +487,11 @@ impl Relief {
 
                 let brush = Brush {
                     depth,
-                    tint: TINT_GREEN,
+                    // By height, not one colour for all ground. Elevation
+                    // varies slowly, so the bands come out as large contiguous
+                    // regions -- which is the property that makes a range read
+                    // as a range instead of as texture.
+                    tint: crate::canvas::band_of(h),
                     // `Shade` is describing a surface rather than marking
                     // points on one, and a surface wants tone. Braille at low
                     // coverage reads as speckle the eye counts; the same
@@ -484,7 +539,26 @@ impl Relief {
                 while ground.paints_surface() && !shaded && py <= paint_to {
                     let t = (py - y0) / span;
                     let x = sp[0] + (sp_near[0] - sp[0]) * t;
-                    canvas.splat(x, py, alpha, &brush);
+                    // The sample's whole width, not one subpixel of it.
+                    //
+                    // Samples sit `STEP` subpixels apart and this painted a
+                    // single column, so the surface could never cover more
+                    // than a third of the ground it stood for -- a lit face
+                    // and a shaded face both came out as thin stipple, and the
+                    // difference between them had nowhere to show. Filling the
+                    // footprint is what turns the lighting into faces: the
+                    // sunlit side goes solid, the shaded side falls to nothing,
+                    // and the ridge between them is the edge of the ink.
+                    // Exactly the footprint, and no wider. `HALF_STEP` rounds
+                    // up because the *depth* ribbon has to leave no gap; the
+                    // paint must not overlap, or alpha-over stacks neighbour
+                    // on neighbour until every cell saturates and the lighting
+                    // has nowhere left to show. With five columns on a
+                    // three-subpixel spacing, a fourfold change in the light
+                    // moved the frame by nothing at all.
+                    for dx in -PAINT_HALF..=PAINT_HALF {
+                        canvas.splat(x + dx as f64, py, alpha, &brush);
+                    }
                     py += 1.0;
                 }
                 let mut y = y0;
@@ -933,6 +1007,28 @@ impl Relief {
             l >= la && l >= lb
         } else {
             l <= la && l <= lb
+        }
+    }
+
+    /// Blur the heights until the light they carry is about landforms.
+    fn smooth_field(&mut self) {
+        let (gw, gh) = (self.gw, self.gh);
+        self.smooth.clear();
+        self.smooth.extend_from_slice(&self.heights);
+        let mut tmp = self.smooth.clone();
+        for _ in 0..LIGHT_BLUR {
+            for gy in 1..gh - 1 {
+                for gx in 1..gw - 1 {
+                    let i = gy * gw + gx;
+                    tmp[i] = 0.5 * self.smooth[i]
+                        + 0.125
+                            * (self.smooth[i - 1]
+                                + self.smooth[i + 1]
+                                + self.smooth[i - gw]
+                                + self.smooth[i + gw]);
+                }
+            }
+            std::mem::swap(&mut self.smooth, &mut tmp);
         }
     }
 

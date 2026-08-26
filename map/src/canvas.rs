@@ -79,6 +79,38 @@ pub const TINT_COAST: u8 = 9;
 pub const TINT_BORDER: u8 = 10;
 pub const TINT_HOME: u8 = 11;
 
+/// Ground, by how high it is: the classic hypsometric ladder.
+///
+/// One tint for terrain could only ever say "this is ground". Five say how
+/// high it is, and because elevation varies slowly they come out as large
+/// contiguous regions rather than as per-cell noise -- which is the property
+/// that makes a range read as a range at this resolution. It is also the
+/// oldest trick in relief cartography, for the same reason.
+///
+/// They carry in monochrome too. The bands are separated in *luminance* as
+/// well as hue, so the ladder still reads when the map is one colour, which is
+/// how it ships.
+pub const TINT_LOW: u8 = 12;
+pub const TINT_MID: u8 = 13;
+pub const TINT_HIGH: u8 = 14;
+pub const TINT_ALPINE: u8 = 15;
+pub const TINT_SNOW: u8 = 16;
+
+/// Where the bands change, metres. Wide low bands and narrow high ones: most
+/// ground is low, and spacing them evenly puts four of the five colours on the
+/// handful of cells above four thousand metres.
+pub const BANDS: [f32; 4] = [800.0, 2000.0, 3400.0, 4600.0];
+
+/// Which rung of the ladder a height is on, 0 to 4.
+pub fn rung_of(h: f32) -> usize {
+    BANDS.iter().take_while(|b| h >= **b).count()
+}
+
+/// The tint for a height.
+pub fn band_of(h: f32) -> u8 {
+    TINT_LOW + rung_of(h) as u8
+}
+
 /// Which way round the map is drawn.
 ///
 /// Not a palette swap. On a dark terminal a mark is *added* to the ground --
@@ -171,7 +203,7 @@ impl Theme {
         self.accent(TINT_SELECT)
     }
 
-    fn tints(self) -> &'static [(u8, u8, u8); 12] {
+    fn tints(self) -> &'static [(u8, u8, u8); 17] {
         match self {
             Theme::Night => &TINT_NIGHT,
             Theme::Paper => &TINT_PAPER,
@@ -207,7 +239,7 @@ impl Theme {
 /// Every hue is heavily desaturated and they sit in a narrow luminance band, so
 /// the map reads as a tinted technical drawing rather than a chart. Hue carries
 /// *kind*; brightness still carries depth.
-const TINT_NIGHT: [(u8, u8, u8); 12] = [
+const TINT_NIGHT: [(u8, u8, u8); 17] = [
     (232, 232, 226), // mono: paper white, a hair warm so it doesn't glare
     (255, 176, 64),  // landmark amber
     (110, 224, 255), // selection cyan
@@ -220,6 +252,13 @@ const TINT_NIGHT: [(u8, u8, u8); 12] = [
     (196, 220, 236), // coastline: cool and bright, the structural line
     (214, 158, 178), // administrative border: dusty rose, not a road, not water
     (255, 108, 92),  // your position: the one thing that is never terrain
+    // The hypsometric ladder, climbing in luminance as well as in hue so it
+    // survives monochrome: dark green valley floor to near-white summit.
+    (86, 122, 84),   // low: valley green
+    (132, 148, 96),  // mid: dry grass
+    (176, 156, 116), // high: rock and scree
+    (212, 196, 178), // alpine: bare stone
+    (244, 244, 240), // snow
 ];
 
 /// The same twelve on paper: what the mark is at full strength, which here
@@ -230,7 +269,7 @@ const TINT_NIGHT: [(u8, u8, u8); 12] = [
 /// up, and the luminance order is deliberately *reversed*: the motorway is the
 /// brightest thing on black and the darkest on paper, because on both grounds
 /// the answer to "which is loudest" has to be the same road.
-const TINT_PAPER: [(u8, u8, u8); 12] = [
+const TINT_PAPER: [(u8, u8, u8); 17] = [
     (34, 32, 30),    // mono: warm near-black, the pen
     (168, 96, 8),    // landmark amber
     (0, 104, 140),   // selection cyan
@@ -243,6 +282,15 @@ const TINT_PAPER: [(u8, u8, u8); 12] = [
     (52, 92, 124),   // coastline: the structural line
     (140, 62, 92),   // administrative border: dusty rose
     (206, 36, 20),   // your position
+    // The same ladder on paper, and it runs the other way: high ground is the
+    // *lightest* ink here because light is what a snow cap is made of, and
+    // inverting the ramp instead would have put the summits in the heaviest
+    // black on the page.
+    (74, 96, 66),    // low: valley green
+    (116, 118, 74),  // mid: dry grass
+    (150, 128, 96),  // high: rock and scree
+    (176, 162, 148), // alpine: bare stone
+    (198, 196, 190), // snow
 ];
 
 /// How hard a tint argues for the cell's colour, against how much of it it
@@ -261,7 +309,7 @@ const TINT_PAPER: [(u8, u8, u8); 12] = [
 /// about which glyph family wins a cell, and this is the same sentence about
 /// colour. Ground sits below 1.0 rather than roads far above it, so a cell with
 /// nothing else in it still reads as exactly what it is.
-const TINT_PULL: [f32; 12] = [
+const TINT_PULL: [f32; 17] = [
     1.0, // mono
     2.0, // landmark
     4.0, // selection: whatever you asked about wins outright
@@ -274,6 +322,13 @@ const TINT_PULL: [f32; 12] = [
     1.6, // coastline
     1.4, // administrative border
     4.0, // your position
+    // The ground ladder argues as quietly as the ground it replaced: it is
+    // still the page, it just says how high the page is.
+    0.7, // low
+    0.7, // mid
+    0.7, // high
+    0.7, // alpine
+    0.8, // snow -- a summit is worth a little more than a valley floor
 ];
 
 /// Box-drawing glyphs indexed by connected edges (N=1, E=2, S=4, W=8).
@@ -1073,7 +1128,25 @@ impl Canvas {
                     QUADRANT[q]
                 } else {
                     if bits == 0 {
-                        if strongest.0 < 0.10 {
+                        // Faint ground is ground that is not there; a faint
+                        // road still has to be seen.
+                        //
+                        // This fallback exists so a thin distant road does not
+                        // vanish, and it was doing that job for the terrain
+                        // too -- every cell with any coverage at all got one
+                        // dot, so the shaded flank of every hill came out as
+                        // an even one-dot stipple instead of going quiet. Two
+                        // fifths of a Himachal frame were single-dot cells,
+                        // and they were exactly the ones the lighting had
+                        // decided should be empty.
+                        //
+                        // Told apart by tint, which is the only thing here
+                        // that knows what a mark is *of*. `TINT_PULL` already
+                        // makes the same distinction for colour: ground is the
+                        // page, and everything else is the drawing on it.
+                        let ground = tint == TINT_GREEN as usize
+                            || (TINT_LOW as usize..=TINT_SNOW as usize).contains(&tint);
+                        if ground || strongest.0 < 0.10 {
                             continue;
                         }
                         bits = strongest.1;
@@ -1149,6 +1222,42 @@ mod rim_tests {
 #[cfg(test)]
 mod theme_tests {
     use super::*;
+
+    /// The hypsometric ladder climbs, and it climbs in luminance too.
+    ///
+    /// Hue alone would be invisible on the map as it ships, which is
+    /// monochrome: the bands have to separate by brightness as well, or the
+    /// whole ladder collapses to one grey the moment colour is off.
+    #[test]
+    fn the_height_ladder_climbs_on_both_grounds_and_in_grey() {
+        let lum = |c: (u8, u8, u8)| 0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32;
+        for table in [&TINT_NIGHT, &TINT_PAPER] {
+            let rungs: Vec<f32> = (TINT_LOW..=TINT_SNOW).map(|i| lum(table[i as usize])).collect();
+            for w in rungs.windows(2) {
+                assert!(w[1] > w[0], "the ladder does not climb: {rungs:?}");
+            }
+            assert!(
+                rungs[4] - rungs[0] > 60.0,
+                "valley to summit is only {} apart, which will not read",
+                rungs[4] - rungs[0]
+            );
+        }
+    }
+
+    /// Every rung has a colour, a pull, and lands where it says it does.
+    #[test]
+    fn every_rung_of_the_ladder_is_wired_up() {
+        assert_eq!(TINT_PULL.len(), TINT_NIGHT.len());
+        assert_eq!(TINT_PAPER.len(), TINT_NIGHT.len());
+        assert_eq!(TINT_SNOW as usize, TINT_NIGHT.len() - 1);
+        assert_eq!(band_of(0.0), TINT_LOW);
+        assert_eq!(band_of(9000.0), TINT_SNOW);
+        for (i, edge) in BANDS.iter().enumerate() {
+            assert_eq!(rung_of(edge - 1.0), i, "just under {edge} is not rung {i}");
+            assert_eq!(rung_of(*edge), i + 1, "{edge} itself is not rung {}", i + 1);
+        }
+    }
+
 
     fn lum_of(c: Color) -> f32 {
         let (r, g, b) = rgb_of(c).expect("the renderer emitted a colour with no rgb");
