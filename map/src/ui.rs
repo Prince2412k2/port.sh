@@ -180,21 +180,12 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" termap ", Style::default().fg(BG).bg(FG).add_modifier(Modifier::BOLD)),
         Span::styled(" 0.1.0", Style::default().fg(DIM)),
         Span::styled("  │  ", Style::default().fg(FAINT)),
-        Span::styled(
-            if crate::globe::shows(app.vp.zoom) { "GLOBE" } else { app.mode().label() },
-            Style::default().fg(FG),
-        ),
+        Span::styled(app.mode().label(), Style::default().fg(FG)),
         // The zoom mode and the ground style are different things and both were
         // called RELIEF here, which made comparing the three impossible: the
-        // header said the same word whichever one was on screen. On the globe
-        // neither applies -- there is no ground and no tilt to have a mode
-        // about -- so it says what is under the camera instead.
+        // header said the same word whichever one was on screen.
         Span::styled(
-            if crate::globe::shows(app.vp.zoom) {
-                String::new()
-            } else {
-                format!(" {}", app.ground.label())
-            },
+            format!(" {}", app.ground.label()),
             Style::default().fg(if app.show_terrain { DIM } else { FAINT }),
         ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
@@ -207,20 +198,10 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(FG),
         ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
-        // The zoom is the map's, and on the globe the map is not what you are
-        // looking at. The coordinates beside it still mean something -- they are
-        // the point under the camera, which is the one number a globe has.
-        Span::styled(
-            if crate::globe::shows(app.vp.zoom) {
-                "the whole planet".into()
-            } else {
-                format!("z{:.1}", app.vp.zoom)
-            },
-            Style::default().fg(FG),
-        ),
+        Span::styled(format!("z{:.1}", app.vp.zoom), Style::default().fg(FG)),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled(
-            if crate::globe::shows(app.vp.zoom) || app.vp.is_flat() {
+            if app.vp.is_flat() {
                 String::new()
             } else {
                 format!(
@@ -350,22 +331,7 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     }
     app.vp.sw = app.canvas.sw as f64;
     app.vp.sh = app.canvas.sh as f64;
-
-    // The globe is a different projection, not a wider camera, so it takes the
-    // frame rather than sharing one. Nothing below this point runs: there is no
-    // tile pyramid to resolve, no terrain under a sphere, and no viewport whose
-    // bounds mean anything at planetary scale.
     app.fit_if_pending();
-    if crate::globe::shows(app.vp.zoom) {
-        let (lon, lat) = app.vp.center_lonlat();
-        let g = crate::globe::Globe::fit(&app.canvas, lon, lat, app.vp.zoom);
-        let overlays = app.source.overlay_tiles();
-        crate::globe::draw(&g, &mut app.canvas, &overlays, app.vp.zoom);
-        crate::globe::mark(&g, &mut app.canvas, &overlays);
-        app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono);
-        return;
-    }
-
     app.open_tour_if_pending();
     app.sync_camera();
     // Tiles are resolved before drawing; a static source just hands back its one.
@@ -438,14 +404,8 @@ fn overlays(f: &mut Frame, area: Rect, app: &App) {
     // you are driving, and wrong for a thumbnail that is trying to read as part
     // of the page rather than as a window onto one. A ruled bar in the corner is
     // the most frame-like thing on it.
-    if !crate::globe::shows(app.vp.zoom) {
-        // A ruled bar reading "2 km" laid over a planet is not merely useless,
-        // it is wrong by four orders of magnitude. An orthographic globe has no
-        // single scale to state: the middle of the disc is true and the limb is
-        // infinitely foreshortened.
-        if let Some(sb) = scalebar_geom(area, app) {
-            draw_scalebar(f, area, &sb);
-        }
+    if let Some(sb) = scalebar_geom(area, app) {
+        draw_scalebar(f, area, &sb);
     }
     place_card(f, area, app);
     search_box(f, area, app);
@@ -888,7 +848,6 @@ fn help(f: &mut Frame, area: Rect) {
         row(")", "all layers on"),
         row("(", "terrain relief"),
         row("v", "relief / contour / hachure / shade"),
-        row("w", "back out to the globe"),
         row("x", "my location"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),

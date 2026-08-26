@@ -44,7 +44,6 @@ pub const LAYER_KEYS: [char; 8] = ['!', '@', '#', '$', '%', '^', '&', '*'];
 /// Terrain relief. Shift and `9`, keeping its place in the row.
 pub const TERRAIN_KEY: char = '(';
 pub const GROUND_KEY: char = 'v';
-pub const GLOBE_KEY: char = 'w';
 
 /// Every layer back on. Shift and `0`, likewise.
 pub const ALL_LAYERS_KEY: char = ')';
@@ -373,20 +372,9 @@ impl App {
     /// Called once the canvas has a real size.
     pub fn fit_if_pending(&mut self) {
         if self.fit_pending {
-            // Fit for the *centre*, then stand back off it. The fit points the
-            // camera at whatever the data covers; the zoom is overridden so the
-            // app opens on the planet with that place facing you, and zooming
-            // in is how you get to it. `--zoom` still wins, because `set_zoom`
-            // clears the pending flag before this runs.
             self.vp.fit(self.source.bounds());
-            self.vp.zoom = crate::globe::opening(&self.canvas);
             self.fit_pending = false;
         }
-    }
-
-    /// Ask for the opening view again: pointed at the data, standing off it.
-    pub fn open_on_the_globe(&mut self) {
-        self.fit_pending = true;
     }
 
     /// Pin the zoom explicitly, suppressing the initial fit.
@@ -653,13 +641,6 @@ impl App {
             // Cycles rather than toggles: there are three ways to draw ground
             // and the only way to judge between them is to see them in the
             // same place a moment apart.
-            // Not a mode: which projection is drawn follows the zoom. This is
-            // the way back out, the counterpart of zooming in on a country.
-            KeyCode::Char(GLOBE_KEY) => {
-                self.vp.zoom = crate::globe::opening(&self.canvas);
-                self.fit_pending = false;
-                self.toast = Some("the whole planet".into());
-            }
             KeyCode::Char(GROUND_KEY) => {
                 self.ground = self.ground.next();
                 self.toast = Some(format!("ground: {}", self.ground.label()));

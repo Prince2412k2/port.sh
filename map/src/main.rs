@@ -35,7 +35,6 @@ fn main() -> io::Result<()> {
                 println!("  --focus MODE     depth focus: off | subtle | strong");
                 println!("  --roads MODE     road glyphs: braille | blocks | lines");
                 println!("  --ground MODE    terrain: relief | contour | hachure | shade");
-                println!("  --globe          the whole planet, not the ground");
                 println!("  --weight W       stroke width multiplier (0.4 - 2.5)");
                 println!("  --center LON,LAT centre the view");
                 println!("  --tilt DEG       camera pitch (0 = flat 2D)");
@@ -62,7 +61,6 @@ fn main() -> io::Result<()> {
                     focus: None,
                     roads: None,
                     ground: None,
-                    globe: false,
                     weight: None,
                     center: None,
                     tilt: None,
@@ -103,11 +101,6 @@ fn main() -> io::Result<()> {
                 };
                 if let Some(s) = shot.as_mut() {
                     s.roads = g;
-                }
-            }
-            "--globe" => {
-                if let Some(s) = shot.as_mut() {
-                    s.globe = true;
                 }
             }
             "--ground" => {
