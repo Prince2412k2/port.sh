@@ -37,21 +37,39 @@ fn titlecase(s: &str) -> String {
     }
 }
 
-/// The contact row: whichever links exist, joined by a dot.
+/// The contact block: where to find him, then how to get in.
 ///
-/// Built in one place because two things need it — the row itself, and the
-/// layout that has to leave room for the row — and a layout that measured the
+/// Two rows rather than one, and the split is not cosmetic. Every one of these
+/// is a line that must not wrap or clip, so `text_width` reserves the widest of
+/// them out of the frame and the portrait gets whatever is left. On one row the
+/// four links come to about a hundred columns, which on any ordinary terminal
+/// left no room for a picture at all -- the drawing quietly disappeared to make
+/// space for a line of text. Split, the widest row is nearer fifty, the reading
+/// measure wins, and the portrait comes back.
+///
+/// They also read better apart. An address and a repository are where somebody
+/// finds him; `ssh` and `mosh` are the two doors into this very program, and
+/// putting them on their own line says so without a word of explanation.
+///
+/// Built in one place because two things need it -- the rows themselves, and
+/// the layout that has to leave room for them -- and a layout that measured the
 /// links separately from the way they are drawn would be one edit away from
 /// disagreeing with itself.
-fn contact_row(a: &About) -> Vec<Span<'static>> {
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, s) in [&a.github, &a.email, &a.ssh, &a.mosh].iter().filter(|s| !s.is_empty()).enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
+fn contact_rows(a: &About) -> Vec<Vec<Span<'static>>> {
+    let joined = |parts: [&String; 2]| -> Vec<Span<'static>> {
+        let mut spans: Vec<Span> = Vec::new();
+        for s in parts.iter().filter(|s| !s.is_empty()) {
+            if !spans.is_empty() {
+                spans.push(Span::styled("   ·   ", Style::default().fg(FAINT)));
+            }
+            spans.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
         }
-        spans.push(Span::styled((*s).clone(), Style::default().fg(CYAN)));
-    }
-    spans
+        spans
+    };
+    [joined([&a.github, &a.email]), joined([&a.ssh, &a.mosh])]
+        .into_iter()
+        .filter(|r| !r.is_empty())
+        .collect()
 }
 
 fn row_width(spans: &[Span]) -> u16 {
@@ -70,7 +88,7 @@ fn row_width(spans: &[Span]) -> u16 {
 /// picture got bigger the ssh line lost its last few characters off the right
 /// of the frame.
 fn text_width(a: &About) -> u16 {
-    MEASURE.max(row_width(&contact_row(a)))
+    MEASURE.max(contact_rows(a).iter().map(|r| row_width(r)).max().unwrap_or(0))
 }
 
 /// Which bake of the portrait this screen can hang beside the text, if any.
@@ -223,15 +241,17 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64) {
     }
 
     y += 1;
-    let links = contact_row(a);
-    // The contact row is the one line that must not wrap or clip, and three
-    // links do not fit the prose measure. It gets the rest of the frame, and
+    // None of these may wrap or clip. They get the rest of the frame, and
     // `columns` is what guarantees the rest of the frame is enough.
-    if y < area.y + area.height {
+    for row in contact_rows(a) {
+        if y >= area.y + area.height {
+            break;
+        }
         f.render_widget(
-            Paragraph::new(Line::from(links)),
+            Paragraph::new(Line::from(row)),
             Rect { x, y, width: c.contact, height: 1 },
         );
+        y += 1;
     }
 }
 
@@ -427,9 +447,7 @@ mod tests {
         // Measured off the row itself, not off the layout's opinion of it —
         // asking `text_width` how much room the row needs would make this test
         // agree with any answer that function gave, including a wrong one.
-        let need = row_width(&contact_row(&a));
-        assert!(need > MEASURE, "the shipped links now fit a reading measure, \
-                                 so this test no longer proves anything");
+        let need = contact_rows(&a).iter().map(|r| row_width(r)).max().expect("rows");
         for width in 24..=320u16 {
             let c = columns(Rect { x: 0, y: 0, width, height: 50 }, &a);
             if c.art == 0 {
@@ -438,11 +456,21 @@ mod tests {
             assert!(
                 c.contact >= need,
                 "at {width} columns the portrait is {} wide and leaves the \
-                 contact row {} for {need}",
+                 contact rows {} for {need}",
                 c.art,
                 c.contact,
             );
         }
+        // And the reason they were split: on one line these came to about a
+        // hundred columns, which reserved the whole frame and left the
+        // portrait nothing. Apart, they fit the reading measure and the
+        // picture is free to use what is left.
+        let together: u16 = contact_rows(&a).iter().map(|r| row_width(r)).sum::<u16>() + 7;
+        assert!(
+            together > MEASURE && need <= MEASURE,
+            "split rows are {need} wide and would be {together} on one line, \
+             against a reading measure of {MEASURE}"
+        );
     }
 
     /// And the picture has to actually appear once there is room, or the second

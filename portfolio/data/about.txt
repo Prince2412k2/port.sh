@@ -23,11 +23,12 @@
 # rather than either of the work addresses this machine is signed in to.
   email     prince240102@gmail.com
   github    github.com/Prince2412k2
-  # Update the port here if docker-compose.yml's mapping changes -- this is
-  # not read from that file, it is just text. No username: the binary speaks
-  # SSH itself now, so there is no account for one to name.
-  ssh       ssh -p 2222 <this-host>
+  # No port and no username, and both of those are the point. The deployment
+  # publishes on 22 (see docker-compose.prod.yml), and the binary speaks SSH
+  # itself, so there is no account for a name to refer to. Anything longer than
+  # this is a thing a visitor has to copy rather than type.
+  ssh       ssh sniffkin.tech
   # The same session over mosh, for a link that drops or an address that
   # changes. Optional in every sense: nothing here needs it, and a visitor
-  # without mosh installed sees no difference.
-  mosh      mosh --ssh="ssh -p 2222" <this-host>
+  # without mosh installed sees no difference. On 22 it needs no --ssh either.
+  mosh      mosh sniffkin.tech

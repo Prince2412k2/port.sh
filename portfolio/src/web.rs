@@ -116,7 +116,21 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
 /// glyph on the same 0.5 em advance, with the block elements landing on the
 /// exact halves and thirds of the cell so they tile without a seam.
 ///
-/// Subset to the 943 glyphs this app can emit, it is 31 KB, which is small
+/// It is also cut to shape. Stock Iosevka sets a 0.5 em advance against a
+/// 1.25 em line, so its cell is 1:2.50 where DejaVu's was 1:1.93 -- and every
+/// plate in here was baked by chafa for the *old* one. Dropping the stock font
+/// in fixed the glyphs and stretched every picture 29% tall, which is a
+/// different bug wearing the first one's clothes. Matching the cell's width and
+/// forgetting its height is the trap, and there is no fixing it from this side:
+/// squashing rows with xterm's `lineHeight` would clip the very block glyphs
+/// this is here to draw, and padding columns with `letterSpacing` would leave
+/// them short of the cell they have to tile with. The cell's shape belongs to
+/// the font. So the outlines and advances are scaled 1.2953x horizontally to a
+/// 0.648 em advance, which puts the cell back at 1:1.929, and at 13px it
+/// measures 8.42 x 16.25 against DejaVu-at-14's 8.43 x 16.30. Nothing else in
+/// the layout had to move.
+///
+/// Subset to the 943 glyphs this app can emit, it is 22 KB, which is small
 /// enough to carry rather than fetch. Served from here rather than from the
 /// CDN the terminal comes from: the page already degrades honestly when
 /// jsdelivr is unreachable, and there is no reason to add a second thing that
@@ -511,7 +525,7 @@ const INDEX: &str = r##"<!doctype html>
        edges away from the viewer, and the leftmost thing on the screen is the
        first to go over the horizon. */
     padding: 0 1ch 0 2ch;
-    font: 17px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
+    font: 13px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
     line-height: 1.2;
     /* The strip is as tall as the window so the switches can sit in the middle
        of it, which would otherwise make the whole left edge unclickable. */
@@ -575,7 +589,7 @@ if (typeof Terminal === 'undefined') {
   said.style.cssText =
     'position:absolute;inset:0;display:flex;align-items:center;' +
     'justify-content:center;margin:0;text-align:center;color:#c4c8ce;' +
-    'font:17px "Iosevka Portfolio","DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
+    'font:13px "Iosevka Portfolio","DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
   said.textContent =
     'the terminal emulator this page needs did not load.\n\n' +
     'it comes from cdn.jsdelivr.net, which is either blocked here or down.\n\n' +
@@ -591,10 +605,10 @@ const term = new Terminal({
   // The app hides the cursor and draws everything itself; a blinking block
   // parked wherever the last write landed only ever looks like a bug.
   fontFamily: '"Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace',
-  // 17 against DejaVu's 14. Iosevka sets a 0.5 em cell where DejaVu sets
-  // 0.602, so matching the size would have shrunk every column by a fifth;
-  // this lands the cell within a tenth of a pixel of where it was.
-  fontSize: 17,
+  // 13 against DejaVu's 14, and the two come out on the same cell: 8.42 x
+  // 16.25 px against 8.43 x 16.30. Matching the *width* alone was not enough
+  // and is what stretched every picture tall -- see `FONT_URL`.
+  fontSize: 13,
   theme: { background: '#08090b', foreground: '#c4c8ce' },
   // Braille and half-block glyphs are the whole renderer here, and letting
   // xterm draw them from the font rather than its own box-drawing shortcuts
@@ -643,10 +657,10 @@ fit.fit();
 // re-measures when an option it is watching actually changes value, so
 // assigning the size it already holds does nothing at all.
 if (document.fonts && document.fonts.load) {
-  document.fonts.load('17px "Iosevka Portfolio"').then(() => {
-    if (term.options.fontSize === 17) {
-      term.options.fontSize = 16;
-      term.options.fontSize = 17;
+  document.fonts.load('13px "Iosevka Portfolio"').then(() => {
+    if (term.options.fontSize === 13) {
+      term.options.fontSize = 12;
+      term.options.fontSize = 13;
     }
     fit.fit();
     sendSize();
@@ -1844,7 +1858,7 @@ const tube = {
     const scale = this.size.w / glass.clientWidth;
     const ctx = this.sctx;
     ctx.textBaseline = 'top';
-    ctx.font = `${17 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
+    ctx.font = `${13 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
     for (const it of laidOut) {
       ctx.fillStyle = getComputedStyle(it.el).getPropertyValue('--ink').trim() || '#3a3e46';
       ctx.fillText(`[${it.el.textContent}]`, it.x * scale, it.y * scale);
