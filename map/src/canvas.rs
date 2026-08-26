@@ -684,13 +684,24 @@ impl Canvas {
     /// Collected before anything is drawn, because plotting writes coverage
     /// and tint that the scan would otherwise pick up as it went and trail an
     /// edge along behind itself.
-    pub fn rim(&mut self, jump: f32, alpha: f32) {
+    pub fn rim(&mut self, jump: f32, alpha: f32, on_ground: impl Fn(usize, usize) -> bool) {
         let mut edge: Vec<(usize, f32, u8)> = Vec::new();
         let mark = |a: usize, b: usize, this: &Self, out: &mut Vec<(usize, f32, u8)>| {
             let (za, zb) = (this.zbuf[a], this.zbuf[b]);
             match (za.is_finite(), zb.is_finite()) {
-                (true, false) => out.push((a, za, this.tint[a])),
-                (false, true) => out.push((b, zb, this.tint[b])),
+                // An outer boundary is only an outline if the empty side is
+                // genuinely empty. Where it is merely *outside the sampled
+                // slab*, the ground carries on and the edge belongs to the
+                // renderer rather than to the landform -- outlined, it drew a
+                // rectangle around the map, which is the "square frame" that
+                // kept coming back. Screen border and plate edge are the same
+                // mistake; the caller answers for both.
+                (true, false) if on_ground(b % this.sw, b / this.sw) => {
+                    out.push((a, za, this.tint[a]))
+                }
+                (false, true) if on_ground(a % this.sw, a / this.sw) => {
+                    out.push((b, zb, this.tint[b]))
+                }
                 (true, true) if (za - zb).abs() > jump => {
                     let near = if za < zb { a } else { b };
                     out.push((near, this.zbuf[near], this.tint[near]));
@@ -698,15 +709,15 @@ impl Canvas {
                 _ => {}
             }
         };
-        for y in 0..self.sh {
-            for x in 0..self.sw {
+        // The frame is not a landform. Ground running off the side of the
+        // screen has no edge there -- it carries on -- and outlining it drew a
+        // box round the map, which read as a border on the *window* rather
+        // than on anything in it.
+        for y in 1..self.sh.saturating_sub(2) {
+            for x in 1..self.sw.saturating_sub(2) {
                 let i = y * self.sw + x;
-                if x + 1 < self.sw {
-                    mark(i, i + 1, self, &mut edge);
-                }
-                if y + 1 < self.sh {
-                    mark(i, i + self.sw, self, &mut edge);
-                }
+                mark(i, i + 1, self, &mut edge);
+                mark(i, i + self.sw, self, &mut edge);
             }
         }
         for (i, depth, tint) in edge {
@@ -1104,12 +1115,14 @@ mod rim_tests {
                 c.occlude_at(x as isize, y as isize, 0.5);
             }
         }
-        c.rim(0.03, 1.0);
+        c.rim(0.03, 1.0, |_, _| true);
         // The last covered column is the boundary and gets marked; the middle
         // of the slab is interior and must stay clean, or the outline is not
         // an outline, it is a wash.
         let at = |x: usize, y: usize| c.cov[y * c.sw + x];
         assert!(at(c.sw / 2 - 1, 2) > 0.0, "the edge of the ground was not drawn");
+        // ...but not along the frame, which is a window and not a landform.
+        assert_eq!(at(0, 2), 0.0, "the screen edge was outlined");
         assert_eq!(at(1, 2), 0.0, "the inside of the ground was drawn as edge");
         assert_eq!(at(c.sw / 2, 2), 0.0, "the empty side was drawn as edge");
     }
@@ -1128,7 +1141,7 @@ mod rim_tests {
                 c.occlude_at(x as isize, y as isize, z);
             }
         }
-        c.rim(0.03, 1.0);
+        c.rim(0.03, 1.0, |_, _| true);
         let at = |x: usize, y: usize| c.cov[y * c.sw + x];
         assert!(at(c.sw / 2 - 1, 2) > 0.0, "the near side of the step is bare");
         assert_eq!(at(c.sw / 2, 2), 0.0, "the far side of the step was outlined");

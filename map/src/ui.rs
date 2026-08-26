@@ -405,7 +405,17 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
             // The ground's outline, straight off the depth buffer the relief
             // pass just wrote, and before the features go down so that this
             // outlines terrain rather than everything on the frame.
-            app.canvas.rim(crate::canvas::RIM_STEP, ground);
+            // Inside the ground slab, so the slab's own cut is not mistaken
+            // for the edge of a mountain.
+            let vp = app.vp;
+            let plate = vp.plate();
+            app.canvas.rim(crate::canvas::RIM_STEP, ground, |x, y| {
+                if vp.is_flat() {
+                    return true;
+                }
+                let m = vp.plane_of(vp.unproject([x as f64, y as f64]));
+                m[0].abs() <= plate[0] && m[1] >= plate[1] && m[1] <= plate[2]
+            });
         }
     }
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);

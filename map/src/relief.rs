@@ -11,6 +11,42 @@ use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
 use crate::view::Ground;
 
+/// The least relief that counts as terrain worth drawing, metres.
+///
+/// About a ten-storey building. Show something that would qualify as a
+/// mountain, not every undulation the heightmap happens to record -- over the
+/// plains the ground moves a few metres over kilometres, and a mark for each
+/// sample of it filled the frame with an even stipple that said only "there is
+/// ground here", which the reader already knew.
+///
+/// Measured as how far a sample stands above the lowest ground within
+/// `STANDS_M`, not as slope and not as absolute height. Slope keeps a gently
+/// tilted plain and drops a cliff seen edge-on; absolute height draws the
+/// whole Deccan as a mountain range, which is the same mistake in the other
+/// direction -- a plateau is high ground, not a mountain.
+const MOUNTAIN: f32 = 30.0;
+
+/// How far away the local low point is looked for, metres.
+///
+/// A world distance and not a number of grid steps. The grid is screen-space,
+/// so a window of four steps spans twelve kilometres at street zoom and a
+/// hundred and twenty at country zoom -- and over a hundred and twenty
+/// kilometres almost everywhere in India stands thirty metres above something.
+/// Keyed to grid steps the test passed everywhere and filtered nothing.
+const STANDS_M: f64 = 3000.0;
+
+/// Eight compass points, for the low-ground lookup.
+const RING: [(f64, f64); 8] = [
+    (1.0, 0.0),
+    (-1.0, 0.0),
+    (0.0, 1.0),
+    (0.0, -1.0),
+    (0.7, 0.7),
+    (0.7, -0.7),
+    (-0.7, 0.7),
+    (-0.7, -0.7),
+];
+
 /// Subpixels between grid samples. Denser than this and the relief turns into a
 /// solid wash that competes with the roads it is supposed to sit behind.
 const STEP: f64 = 3.0;
@@ -90,6 +126,9 @@ struct Lift {
 pub struct Relief {
     /// Sample heights, reused across frames to avoid reallocating.
     heights: Vec<f32>,
+    /// Local relief per sample, metres: how far this ground stands above the
+    /// lowest ground near it. Below `MOUNTAIN` it is not drawn at all.
+    stands: Vec<f32>,
     gw: usize,
     gh: usize,
 }
@@ -110,6 +149,8 @@ impl Relief {
         self.gh = (canvas.sh as f64 / STEP).ceil() as usize + 3;
         self.heights.clear();
         self.heights.resize(self.gw * self.gh, 0.0);
+        self.stands.clear();
+        self.stands.resize(self.gw * self.gh, 0.0);
 
         // Fraction of the screen left as sky when tilted.
         //
@@ -136,7 +177,21 @@ impl Relief {
                 let (lon, lat) = world_to_lonlat(w[0], w[1]);
                 let i = gy * self.gw + gx;
                 world[i] = w;
-                self.heights[i] = t.sample(lon, lat);
+                let h = t.sample(lon, lat);
+                self.heights[i] = h;
+                // The ground this sample stands on, looked up straight out of
+                // the heightmap at a fixed world distance rather than off the
+                // sampling grid, so the question stays the same question at
+                // every zoom.
+                let (dlon, dlat) = (
+                    STANDS_M / (111_320.0 * lat.to_radians().cos().abs().max(0.05)),
+                    STANDS_M / 110_540.0,
+                );
+                let mut floor = h;
+                for (ox, oy) in RING {
+                    floor = floor.min(t.sample(lon + ox * dlon, lat + oy * dlat));
+                }
+                self.stands[i] = h - floor;
             }
         }
 
@@ -161,6 +216,13 @@ impl Relief {
                 let h = self.heights[i];
                 // Sea level is not terrain; the water layer already owns it.
                 if h < 1.0 {
+                    continue;
+                }
+                // Ground that stands over nothing is not a landform. Skipped
+                // whole -- the depth ribbon too, not just the stipple -- so
+                // flat ground is properly absent rather than an invisible wall
+                // punching holes in the roads behind it.
+                if self.stands[i] < MOUNTAIN {
                     continue;
                 }
                 // Outside the slab there is no ground, so nothing is drawn and
@@ -346,7 +408,7 @@ impl Relief {
             for gx in (1..self.gw.saturating_sub(1)).step_by(STRIDE) {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
-                if h < 1.0 {
+                if h < 1.0 || self.stands[i] < MOUNTAIN {
                     continue;
                 }
                 let dzdx = self.heights[i + 1] - self.heights[i - 1];
