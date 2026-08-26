@@ -307,7 +307,7 @@ impl<'a> Hand<'a> {
             tint: TINT_MONO,
             mat: if solid { MAT_SOLID } else { MAT_DOT },
             pick: u32::MAX,
-            occlude: false,
+            behind: termap::canvas::Behind::Ignore,
         }
     }
 
@@ -362,7 +362,7 @@ impl<'a> Hand<'a> {
             tint: TINT_MONO,
             mat: MAT_DOT,
             pick: u32::MAX,
-            occlude: false,
+            behind: termap::canvas::Behind::Ignore,
         };
         self.c.splat(x, p[1], alpha * k, &brush);
     }

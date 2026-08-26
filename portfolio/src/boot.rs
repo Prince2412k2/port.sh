@@ -96,7 +96,7 @@ fn sea(f: &mut Frame, area: Rect, t: f64, swell: f64, alpha: f32) {
             tint: TINT_MONO,
             mat: MAT_DOT,
             pick: u32::MAX,
-            occlude: false,
+            behind: termap::canvas::Behind::Ignore,
         };
         let phase = i as f64 * 1.7;
         let (k1, k2) = (4.0 + i as f64 * 0.6, 2.1 + i as f64 * 0.27);

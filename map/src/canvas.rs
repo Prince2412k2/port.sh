@@ -192,6 +192,39 @@ struct LineCell {
     pick: u32,
 }
 
+/// What a mark does when something is already in front of it.
+///
+/// Two of these are the old boolean. The third is the one that makes a tilted
+/// view of mountains readable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Behind {
+    /// Draw anyway. Chrome, labels, anything that is not in the world.
+    #[default]
+    Ignore,
+    /// Do not draw at all. Hidden-surface removal, for anything opaque.
+    Hide,
+    /// Draw, one step dimmer for each layer of ground in front of it.
+    ///
+    /// `Hide` is the right answer for a surface and the wrong one for the lines
+    /// drawn on it: a contour that vanishes behind a ridge leaves a hole, and a
+    /// contour that ignores the ridge entirely gives what the Himalayas at z10
+    /// gave -- seven iso-lines, each of them thousands of segments long, all at
+    /// full strength, stacked into a wall of ink with no front or back to it.
+    ///
+    /// Between the two: the further behind something is, the fainter it draws,
+    /// in steps rather than smoothly. Steps because the eye reads three or four
+    /// distinct planes far better than it reads a continuous ramp, and because
+    /// "one layer back" is the thing being communicated.
+    Veil,
+}
+
+/// Depth counted as one layer of ground.
+const VEIL_STEP: f32 = 0.035;
+/// What is left of a mark after one layer.
+const VEIL_FADE: f32 = 0.55;
+/// Layers after which there is nothing worth drawing.
+const VEIL_LIMIT: f32 = 4.0;
+
 /// Everything a draw call carries besides coverage.
 #[derive(Clone, Copy)]
 pub struct Brush {
@@ -199,13 +232,12 @@ pub struct Brush {
     pub tint: u8,
     pub mat: u8,
     pub pick: u32,
-    /// Take part in hidden-surface removal: reject this write if something
-    /// nearer already occupies the subpixel, and claim the subpixel if not.
+    /// What to do when something nearer already occupies the subpixel.
     ///
     /// Off in 2D. There, depth is a styling device -- "importance as distance"
     /// -- and the paint order is not monotonic in it, so testing against it
     /// would drop minor roads wherever they cross water.
-    pub occlude: bool,
+    pub behind: Behind,
 }
 
 #[derive(Clone, Copy)]
@@ -397,14 +429,31 @@ impl Canvas {
             return;
         }
         let i = y as usize * self.sw + x as usize;
-        if b.occlude {
-            // Tolerance, not equality: a road draped on terrain sits exactly on
-            // the surface it is being tested against, and would otherwise
-            // z-fight its way in and out of view along its length.
-            if b.depth > self.zbuf[i] + Z_BIAS {
-                return;
+        // Tolerance, not equality: a road draped on terrain sits exactly on the
+        // surface it is being tested against, and would otherwise z-fight its
+        // way in and out of view along its length.
+        let gap = b.depth - self.zbuf[i];
+        let mut a = a;
+        match b.behind {
+            Behind::Ignore => {}
+            Behind::Hide => {
+                if gap > Z_BIAS {
+                    return;
+                }
+                self.zbuf[i] = self.zbuf[i].min(b.depth);
             }
-            self.zbuf[i] = self.zbuf[i].min(b.depth);
+            Behind::Veil => {
+                if gap > Z_BIAS {
+                    let steps = (gap / VEIL_STEP).floor();
+                    if steps >= VEIL_LIMIT {
+                        return;
+                    }
+                    a *= VEIL_FADE.powf(steps);
+                } else {
+                    // In front: this is now what later marks are behind.
+                    self.zbuf[i] = self.zbuf[i].min(b.depth);
+                }
+            }
         }
         // Alpha-over: repeated stamps along a line converge to solid instead of
         // clipping, which keeps thick roads even where segments overlap.
@@ -856,7 +905,7 @@ mod nan_tests {
     use super::*;
 
     fn brush() -> Brush {
-        Brush { depth: 0.5, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, occlude: false }
+        Brush { depth: 0.5, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, behind: Behind::Ignore }
     }
 
     /// A NaN position must not reach the buffer.
@@ -904,5 +953,80 @@ mod nan_tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
         let fog = Fog { near: 1.0, far: 0.3, gamma: 1.0 };
         c.resolve(&mut buf, Rect::new(0, 0, 8, 4), &fog, false);
+    }
+}
+
+#[cfg(test)]
+mod veil_tests {
+    use super::*;
+
+    fn at(behind: Behind, depth: f32) -> Brush {
+        Brush { depth, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, behind }
+    }
+
+    fn ink(c: &Canvas, x: usize, y: usize) -> f32 {
+        c.cov[y * c.sw + x]
+    }
+
+    /// One step of opacity per layer of ground in front, and gone after four.
+    ///
+    /// The middle ground between hiding a mark behind a ridge, which leaves a
+    /// hole in a contour, and ignoring the ridge, which is what gave a wall of
+    /// iso-lines with no front or back to it.
+    #[test]
+    fn each_layer_in_front_takes_a_step_of_opacity() {
+        let near = 0.10;
+        let mut seen = Vec::new();
+        for layers in 0..6 {
+            let mut c = Canvas::new(4, 2);
+            // Something up front, but faint -- coverage is alpha-over, so an
+            // occluder at full strength saturates the subpixel and there is no
+            // headroom left to read the dimming in.
+            c.plot(2, 2, 0.2, &at(Behind::Hide, near));
+            // Then a mark that many layers behind it.
+            c.plot(2, 2, 1.0, &at(Behind::Veil, near + VEIL_STEP * layers as f32 + 0.001));
+            seen.push(ink(&c, 2, 2));
+        }
+        // The front layer is undimmed; each one behind is fainter than the last.
+        for w in seen.windows(2) {
+            assert!(w[1] <= w[0], "a layer further back came out brighter: {seen:?}");
+        }
+        assert!(seen[0] > seen[1], "the first layer back was not dimmed at all");
+        assert_eq!(
+            seen[VEIL_LIMIT as usize + 1],
+            seen[VEIL_LIMIT as usize],
+            "past the limit there should be nothing left to remove"
+        );
+    }
+
+    /// In front of everything, a veiled mark is at full strength -- it is not a
+    /// fade, it is an answer to "what is between me and this".
+    #[test]
+    fn a_mark_in_front_is_not_dimmed() {
+        let mut c = Canvas::new(4, 2);
+        c.plot(2, 2, 1.0, &at(Behind::Hide, 0.60));
+        c.plot(2, 2, 1.0, &at(Behind::Veil, 0.10));
+        let veiled = ink(&c, 2, 2);
+
+        let mut clean = Canvas::new(4, 2);
+        clean.plot(2, 2, 1.0, &at(Behind::Ignore, 0.10));
+        assert!((veiled - ink(&clean, 2, 2)).abs() < 1e-6);
+    }
+
+    /// And the other two behaviours are unchanged, because everything else in
+    /// the renderer still uses them.
+    #[test]
+    fn hide_still_hides_and_ignore_still_ignores() {
+        let mut c = Canvas::new(4, 2);
+        c.plot(2, 2, 1.0, &at(Behind::Hide, 0.10));
+        let front_only = ink(&c, 2, 2);
+        c.plot(2, 2, 1.0, &at(Behind::Hide, 0.90));
+        assert_eq!(ink(&c, 2, 2), front_only, "something behind was allowed through");
+
+        let mut c = Canvas::new(4, 2);
+        c.plot(2, 2, 0.5, &at(Behind::Hide, 0.10));
+        let before = ink(&c, 2, 2);
+        c.plot(2, 2, 0.5, &at(Behind::Ignore, 0.90));
+        assert!(ink(&c, 2, 2) > before, "Ignore should draw regardless of depth");
     }
 }

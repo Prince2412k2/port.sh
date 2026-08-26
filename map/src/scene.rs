@@ -161,7 +161,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                 tint: if hot { TINT_SELECT } else { st.tint },
                 mat,
                 pick,
-                occlude: tilted,
+                behind: if tilted { crate::canvas::Behind::Hide } else { crate::canvas::Behind::Ignore },
             };
 
             if o.road_glyph == RoadGlyph::Line && st.mat == MAT_SOLID {
@@ -284,7 +284,7 @@ fn ocean_wash(
             tint: st.tint,
             mat: st.mat,
             pick: u32::MAX,
-            occlude: false,
+            behind: crate::canvas::Behind::Ignore,
         },
     );
 
@@ -392,7 +392,7 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
             tint: TINT_HOME,
             mat: MAT_DOT,
             pick: u32::MAX,
-            occlude: false,
+            behind: crate::canvas::Behind::Ignore,
         };
         const N: usize = 72;
         let mut prev: Option<[f64; 2]> = None;
@@ -570,7 +570,7 @@ fn draw_buildings(
             tint: TINT_MONO,
             mat: MAT_DOT,
             pick: pack_pick(slot, idx),
-            occlude: tilted,
+            behind: if tilted { crate::canvas::Behind::Hide } else { crate::canvas::Behind::Ignore },
         };
         // Walls are stippled rather than solid: a terminal has no fill shades to
         // spare, and a dithered face reads as a surface while still letting the
@@ -796,7 +796,7 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
                     tint: p.tint,
                     mat: crate::canvas::MAT_DOT,
                     pick: p.feature,
-                    occlude: false,
+                    behind: crate::canvas::Behind::Ignore,
                 },
             );
         }

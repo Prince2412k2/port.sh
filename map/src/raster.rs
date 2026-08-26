@@ -30,7 +30,7 @@ pub struct Pen {
     pub mat: u8,
     pub pick: u32,
     /// Participate in hidden-surface removal (3D only).
-    pub occlude: bool,
+    pub behind: crate::canvas::Behind,
 }
 
 impl Pen {
@@ -41,7 +41,7 @@ impl Pen {
             tint: self.tint,
             mat: self.mat,
             pick: self.pick,
-            occlude: self.occlude,
+            behind: self.behind,
         }
     }
 }

@@ -11,9 +11,34 @@ use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
 use crate::view::Ground;
 
-/// Subpixels between grid samples. Denser than this and the relief turns into a
-/// solid wash that competes with the roads it is supposed to sit behind.
+/// Subpixels between grid samples, at their finest. Denser than this and the
+/// relief turns into a solid wash that competes with the roads it is supposed
+/// to sit behind.
 const STEP: f64 = 3.0;
+
+/// Grid spacing that neither wastes marks nor invents detail.
+///
+/// `STEP` is a floor, not the answer. The heightmap is 30 arcsec -- about 850 m
+/// -- and from roughly z10 up that is coarser than the screen, so a 3-subpixel
+/// grid asks it for two or three samples per real data point and gets an
+/// interpolated ramp back. Every one of those is a mark on the page that no
+/// measurement stands behind, and over the Himalayas at z10 there are enough of
+/// them to bury the contours drawn on top: the whole frame silts up into an
+/// even speckle with no ridges in it.
+///
+/// Sampling at about half the data's own spacing keeps everything the heightmap
+/// actually knows and stops there. It is the same argument as the contour
+/// interval refusing to be finer than the range justifies, in the other axis.
+fn grid_step(t: &Terrain, vp: &Viewport) -> f64 {
+    let (_, lat) = vp.center_lonlat();
+    let per_subpixel = vp.meters_per_subpixel().max(1e-6);
+    step_for(t.spacing_m(lat) / per_subpixel)
+}
+
+/// The arithmetic of it, given the heightmap's spacing in subpixels.
+fn step_for(data_subpixels: f64) -> f64 {
+    STEP.max(data_subpixels * 0.5)
+}
 
 /// Contour intervals to choose between, metres. Round numbers only: a map
 /// whose lines are 37 m apart is a map nobody can count in their head.
@@ -57,8 +82,9 @@ impl Relief {
     ) -> usize {
         // Sampling in screen space rather than world space keeps the grid
         // uniform on the display no matter how the camera is turned.
-        self.gw = (canvas.sw as f64 / STEP).ceil() as usize + 3;
-        self.gh = (canvas.sh as f64 / STEP).ceil() as usize + 3;
+        let step = grid_step(t, vp);
+        self.gw = (canvas.sw as f64 / step).ceil() as usize + 3;
+        self.gh = (canvas.sh as f64 / step).ceil() as usize + 3;
         self.heights.clear();
         self.heights.resize(self.gw * self.gh, 0.0);
 
@@ -80,9 +106,9 @@ impl Relief {
                 // steep slope into aligned vertical ribbons at terminal
                 // resolution; this triangular grid has the same sample count
                 // and spacing but no screen-wide column alias.
-                let stagger = if gy & 1 == 0 { 0.0 } else { STEP * 0.5 };
-                let sx = (gx as f64 - 1.0) * STEP + stagger;
-                let sy = (gy as f64 - 1.0) * STEP * over - canvas.sh as f64 * (over - 1.0);
+                let stagger = if gy & 1 == 0 { 0.0 } else { step * 0.5 };
+                let sx = (gx as f64 - 1.0) * step + stagger;
+                let sy = (gy as f64 - 1.0) * step * over - canvas.sh as f64 * (over - 1.0);
                 let w = vp.unproject([sx, sy]);
                 let (lon, lat) = world_to_lonlat(w[0], w[1]);
                 let i = gy * self.gw + gx;
@@ -169,7 +195,7 @@ impl Relief {
                         MAT_DOT
                     },
                     pick: u32::MAX,
-                    occlude: true,
+                    behind: crate::canvas::Behind::Hide,
                 };
 
                 // The next row nearer: the ribbon spans the gap to it, so the
@@ -374,7 +400,7 @@ impl Relief {
                             MAT_DOT
                         },
                         pick: u32::MAX,
-                        occlude: false,
+                        behind: crate::canvas::Behind::Veil,
                     },
                 );
                 drawn += 1;
@@ -483,7 +509,7 @@ impl Relief {
                                 tint: TINT_GREEN,
                                 mat: MAT_DOT,
                                 pick: u32::MAX,
-                                occlude: false,
+                                behind: crate::canvas::Behind::Veil,
                             },
                         );
 
@@ -588,6 +614,46 @@ mod tests {
     fn every_interval_is_one_a_reader_can_count_in() {
         for range in [5.0f32, 50.0, 500.0, 5000.0, 12345.0] {
             assert!(STEPS.contains(&interval(range)) || interval(range) == 2000.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    /// The grid never asks the heightmap for detail it does not have.
+    ///
+    /// Over the Himalayas at z10 one heightmap sample spans about eight
+    /// subpixels, and a three-subpixel grid was taking two or three marks out
+    /// of every real measurement. Those extra marks are interpolation drawn as
+    /// if it were ground, and there were enough of them to bury the contours on
+    /// top: the frame silted up into an even speckle with no ridges in it.
+    #[test]
+    fn the_grid_never_outruns_the_heightmap() {
+        // Data coarser than the screen: follow the data.
+        assert_eq!(step_for(7.7), 7.7 * 0.5);
+        assert_eq!(step_for(20.0), 10.0);
+        // Data finer than the screen: the floor wins, because past that the
+        // limit is the terminal and not the measurement.
+        assert_eq!(step_for(1.0), STEP);
+        assert_eq!(step_for(0.0), STEP);
+        // Never finer than the floor, whatever it is handed.
+        for d in [0.0f64, 0.5, 3.0, 6.0, 50.0, 1000.0] {
+            assert!(step_for(d) >= STEP, "{d} subpixels gave a step under the floor");
+        }
+    }
+
+    /// And it only ever coarsens as the data gets relatively coarser.
+    #[test]
+    fn coarser_data_never_means_a_finer_grid() {
+        let mut last = 0.0;
+        let mut d = 0.0;
+        while d < 40.0 {
+            let s = step_for(d);
+            assert!(s >= last, "the grid got finer as the data got coarser, at {d}");
+            last = s;
+            d += 0.25;
         }
     }
 }
