@@ -453,7 +453,7 @@ const INDEX: &str = r##"<!doctype html>
        edges away from the viewer, and the leftmost thing on the screen is the
        first to go over the horizon. */
     padding: 0 1ch 0 2ch;
-    font: 14px "DejaVu Sans Mono", "Menlo", "Apple Braille", "Noto Sans Symbols 2", ui-monospace, monospace;
+    font: 14px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
     line-height: 1.2;
     /* The strip is as tall as the window so the switches can sit in the middle
        of it, which would otherwise make the whole left edge unclickable. */
@@ -517,7 +517,7 @@ if (typeof Terminal === 'undefined') {
   said.style.cssText =
     'position:absolute;inset:0;display:flex;align-items:center;' +
     'justify-content:center;margin:0;text-align:center;color:#c4c8ce;' +
-    'font:14px "DejaVu Sans Mono","Menlo","Apple Braille","Noto Sans Symbols 2",ui-monospace,monospace;line-height:1.6';
+    'font:14px "DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
   said.textContent =
     'the terminal emulator this page needs did not load.\n\n' +
     'it comes from cdn.jsdelivr.net, which is either blocked here or down.\n\n' +
@@ -532,7 +532,7 @@ const term = new Terminal({
   cursorBlink: false,
   // The app hides the cursor and draws everything itself; a blinking block
   // parked wherever the last write landed only ever looks like a bug.
-  fontFamily: '"DejaVu Sans Mono", "Menlo", "Apple Braille", "Noto Sans Symbols 2", ui-monospace, monospace',
+  fontFamily: '"DejaVu Sans Mono", "Menlo", ui-monospace, monospace',
   fontSize: 14,
   theme: { background: '#08090b', foreground: '#c4c8ce' },
   // Braille and half-block glyphs are the whole renderer here, and letting
@@ -1759,7 +1759,7 @@ const tube = {
     const scale = this.size.w / glass.clientWidth;
     const ctx = this.sctx;
     ctx.textBaseline = 'top';
-    ctx.font = `${14 * scale}px "DejaVu Sans Mono", "Menlo", "Apple Braille", "Noto Sans Symbols 2", ui-monospace, monospace`;
+    ctx.font = `${14 * scale}px "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
     for (const it of laidOut) {
       ctx.fillStyle = getComputedStyle(it.el).getPropertyValue('--ink').trim() || '#3a3e46';
       ctx.fillText(`[${it.el.textContent}]`, it.x * scale, it.y * scale);
