@@ -865,15 +865,23 @@ impl Canvas {
                     .map(|(i, _)| i)
                     .unwrap_or(0);
 
-                // A cell can only be one glyph, so the two families compete and
-                // the heavier contribution wins the cell outright.
-                // Four families now, and a cell can only be one glyph, so they
-                // compete and the heaviest contribution takes it outright.
+                // A cell can only be one glyph, so the families compete for it
+                // and the heaviest contribution takes it outright -- weighted
+                // by what the family is *for*, not by area alone.
+                //
+                // The same election `TINT_PULL` fixes for colour, and it goes
+                // wrong the same way. A shade block covers all eight subpixels
+                // of its cell because that is how a shade block works, and a
+                // ridge stroke crossing the cell covers two or three. On
+                // coverage the ground wins every time and the stroke that was
+                // supposed to be the loudest thing on the frame disappears
+                // into the tone behind it. Ground is the page; strokes are the
+                // drawing on it.
                 let winner = [
-                    (dot_w, MAT_DOT),
-                    (solid_w, MAT_SOLID),
-                    (hatch_w, MAT_HATCH),
-                    (shade_w, MAT_SHADE),
+                    (dot_w * 1.0, MAT_DOT),
+                    (solid_w * 3.0, MAT_SOLID),
+                    (hatch_w * 2.0, MAT_HATCH),
+                    (shade_w * 0.45, MAT_SHADE),
                 ]
                 .into_iter()
                 .fold((0.0f32, MAT_DOT), |a, b| if b.0 > a.0 { b } else { a })

@@ -6,7 +6,7 @@
 //! solid strokes used for roads, and a dot grid needs no triangulation, no
 //! backface culling and no seams.
 
-use crate::canvas::{Brush, Canvas, MAT_DOT, TINT_GREEN};
+use crate::canvas::{Brush, Canvas, MAT_DOT, SUB_X, SUB_Y, TINT_GREEN};
 use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
 use crate::view::Ground;
@@ -41,6 +41,19 @@ const STEPS: [f32; 10] = [5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.
 /// Roughly how many lines should cross the visible range of elevation.
 const WANT_LINES: f32 = 9.0;
 
+/// Closest two contours are allowed to appear, in terminal rows.
+///
+/// The interval used to be chosen from the elevation range alone, which fixes
+/// how many lines cross the frame but says nothing about where they land. On a
+/// steep face the same interval bunches them into adjacent rows and the lines
+/// stop being readable as lines -- that is the mush: a hundred iso-lines a
+/// row apart is a texture, not a contour map.
+///
+/// So the question is asked in the units it is actually answered in. How many
+/// rows apart will these appear? If the answer is under this, the interval is
+/// too fine for the screen whatever the elevation range says.
+const MIN_ROWS: f32 = 5.0;
+
 /// The interval for a given spread of elevation.
 ///
 /// Chosen from the ground actually in frame rather than from the zoom, because
@@ -49,6 +62,25 @@ const WANT_LINES: f32 = 9.0;
 fn interval(range: f32) -> f32 {
     let want = (range / WANT_LINES).max(1.0);
     *STEPS.iter().find(|s| **s >= want).unwrap_or(&2000.0)
+}
+
+/// The contour interval, from the elevation range *and* the screen.
+///
+/// `interval` alone fixes how many lines cross the frame and says nothing
+/// about where they land. On a steep face the same interval bunches them into
+/// adjacent rows, and a hundred iso-lines a row apart is a texture rather than
+/// a contour map -- which is most of what made these frames mush.
+///
+/// So the question gets asked in the units it is answered in: how many rows
+/// apart will these actually appear? `steep_fall` is metres per grid step in
+/// the vertical, taken at the steep end of the frame rather than the middle,
+/// because bunching is a problem where the ground is steep and a median would
+/// size the interval for the gentle majority and leave the faces packed.
+fn screen_interval(range: f32, steep_fall: f32) -> f32 {
+    // One grid step is `STEP / SUB_Y` of a terminal row.
+    let m_per_row = steep_fall * SUB_Y as f32 / STEP as f32;
+    let need = m_per_row * MIN_ROWS;
+    interval(range).max(*STEPS.iter().find(|s| **s >= need).unwrap_or(&2000.0))
 }
 
 /// Highest elevation used to normalise shading, metres.
@@ -94,6 +126,58 @@ const DITHER: [[f32; 4]; 4] = [
     [0.969, 0.469, 0.844, 0.344],
 ];
 
+/// Steps the hillshade is quantised into, the first of which is blank page.
+///
+/// Five, because the terminal has no more than that to give: a shade block
+/// ladder is four glyphs plus the empty cell. Fewer, larger steps also read
+/// better than more, smaller ones -- a big jump in tone explains a change of
+/// slope, and a small one is indistinguishable from the cell next to it.
+const SHADE_STEPS: f32 = 5.0;
+
+/// Coverage per step, which is what picks the glyph off the shade ladder.
+/// Index 0 is never drawn: the darkest fifth of the ground is negative space.
+const SHADE_ALPHA: [f32; 5] = [0.0, 0.18, 0.38, 0.62, 0.88];
+
+/// How hard the light is stretched before it is stepped.
+///
+/// Lambert over an 850 m heightmap lives in a narrow band around `FLAT_LIGHT`,
+/// so stepping it raw puts every level on the same step and the frame comes
+/// out one flat tone. Exaggerated lighting is the standard answer in relief
+/// cartography and it is more necessary here, not less.
+const LIGHT_GAIN: f32 = 3.4;
+
+/// Share of the frame's samples that are allowed a mass block.
+///
+/// A budget, not a threshold, and it is the mechanism that produces negative
+/// space rather than hoping for it. Only the steepest third of the ground in
+/// frame gets tone; a plain is page, and so is the gentle half of a range.
+///
+/// Absolute illumination cannot do this job. Flat ground faces the sun at
+/// Lambert 0.7 -- brighter than most of a mountain -- so a hillshade keyed to
+/// light alone paints a plain solid and a valley floor empty, which is exactly
+/// backwards. What is being drawn here is *relief*: light chooses the tone,
+/// slope chooses whether there is anything to tone at all.
+const MASS_SHARE: f32 = 0.30;
+
+/// Extra smoothing passes behind the mass layer, on top of the one every
+/// derivative here gets. Enough that a hillside comes out as one region.
+const MASS_BLUR: usize = 6;
+
+/// Lambert of ground that is not sloped at all, which is where the ladder is
+/// centred so that a face turned to the sun climbs and one turned away falls.
+const FLAT_LIGHT: f32 = 0.70;
+
+/// Share of samples that become ridge strokes, and valley strokes.
+///
+/// A rank rather than a curvature threshold, so the frame gets about the same
+/// number of strokes whether it is over the Himalaya or the Deccan. Any fixed
+/// cut-off draws nothing on one and a hedge on the other.
+const RIDGE_SHARE: f32 = 0.07;
+const VALLEY_SHARE: f32 = 0.05;
+
+const RIDGE_ALPHA: f32 = 0.92;
+const VALLEY_ALPHA: f32 = 0.30;
+
 /// What is left of the light inside a full shadow.
 ///
 /// Not zero. A shadowed hillside on a clear day is lit by the sky, and a
@@ -136,6 +220,8 @@ pub struct Relief {
     heights: Vec<f32>,
     /// How much of the light each sample keeps: 1 lit, `AMBIENT` in shadow.
     light: Vec<f32>,
+    /// Curvature per sample: positive on a crest, negative in a hollow.
+    lap: Vec<f32>,
     gw: usize,
     gh: usize,
 }
@@ -342,6 +428,9 @@ impl Relief {
             }
         }
 
+        if ground == Ground::Massif {
+            plotted = self.massif(canvas, vp, &world, &lift);
+        }
         if ground == Ground::Contour {
             self.contours(canvas, vp, &world, &lift);
         }
@@ -349,6 +438,307 @@ impl Relief {
             plotted = self.hachures(canvas, vp, &world, &lift);
         }
         plotted
+    }
+
+    /// Terrain as a picture of a mountain: masses, ridges, a few contours.
+    ///
+    /// The reasoning, because it is a deliberate loss of information and the
+    /// next person to read this will want to put it back.
+    ///
+    /// A city renders well as one mark per feature because roads and buildings
+    /// are *sparse*: the geometry the marks make is the information. Ground has
+    /// no such gaps. Every sample has an elevation, so one-mark-per-sample
+    /// fills the frame with marks of equal weight, and a frame of equal marks
+    /// has no shape in it -- the eye reads texture and stops looking. The
+    /// ribbon mode drew 5186 cells of a 6000-cell frame over Zanskar. That is
+    /// not a map of a mountain range, it is a grey rectangle with a coastline.
+    ///
+    /// So: three layers, in the order the eye wants them, and nothing else.
+    ///
+    /// 1. Light and shade as *blocks*, quantised to five steps. Tone, not
+    ///    stipple. A cell of `▒` reads as a surface at a brightness; eight
+    ///    scattered braille dots read as eight things. Five steps and not
+    ///    two hundred because the limitation is the point -- a big step in
+    ///    brightness explains geometry, and a small one is noise the terminal
+    ///    cannot resolve anyway.
+    /// 2. Ridges as continuous strokes at the highest contrast on the frame.
+    ///    This is the silhouette, and it is the thing that was missing: the
+    ///    old frames had thousands of marks and no line your eye could follow
+    ///    along a range.
+    /// 3. Contours, thinned in *screen* space, as occasional reference.
+    ///
+    /// The brightest step of the shading is drawn as nothing at all. Empty
+    /// cells are part of the vocabulary here, not a failure to draw.
+    fn massif(
+        &mut self,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        world: &[[f64; 2]],
+        lift: &Lift,
+    ) -> usize {
+        let &Lift { datum, exag, m_per_world, strength } = lift;
+
+        // Derivatives off a smoothed copy. Curvature is the second difference
+        // and the second difference of a bilinear interpolation of 850 m
+        // samples is mostly the seams between heightmap cells; unsmoothed,
+        // ridge detection finds the grid rather than the mountain.
+        let blur = |src: &Vec<f32>, gw: usize, gh: usize| {
+            let mut out = src.clone();
+            for gy in 1..gh - 1 {
+                for gx in 1..gw - 1 {
+                    let i = gy * gw + gx;
+                    out[i] = 0.5 * src[i]
+                        + 0.125 * (src[i - 1] + src[i + 1] + src[i - gw] + src[i + gw]);
+                }
+            }
+            out
+        };
+        let sm = blur(&self.heights, self.gw, self.gh);
+        // A second, much broader field for the masses.
+        //
+        // One pass is right for curvature -- a ridge is a mid-frequency thing
+        // and over-smoothing walks the crest off the crest. It is wrong for
+        // tone. Light computed at grid resolution flips between neighbouring
+        // cells, so "the steepest third" comes out as a checkerboard of lit
+        // and unlit squares: the frame gets its negative space and spends it
+        // on noise. Masses are the *low-frequency* layer -- that is what makes
+        // them masses -- so they get a field smoothed until the regions it
+        // picks out are contiguous enough to read as one hillside.
+        let mut broad = sm.clone();
+        for _ in 0..MASS_BLUR {
+            broad = blur(&broad, self.gw, self.gh);
+        }
+
+        // The ridge threshold is a *rank*, not a number of metres. Curvature
+        // in the Himalaya and curvature over the Deccan differ by an order of
+        // magnitude, and any fixed cut-off draws either nothing on one and a
+        // hedge on the other. Taking the top slice means the frame gets about
+        // the same number of strokes wherever it is pointed, which is the
+        // whole idea of budgeting marks by what the screen can hold.
+        let mut curve: Vec<f32> = Vec::with_capacity(self.gw * self.gh);
+        let mut steep: Vec<f32> = Vec::with_capacity(self.gw * self.gh);
+        self.lap.clear();
+        self.lap.resize(self.gw * self.gh, 0.0);
+        for gy in 1..self.gh - 1 {
+            for gx in 1..self.gw - 1 {
+                let i = gy * self.gw + gx;
+                if self.heights[i] < 1.0 {
+                    continue;
+                }
+                let l = 4.0 * sm[i]
+                    - (sm[i - 1] + sm[i + 1] + sm[i - self.gw] + sm[i + self.gw]);
+                self.lap[i] = l;
+                curve.push(l);
+                let (dx, dy) =
+                    (broad[i + 1] - broad[i - 1], broad[i + self.gw] - broad[i - self.gw]);
+                steep.push((dx * dx + dy * dy).sqrt());
+            }
+        }
+        if curve.is_empty() {
+            return 0;
+        }
+        curve.sort_by(f32::total_cmp);
+        steep.sort_by(f32::total_cmp);
+        let pick = |v: &Vec<f32>, q: f32| v[((v.len() - 1) as f32 * q) as usize];
+        let ridge_at = pick(&curve, 1.0 - RIDGE_SHARE).max(1e-3);
+        let valley_at = pick(&curve, VALLEY_SHARE).min(-1e-3);
+        // The steepness a sample has to beat to be worth any tone at all.
+        let mass_at = pick(&steep, 1.0 - MASS_SHARE).max(1e-3);
+
+        let (mut masses, mut strokes) = (0usize, 0usize);
+        // One shade block per cell. Without this a cell that two grid samples
+        // land in gets painted twice, and alpha-over pushes it up a step --
+        // the quantisation would be undone by the sampling.
+        let mut taken = vec![false; canvas.cw * canvas.ch];
+
+        for gy in 1..self.gh - 1 {
+            for gx in 1..self.gw - 1 {
+                let i = gy * self.gw + gx;
+                let h = self.heights[i];
+                if h < 1.0 {
+                    continue;
+                }
+                let hw = (h - datum) as f64 * exag / m_per_world;
+                let (sp, depth) = vp.project3(world[i], hw);
+                if !depth.is_finite() {
+                    continue;
+                }
+
+                let dzdx = broad[i + 1] - broad[i - 1];
+                let dzdy = broad[i + self.gw] - broad[i - self.gw];
+                let nz = 60.0f32;
+                let len = (dzdx * dzdx + dzdy * dzdy + nz * nz).sqrt().max(1e-6);
+                let lambert = ((dzdx * 0.5 + dzdy * 0.5 + nz * 0.7) / len).clamp(0.0, 1.0);
+                // Stretched before it is stepped. Real Lambert over ground this
+                // coarse lives in a narrow band around the middle, and stepping
+                // that band gives four levels that are all the same level.
+                let lit =
+                    (((lambert - FLAT_LIGHT) * LIGHT_GAIN + 0.5) * self.light[i]).clamp(0.0, 1.0);
+
+                // Five steps, the first of which is the page -- and only the
+                // steepest `MASS_SHARE` of the frame is in the running at all.
+                let grade = (dzdx * dzdx + dzdy * dzdy).sqrt();
+                let step = if grade < mass_at {
+                    0
+                } else {
+                    (lit * SHADE_STEPS).floor().min(SHADE_STEPS - 1.0) as usize
+                };
+                if step > 0 {
+                    let (cx, cy) = (sp[0] as isize / SUB_X as isize, sp[1] as isize / SUB_Y as isize);
+                    if cx >= 0 && cy >= 0 && (cx as usize) < canvas.cw && (cy as usize) < canvas.ch {
+                        let cell = cy as usize * canvas.cw + cx as usize;
+                        if !taken[cell] {
+                            taken[cell] = true;
+                            let brush = Brush {
+                                depth,
+                                tint: TINT_GREEN,
+                                mat: crate::canvas::MAT_SHADE,
+                                pick: u32::MAX,
+                                behind: crate::canvas::Behind::Hide,
+                            };
+                            // Fill the whole cell: the shade glyph is chosen
+                            // from how much of the cell is covered, so a block
+                            // level is only reachable by covering the block.
+                            for sy in 0..SUB_Y {
+                                for sx in 0..SUB_X {
+                                    canvas.splat(
+                                        (cx as usize * SUB_X + sx) as f64,
+                                        (cy as usize * SUB_Y + sy) as f64,
+                                        SHADE_ALPHA[step] * strength,
+                                        &brush,
+                                    );
+                                }
+                            }
+                            masses += 1;
+                        }
+                    }
+                }
+
+                // Ridge and valley strokes, along the line of the landform
+                // rather than across it: perpendicular to the gradient is the
+                // direction a crest actually runs, so consecutive samples on
+                // the same crest lay strokes end to end and the eye gets a
+                // line to follow instead of a row of ticks.
+                let l = self.lap[i];
+                let (rdx, rdy) = (sm[i + 1] - sm[i - 1], sm[i + self.gw] - sm[i - self.gw]);
+                // Non-maximum suppression across the landform, the same trick
+                // an edge detector uses. Curvature above a threshold is a
+                // *band* a few samples wide, and drawing all of it gives a
+                // field of ticks with no line in it -- 744 of them on the
+                // frame that prompted this. Keeping only the sample that is
+                // the local maximum along the direction the ground falls
+                // thins that band to one sample, and consecutive maxima along
+                // the same crest then sit end to end and read as a line.
+                if !self.is_crest(i, l) {
+                    continue;
+                }
+                // Hatch, not block. A quadrant claims the whole cell as a
+                // solid lump, and seven hundred lumps is a checkerboard however
+                // well the ridges were detected. The hatch family picks its
+                // glyph from the direction of the ink in the cell -- `╱ ╲ ─ │`
+                // -- so a crest running north-east *looks* like it runs
+                // north-east, and consecutive strokes along one read as a
+                // continuous line rather than as a row of squares. Direction
+                // is the thing a ridge has to communicate; mass is not.
+                let (share, alpha, mat) = if l >= ridge_at {
+                    (l / ridge_at, RIDGE_ALPHA, crate::canvas::MAT_HATCH)
+                } else if l <= valley_at {
+                    (l / valley_at, VALLEY_ALPHA, MAT_DOT)
+                } else {
+                    continue;
+                };
+                let rgrade = (rdx * rdx + rdy * rdy).sqrt();
+                if rgrade < 1e-3 {
+                    continue;
+                }
+                // Along the contour: turn the downhill vector a quarter turn.
+                let (ax, ay) = (-rdy as f64 / rgrade as f64, rdx as f64 / rgrade as f64);
+                let ex = [
+                    (world[i + 1][0] - world[i - 1][0]) * 0.5,
+                    (world[i + 1][1] - world[i - 1][1]) * 0.5,
+                ];
+                let ey = [
+                    (world[i + self.gw][0] - world[i - self.gw][0]) * 0.5,
+                    (world[i + self.gw][1] - world[i - self.gw][1]) * 0.5,
+                ];
+                let reach = 1.2;
+                let ends = [-reach, reach].map(|r| {
+                    [
+                        world[i][0] + r * (ax * ex[0] + ay * ey[0]),
+                        world[i][1] + r * (ax * ex[1] + ay * ey[1]),
+                    ]
+                });
+                let (pa, da) = vp.project3(ends[0], hw);
+                let (pb, db) = vp.project3(ends[1], hw);
+                if !da.is_finite() || !db.is_finite() {
+                    continue;
+                }
+                crate::raster::line(
+                    canvas,
+                    pa,
+                    pb,
+                    &crate::raster::Pen {
+                        width: 1.0,
+                        alpha: (alpha * share.clamp(1.0, 1.6)).clamp(0.0, 0.98) * strength,
+                        depth: da.min(db),
+                        tint: TINT_GREEN,
+                        mat,
+                        pick: u32::MAX,
+                        behind: crate::canvas::Behind::Veil,
+                    },
+                );
+                strokes += 1;
+            }
+        }
+
+        self.contours(canvas, vp, world, lift);
+        masses + strokes
+    }
+
+    /// Is this the top of its ridge, measured across the ridge?
+    ///
+    /// Non-maximum suppression, the same step an edge detector uses: keep the
+    /// sample only if nothing either side of it, *across* the landform, is more
+    /// curved. Curvature above a threshold is a band several samples wide, and
+    /// drawing the whole band gives a field of ticks with no line in it.
+    ///
+    /// "Across" comes from the Hessian, not from the gradient, and that is the
+    /// whole difficulty. The obvious reading of "across the ridge" is "along
+    /// the fall line", but the fall line is exactly what vanishes at a crest --
+    /// the ground is level along the top of a ridge, so the gradient there is
+    /// zero and has no direction to offer. Using it suppressed the one sample
+    /// that mattered and kept its flanks; a test built from a plain roof
+    /// caught it, because the apex is where the gradient is smallest.
+    ///
+    /// The principal axis of curvature has no such hole. It points across the
+    /// landform whether or not the ground is falling.
+    fn is_crest(&self, i: usize, l: f32) -> bool {
+        let gw = self.gw;
+        let h = &self.heights;
+        let hxx = h[i + 1] - 2.0 * h[i] + h[i - 1];
+        let hyy = h[i + gw] - 2.0 * h[i] + h[i - gw];
+        let hxy = (h[i + gw + 1] - h[i + gw - 1] - h[i - gw + 1] + h[i - gw - 1]) * 0.25;
+        if hxx.abs() + hyy.abs() + hxy.abs() < 1e-6 {
+            return false;
+        }
+        let theta = 0.5 * (2.0 * hxy).atan2(hxx - hyy);
+        // Rounded to a grid neighbour: at one sample of reach there is nothing
+        // between the eight of them to interpolate towards.
+        let (sx, sy) = (theta.cos().round() as isize, theta.sin().round() as isize);
+        if sx == 0 && sy == 0 {
+            return false;
+        }
+        let step = sy * gw as isize + sx;
+        let (a, b) = (i as isize - step, i as isize + step);
+        if a < 0 || b < 0 || a as usize >= self.lap.len() || b as usize >= self.lap.len() {
+            return false;
+        }
+        let (la, lb) = (self.lap[a as usize], self.lap[b as usize]);
+        if l >= 0.0 {
+            l >= la && l >= lb
+        } else {
+            l <= la && l <= lb
+        }
     }
 
     /// Which ground a ridge is standing in front of.
@@ -590,7 +980,21 @@ impl Relief {
         if !(lo.is_finite() && hi.is_finite()) || hi - lo < 2.0 {
             return;
         }
-        let step = interval(hi - lo);
+        // Screen spacing, not just elevation spacing. `dh` per grid step in the
+        // vertical taken at the steep end of the frame rather than the middle:
+        // bunching is a problem *where the ground is steep*, and a median would
+        // size the interval for the gentle majority and leave the faces packed.
+        let mut fall: Vec<f32> = Vec::new();
+        for gy in 1..self.gh - 1 {
+            for gx in 0..self.gw {
+                let i = gy * self.gw + gx;
+                if self.heights[i] >= 1.0 {
+                    fall.push((self.heights[i + self.gw] - self.heights[i - self.gw]).abs() * 0.5);
+                }
+            }
+        }
+        fall.sort_by(f32::total_cmp);
+        let step = screen_interval(hi - lo, fall[(fall.len() - 1) * 3 / 4]);
 
         // Where a level crosses the segment between two corners, as a world
         // point lifted to that level. Both ends are already projected samples,
@@ -847,6 +1251,59 @@ mod tests {
             "a sun at {SUN_RISE} is steeper than any slope this heightmap has, \
              so nothing would ever cast a shadow"
         );
+    }
+
+    /// A steep frame gets a coarser interval than its elevation range asks
+    /// for, because the range does not know how far apart the lines will land.
+    #[test]
+    fn the_interval_answers_in_rows_not_only_in_metres() {
+        // The same 2000 m of range, over gentle ground and over a wall.
+        let gentle = screen_interval(2000.0, 4.0);
+        let steep = screen_interval(2000.0, 90.0);
+        assert!(steep > gentle, "{steep} is not coarser than {gentle}");
+        // And the coarse one actually delivers the spacing it was asked for.
+        for fall in [4.0f32, 20.0, 90.0, 300.0] {
+            let step = screen_interval(2000.0, fall);
+            let rows = step / (fall * SUB_Y as f32 / STEP as f32);
+            assert!(
+                rows >= MIN_ROWS - 0.001,
+                "a fall of {fall} m a step put contours {rows} rows apart"
+            );
+        }
+    }
+
+    /// Only the top of a ridge is the ridge.
+    ///
+    /// Curvature above a threshold is a band several samples wide. Drawing all
+    /// of it gives a field of ticks with no line in it; keeping the local
+    /// maximum across the fall thins it to something the eye can follow.
+    #[test]
+    fn only_the_crest_of_a_ridge_survives_the_thinning() {
+        let mut r = Relief::default();
+        r.gw = 9;
+        r.gh = 9;
+        // A roof: rises to the middle column and falls away again, so the
+        // curvature band spans the whole width and the crest is column 4.
+        r.heights = vec![0.0; 81];
+        r.lap = vec![0.0; 81];
+        for y in 0..9 {
+            for x in 0..9 {
+                let h = 100.0 - (x as f32 - 4.0).abs() * 20.0;
+                r.heights[y * 9 + x] = h;
+            }
+        }
+        for y in 1..8 {
+            for x in 1..8 {
+                let i = y * 9 + x;
+                r.lap[i] = 4.0 * r.heights[i]
+                    - (r.heights[i - 1] + r.heights[i + 1] + r.heights[i - 9] + r.heights[i + 9]);
+            }
+        }
+        let crest = |x: usize| r.is_crest(4 * 9 + x, r.lap[4 * 9 + x]);
+        assert!(crest(4), "the top of the roof was not taken as a crest");
+        for x in [2, 3, 5, 6] {
+            assert!(!crest(x), "the flank at {x} was taken as a crest");
+        }
     }
 
     /// Round numbers only. A map whose lines are 37 m apart cannot be counted.

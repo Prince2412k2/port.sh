@@ -94,8 +94,24 @@ pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
 /// How the ground surface is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Ground {
-    /// Shaded stipple, displaced by elevation. The 3D reading.
+    /// Masses, ridges and structural contours -- terrain drawn as a picture of
+    /// a mountain rather than as a plot of a heightmap.
+    ///
+    /// The other four all answer "what is the elevation here" once per sample
+    /// and put a mark down for the answer. That is the right question for a
+    /// city, where roads and buildings are sparse and their geometry *is* the
+    /// information. Ground is not sparse: every cell has an elevation, so every
+    /// cell gets a mark, and a frame where every cell is equally marked is a
+    /// frame with no shape in it. The eye reads texture and stops.
+    ///
+    /// So this one throws most of it away on purpose. Three layers, in the
+    /// order the eye wants them: broad light and shade as blocks, the ridges
+    /// that carry the silhouette as continuous strokes, and a few contours for
+    /// reference. No per-sample stipple at all. It draws about a fifth of the
+    /// marks the ribbon does and says considerably more with them.
     #[default]
+    Massif,
+    /// Shaded stipple, displaced by elevation. The 3D reading.
     Ribbon,
     /// The same stipple with no vertical displacement at all: hillshade, the
     /// way a printed map does relief. Honest where the heightmap is coarse,
@@ -121,6 +137,7 @@ pub enum Ground {
 impl Ground {
     pub fn label(self) -> &'static str {
         match self {
+            Ground::Massif => "massif",
             Ground::Ribbon => "relief",
             Ground::Shade => "shade",
             Ground::Contour => "contour",
@@ -130,10 +147,11 @@ impl Ground {
 
     pub fn next(self) -> Ground {
         match self {
+            Ground::Massif => Ground::Ribbon,
             Ground::Ribbon => Ground::Contour,
             Ground::Contour => Ground::Hachure,
             Ground::Hachure => Ground::Shade,
-            Ground::Shade => Ground::Ribbon,
+            Ground::Shade => Ground::Massif,
         }
     }
 
@@ -147,7 +165,7 @@ impl Ground {
     /// behind it. This only says whether the stipple is laid down, which is the
     /// difference between understanding the scene and painting it.
     pub fn paints_surface(self) -> bool {
-        self != Ground::Hachure
+        !matches!(self, Ground::Hachure | Ground::Massif)
     }
 }
 
@@ -246,7 +264,8 @@ mod tests {
     /// fourth broke it: the cycle was fine and the test was counting.
     #[test]
     fn the_ground_styles_cycle_through_all_of_themselves() {
-        let all = [Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
+        let all =
+            [Ground::Massif, Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
         let mut g = Ground::default();
         let mut seen = Vec::new();
         for _ in 0..all.len() {
@@ -269,7 +288,7 @@ mod tests {
     #[test]
     fn only_shade_lies_flat_and_only_hachure_leaves_the_surface_bare() {
         assert!(!Ground::Shade.displaces());
-        for style in [Ground::Ribbon, Ground::Contour, Ground::Hachure] {
+        for style in [Ground::Massif, Ground::Ribbon, Ground::Contour, Ground::Hachure] {
             assert!(style.displaces(), "{style:?} should read elevation");
         }
         assert!(!Ground::Hachure.paints_surface());
