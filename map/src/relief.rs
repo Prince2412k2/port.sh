@@ -83,52 +83,6 @@ fn screen_interval(range: f32, steep_fall: f32) -> f32 {
     interval(range).max(*STEPS.iter().find(|s| **s >= need).unwrap_or(&2000.0))
 }
 
-/// The least relief that counts as terrain worth drawing, metres.
-///
-/// About a ten-storey building, and the number came from the brief: show
-/// something that would qualify as a mountain, not every undulation the
-/// heightmap happens to record. It is the single biggest thing standing
-/// between this renderer and a legible frame at region scale -- over Gujarat
-/// and Rajasthan the ground moves by a few metres over kilometres, and drawing
-/// a mark for every sample of it filled half of India with an even stipple
-/// that said nothing except "there is ground here", which the reader already
-/// knew.
-///
-/// Measured as how far a sample stands above the lowest ground within
-/// `STANDS_R` grid steps, not as slope and not as absolute height. Slope would
-/// keep a gently tilted plain and drop a cliff face seen edge-on; absolute
-/// height would draw the whole Deccan plateau as though it were a mountain,
-/// which is precisely the mistake -- a plateau is high ground, not a mountain,
-/// and it looks like neither when it is drawn as texture.
-const MOUNTAIN: f32 = 30.0;
-
-/// Eight compass points, for the low-ground lookup.
-const RING: [(f64, f64); 8] = [
-    (1.0, 0.0),
-    (-1.0, 0.0),
-    (0.0, 1.0),
-    (0.0, -1.0),
-    (0.7, 0.7),
-    (0.7, -0.7),
-    (-0.7, 0.7),
-    (-0.7, -0.7),
-];
-
-/// How far away the local low point is looked for, metres.
-///
-/// A world distance and not a number of grid steps, which is the whole point
-/// and was the bug in the first cut. The grid is screen-space, so a window of
-/// four steps spans twelve kilometres at street zoom and a hundred and twenty
-/// at country zoom -- and over a hundred and twenty kilometres almost
-/// everywhere in India stands thirty metres above something. The test passed
-/// everywhere and filtered nothing, which is exactly what the country-wide
-/// frame looked like.
-///
-/// Three kilometres. Far enough that a real landform clears it, near enough
-/// that a plain does not: measured off the shipped heightmap, ground near
-/// Mahesana stands about 8 m over 3 km and the Aravalli edge about 180 m.
-const STANDS_M: f64 = 3000.0;
-
 /// Highest elevation used to normalise shading, metres.
 const MAX_ELEV: f32 = 6000.0;
 
@@ -276,9 +230,6 @@ pub struct Relief {
     heights: Vec<f32>,
     /// How much of the light each sample keeps: 1 lit, `AMBIENT` in shadow.
     light: Vec<f32>,
-    /// Local relief per sample, metres: how far this ground stands above the
-    /// lowest ground near it. Below `MOUNTAIN` it is not drawn at all.
-    stands: Vec<f32>,
     /// Curvature per sample: positive on a crest, negative in a hollow.
     lap: Vec<f32>,
     gw: usize,
@@ -301,8 +252,6 @@ impl Relief {
         self.gh = (canvas.sh as f64 / STEP).ceil() as usize + 3;
         self.heights.clear();
         self.heights.resize(self.gw * self.gh, 0.0);
-        self.stands.clear();
-        self.stands.resize(self.gw * self.gh, 0.0);
 
         // Fraction of the screen left as sky when tilted.
         //
@@ -329,21 +278,7 @@ impl Relief {
                 let (lon, lat) = world_to_lonlat(w[0], w[1]);
                 let i = gy * self.gw + gx;
                 world[i] = w;
-                let h = t.sample(lon, lat);
-                self.heights[i] = h;
-                // The ground this sample stands on, looked up straight out of
-                // the heightmap at a fixed distance rather than off the
-                // sampling grid, so the question stays the same question at
-                // every zoom.
-                let (dlon, dlat) = (
-                    STANDS_M / (111_320.0 * lat.to_radians().cos().abs().max(0.05)),
-                    STANDS_M / 110_540.0,
-                );
-                let mut floor = h;
-                for (ox, oy) in RING {
-                    floor = floor.min(t.sample(lon + ox * dlon, lat + oy * dlat));
-                }
-                self.stands[i] = h - floor;
+                self.heights[i] = t.sample(lon, lat);
             }
         }
 
@@ -372,13 +307,6 @@ impl Relief {
                 let h = self.heights[i];
                 // Sea level is not terrain; the water layer already owns it.
                 if h < 1.0 {
-                    continue;
-                }
-                // Ground that stands over nothing is not a landform. It is not
-                // occluded either -- skipping the depth ribbon as well as the
-                // stipple, so that flat ground is properly absent rather than
-                // an invisible wall that punches holes in the roads behind it.
-                if self.stands[i] < MOUNTAIN {
                     continue;
                 }
                 // Outside the slab there is no ground, so nothing is drawn and
@@ -604,7 +532,7 @@ impl Relief {
         for gy in 1..self.gh - 1 {
             for gx in 1..self.gw - 1 {
                 let i = gy * self.gw + gx;
-                if self.heights[i] < 1.0 || self.stands[i] < MOUNTAIN {
+                if self.heights[i] < 1.0 {
                     continue;
                 }
                 let l = 4.0 * sm[i]
@@ -637,7 +565,7 @@ impl Relief {
             for gx in 1..self.gw - 1 {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
-                if h < 1.0 || self.stands[i] < MOUNTAIN {
+                if h < 1.0 {
                     continue;
                 }
                 let hw = (h - datum) as f64 * exag / m_per_world;
@@ -815,7 +743,7 @@ impl Relief {
             for gy in 0..self.gh {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
-                if h < 1.0 || self.stands[i] < MOUNTAIN {
+                if h < 1.0 {
                     continue;
                 }
                 let m = vp.plane_of(world[i]);
@@ -1046,7 +974,7 @@ impl Relief {
             for gx in (1..self.gw.saturating_sub(1)).step_by(STRIDE) {
                 let i = gy * self.gw + gx;
                 let h = self.heights[i];
-                if h < 1.0 || self.stands[i] < MOUNTAIN {
+                if h < 1.0 {
                     continue;
                 }
                 let dzdx = self.heights[i + 1] - self.heights[i - 1];
@@ -1561,42 +1489,6 @@ mod tests {
         };
         assert_eq!(solids(0.0), 0, "a plan view drew a silhouette against nothing");
         assert!(solids(30.0_f64.to_radians()) > 8, "a tilted range drew no skyline");
-    }
-
-    /// A plain is not terrain, and a mountain is.
-    ///
-    /// The threshold that decides it is measured against the shipped
-    /// heightmap, because the whole question is whether real ground separates
-    /// cleanly at thirty metres -- a synthetic hill would only restate the
-    /// constant. Skipped, not failed, where the data is absent.
-    #[test]
-    fn a_plain_does_not_qualify_as_terrain_and_a_range_does() {
-        let Some(p) = crate::paths::data_file("india.tmhg") else { return };
-        let t = crate::terrain::Terrain::open(&p).unwrap();
-
-        // How far ground stands over the low point 3 km around it -- the same
-        // measure the renderer gates on.
-        let stands = |lon: f64, lat: f64| {
-            let h = t.sample(lon, lat);
-            let dlon = STANDS_M / (111_320.0 * lat.to_radians().cos());
-            let dlat = STANDS_M / 110_540.0;
-            let mut floor = h;
-            for (ox, oy) in RING {
-                floor = floor.min(t.sample(lon + ox * dlon, lat + oy * dlat));
-            }
-            h - floor
-        };
-        // Mahesana and Radhanpur, on the north Gujarat plain -- the frame that
-        // came back as an even stipple over everything.
-        for (lon, lat, what) in [(72.40, 23.60, "Mahesana"), (71.60, 23.83, "Radhanpur")] {
-            let s = stands(lon, lat);
-            assert!(s < MOUNTAIN, "{what} stands {s} m and would be drawn as terrain");
-        }
-        // And the ground that should survive.
-        for (lon, lat, what) in [(76.89, 33.47, "Zanskar"), (73.66, 19.94, "the Ghats")] {
-            let s = stands(lon, lat);
-            assert!(s >= MOUNTAIN, "{what} stands only {s} m and would be dropped");
-        }
     }
 
     /// Round numbers only. A map whose lines are 37 m apart cannot be counted.
