@@ -44,6 +44,7 @@ pub const LAYER_KEYS: [char; 8] = ['!', '@', '#', '$', '%', '^', '&', '*'];
 /// Terrain relief. Shift and `9`, keeping its place in the row.
 pub const TERRAIN_KEY: char = '(';
 pub const GROUND_KEY: char = 'v';
+pub const GLOBE_KEY: char = 'w';
 
 /// Every layer back on. Shift and `0`, likewise.
 pub const ALL_LAYERS_KEY: char = ')';
@@ -84,6 +85,8 @@ pub struct App {
     pub show_terrain: bool,
     /// How the ground surface is drawn -- see `view::Ground`.
     pub ground: crate::view::Ground,
+    /// Looking at the planet rather than at the ground.
+    pub globe: bool,
     pub relief: crate::relief::Relief,
     pub road_glyph: RoadGlyph,
     /// Multiplies every stroke width, so road weight can be dialled in at
@@ -154,6 +157,7 @@ impl App {
             mono: true,
             show_terrain: true,
             ground: Default::default(),
+            globe: false,
             relief: Default::default(),
             road_glyph: RoadGlyph::Dotted,
             road_weight: 1.0,
@@ -641,6 +645,11 @@ impl App {
             // Cycles rather than toggles: there are three ways to draw ground
             // and the only way to judge between them is to see them in the
             // same place a moment apart.
+            KeyCode::Char(GLOBE_KEY) => {
+                self.globe = !self.globe;
+                self.toast =
+                    Some(if self.globe { "the whole planet" } else { "back to the ground" }.into());
+            }
             KeyCode::Char(GROUND_KEY) => {
                 self.ground = self.ground.next();
                 self.toast = Some(format!("ground: {}", self.ground.label()));
