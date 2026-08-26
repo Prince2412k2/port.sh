@@ -6,7 +6,7 @@
 //! solid strokes used for roads, and a dot grid needs no triangulation, no
 //! backface culling and no seams.
 
-use crate::canvas::{Brush, Canvas, MAT_DOT, SUB_X, SUB_Y, TINT_GREEN};
+use crate::canvas::{Brush, Canvas, MAT_DOT, TINT_GREEN};
 use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
 use crate::view::Ground;
@@ -41,19 +41,6 @@ const STEPS: [f32; 10] = [5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0, 250.0, 500.
 /// Roughly how many lines should cross the visible range of elevation.
 const WANT_LINES: f32 = 9.0;
 
-/// Closest two contours are allowed to appear, in terminal rows.
-///
-/// The interval used to be chosen from the elevation range alone, which fixes
-/// how many lines cross the frame but says nothing about where they land. On a
-/// steep face the same interval bunches them into adjacent rows and the lines
-/// stop being readable as lines -- that is the mush: a hundred iso-lines a
-/// row apart is a texture, not a contour map.
-///
-/// So the question is asked in the units it is actually answered in. How many
-/// rows apart will these appear? If the answer is under this, the interval is
-/// too fine for the screen whatever the elevation range says.
-const MIN_ROWS: f32 = 5.0;
-
 /// The interval for a given spread of elevation.
 ///
 /// Chosen from the ground actually in frame rather than from the zoom, because
@@ -64,27 +51,11 @@ fn interval(range: f32) -> f32 {
     *STEPS.iter().find(|s| **s >= want).unwrap_or(&2000.0)
 }
 
-/// The contour interval, from the elevation range *and* the screen.
-///
-/// `interval` alone fixes how many lines cross the frame and says nothing
-/// about where they land. On a steep face the same interval bunches them into
-/// adjacent rows, and a hundred iso-lines a row apart is a texture rather than
-/// a contour map -- which is most of what made these frames mush.
-///
-/// So the question gets asked in the units it is answered in: how many rows
-/// apart will these actually appear? `steep_fall` is metres per grid step in
-/// the vertical, taken at the steep end of the frame rather than the middle,
-/// because bunching is a problem where the ground is steep and a median would
-/// size the interval for the gentle majority and leave the faces packed.
-fn screen_interval(range: f32, steep_fall: f32) -> f32 {
-    // One grid step is `STEP / SUB_Y` of a terminal row.
-    let m_per_row = steep_fall * SUB_Y as f32 / STEP as f32;
-    let need = m_per_row * MIN_ROWS;
-    interval(range).max(*STEPS.iter().find(|s| **s >= need).unwrap_or(&2000.0))
-}
-
 /// Highest elevation used to normalise shading, metres.
 const MAX_ELEV: f32 = 6000.0;
+
+
+
 
 
 /// What a relief pass needs to know besides the ground itself: where zero is,
@@ -313,9 +284,6 @@ impl Relief {
             }
         }
 
-        if ground == Ground::Massif {
-            plotted = self.massif(canvas, vp, &world, &lift);
-        }
         if ground == Ground::Contour {
             self.contours(canvas, vp, &world, &lift);
         }
@@ -324,6 +292,7 @@ impl Relief {
         }
         plotted
     }
+
 
     /// Strokes down the line of steepest descent.
     ///
@@ -506,21 +475,7 @@ impl Relief {
         if !(lo.is_finite() && hi.is_finite()) || hi - lo < 2.0 {
             return;
         }
-        // Screen spacing, not just elevation spacing. `dh` per grid step in the
-        // vertical taken at the steep end of the frame rather than the middle:
-        // bunching is a problem *where the ground is steep*, and a median would
-        // size the interval for the gentle majority and leave the faces packed.
-        let mut fall: Vec<f32> = Vec::new();
-        for gy in 1..self.gh - 1 {
-            for gx in 0..self.gw {
-                let i = gy * self.gw + gx;
-                if self.heights[i] >= 1.0 {
-                    fall.push((self.heights[i + self.gw] - self.heights[i - self.gw]).abs() * 0.5);
-                }
-            }
-        }
-        fall.sort_by(f32::total_cmp);
-        let step = screen_interval(hi - lo, fall[(fall.len() - 1) * 3 / 4]);
+        let step = interval(hi - lo);
 
         // Where a level crosses the segment between two corners, as a world
         // point lifted to that level. Both ends are already projected samples,
@@ -692,6 +647,37 @@ mod tests {
                 "{range} m of range gave {lines} lines at a {step} m interval"
             );
         }
+    }
+
+    /// The nearest row is drawn first, so the depth buffer can reject.
+    ///
+    /// The canvas is alpha-over, not opaque, so "nearer ribbons paint over
+    /// farther ones" was never true -- a near mark laid on a far one adds to
+    /// the cell. Hidden-surface removal here depends entirely on the near
+    /// ground reaching the depth buffer before the far ground asks to draw.
+    #[test]
+    fn the_ground_nearest_the_camera_is_drawn_first() {
+        let rows: Vec<usize> = near_to_far(12).collect();
+        assert_eq!(rows.first(), Some(&9), "the first row drawn is not the nearest");
+        assert_eq!(rows.last(), Some(&1), "the last row drawn is not the farthest");
+        assert!(rows.windows(2).all(|w| w[0] > w[1]), "the order is not monotonic");
+        // Degenerate grids must not wrap into an enormous range.
+        assert_eq!(near_to_far(2).count(), 0);
+    }
+
+    /// The depth ribbon has to cover the ground between samples.
+    ///
+    /// Samples sit `STEP` subpixels apart and each one used to claim two
+    /// columns, so a third of every row held no ground in the depth buffer and
+    /// the range behind showed through the gap -- the stipple hid it well
+    /// enough to look like dither rather than like a bug.
+    #[test]
+    fn the_depth_ribbon_leaves_no_column_unclaimed() {
+        let claimed = 2 * HALF_STEP + 1;
+        assert!(
+            claimed >= STEP.ceil() as isize,
+            "a sample claims {claimed} columns of the {STEP} it is answerable for"
+        );
     }
 
     /// Round numbers only. A map whose lines are 37 m apart cannot be counted.

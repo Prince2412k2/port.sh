@@ -94,29 +94,13 @@ pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
 /// How the ground surface is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Ground {
-    /// Masses, ridges and structural contours -- terrain drawn as a picture of
-    /// a mountain rather than as a plot of a heightmap.
+    /// Shaded stipple, displaced by elevation. The 3D reading, and the
+    /// default -- braille all the way down.
     ///
-    /// The other four all answer "what is the elevation here" once per sample
-    /// and put a mark down for the answer. That is the right question for a
-    /// city, where roads and buildings are sparse and their geometry *is* the
-    /// information. Ground is not sparse: every cell has an elevation, so every
-    /// cell gets a mark, and a frame where every cell is equally marked is a
-    /// frame with no shape in it. The eye reads texture and stops.
-    ///
-    /// So this one throws most of it away on purpose. Three layers, in the
-    /// order the eye wants them: broad light and shade as blocks, the ridges
-    /// that carry the silhouette as continuous strokes, and a few contours for
-    /// reference. No per-sample stipple at all. It draws about a fifth of the
-    /// marks the ribbon does and says considerably more with them.
-    Massif,
-    /// Shaded stipple, displaced by elevation. The 3D reading.
-    ///
-    /// The default, and it is braille all the way down. What was wrong with it
-    /// was never the glyph -- it was that the stipple had no boundary and no
-    /// tonal range, so it read as texture. It has an outline now (`Canvas::rim`)
-    /// and the bottom of the ramp back, and only ground that stands thirty
-    /// metres over its surroundings is drawn at all.
+    /// What was wrong with it was never the glyph. It was that the stipple had
+    /// no boundary and no tonal range, so the eye read the whole frame as one
+    /// material and stopped. It has an outline now (`Canvas::rim`) and the
+    /// bottom of the ramp back.
     #[default]
     Ribbon,
     /// The same stipple with no vertical displacement at all: hillshade, the
@@ -143,7 +127,6 @@ pub enum Ground {
 impl Ground {
     pub fn label(self) -> &'static str {
         match self {
-            Ground::Massif => "massif",
             Ground::Ribbon => "relief",
             Ground::Shade => "shade",
             Ground::Contour => "contour",
@@ -153,11 +136,10 @@ impl Ground {
 
     pub fn next(self) -> Ground {
         match self {
-            Ground::Massif => Ground::Ribbon,
             Ground::Ribbon => Ground::Contour,
             Ground::Contour => Ground::Hachure,
             Ground::Hachure => Ground::Shade,
-            Ground::Shade => Ground::Massif,
+            Ground::Shade => Ground::Ribbon,
         }
     }
 
@@ -171,7 +153,7 @@ impl Ground {
     /// behind it. This only says whether the stipple is laid down, which is the
     /// difference between understanding the scene and painting it.
     pub fn paints_surface(self) -> bool {
-        !matches!(self, Ground::Hachure | Ground::Massif)
+        self != Ground::Hachure
     }
 }
 
@@ -270,8 +252,7 @@ mod tests {
     /// fourth broke it: the cycle was fine and the test was counting.
     #[test]
     fn the_ground_styles_cycle_through_all_of_themselves() {
-        let all =
-            [Ground::Massif, Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
+        let all = [Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
         let mut g = Ground::default();
         let mut seen = Vec::new();
         for _ in 0..all.len() {
@@ -294,7 +275,7 @@ mod tests {
     #[test]
     fn only_shade_lies_flat_and_only_hachure_leaves_the_surface_bare() {
         assert!(!Ground::Shade.displaces());
-        for style in [Ground::Massif, Ground::Ribbon, Ground::Contour, Ground::Hachure] {
+        for style in [Ground::Ribbon, Ground::Contour, Ground::Hachure] {
             assert!(style.displaces(), "{style:?} should read elevation");
         }
         assert!(!Ground::Hachure.paints_surface());
