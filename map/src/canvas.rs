@@ -83,6 +83,37 @@ const TINT_RGB: [(u8, u8, u8); 12] = [
     (255, 108, 92),  // your position: the one thing that is never terrain
 ];
 
+/// How hard a tint argues for the cell's colour, against how much of it it
+/// actually covers.
+///
+/// A cell carries one colour and the tints used to vote on it by coverage
+/// alone. That is the wrong election over terrain. The braille glyph already
+/// merges every dot in the cell whatever drew it, so a road crossing a hillside
+/// *is* drawn -- its dots are in there -- but the stipple around it outvotes it
+/// several times over and the whole cell comes out terrain green. The road is
+/// on the screen and invisible, which took an embarrassingly long time to see
+/// because every measurement said it was being drawn.
+///
+/// So coverage is weighted by what the thing is. A road is what you trace with
+/// your eye and ground is what it is traced against; the canvas already says so
+/// about which glyph family wins a cell, and this is the same sentence about
+/// colour. Ground sits below 1.0 rather than roads far above it, so a cell with
+/// nothing else in it still reads as exactly what it is.
+const TINT_PULL: [f32; 12] = [
+    1.0, // mono
+    2.0, // landmark
+    4.0, // selection: whatever you asked about wins outright
+    1.0, // water
+    3.0, // motorway / trunk
+    2.6, // primary / secondary
+    2.2, // tertiary / residential
+    2.4, // railway
+    0.7, // parks, landuse, terrain -- the page, not the drawing
+    1.6, // coastline
+    1.4, // administrative border
+    4.0, // your position
+];
+
 /// Box-drawing glyphs indexed by connected edges (N=1, E=2, S=4, W=8).
 ///
 /// The thinnest stroke a terminal can draw: a hairline through the cell centre,
@@ -706,7 +737,8 @@ impl Canvas {
                 let tint = weight
                     .iter()
                     .enumerate()
-                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(i, w)| (i, w * TINT_PULL[i]))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
                     .map(|(i, _)| i)
                     .unwrap_or(0);
 
@@ -1028,5 +1060,104 @@ mod veil_tests {
         let before = ink(&c, 2, 2);
         c.plot(2, 2, 0.5, &at(Behind::Ignore, 0.90));
         assert!(ink(&c, 2, 2) > before, "Ignore should draw regardless of depth");
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+
+    fn brush(tint: u8) -> Brush {
+        Brush { depth: 0.5, tint, mat: MAT_DOT, pick: u32::MAX, behind: Behind::Ignore }
+    }
+
+    fn colour_of(cell_paint: impl Fn(&mut Canvas)) -> Color {
+        let mut c = Canvas::new(2, 1);
+        cell_paint(&mut c);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        c.resolve(&mut buf, Rect::new(0, 0, 2, 1), &Fog { near: 1.0, far: 1.0, gamma: 1.0 }, false);
+        buf.cell((0, 0)).unwrap().fg
+    }
+
+    /// A road crossing a hillside must come out the colour of a road.
+    ///
+    /// The braille glyph already merges every dot in the cell whatever drew it,
+    /// so the road's dots were always on the screen. What it lost was the
+    /// colour: the tints voted by coverage alone and a hillside outvotes a road
+    /// several times over, so the whole cell came out terrain green and the
+    /// road was invisible while every count said it was drawn.
+    #[test]
+    fn a_road_over_a_hillside_is_still_coloured_a_road() {
+        // Hue, not the exact colour: coverage changes the brightness whatever
+        // wins the vote, so comparing colours outright passes for the wrong
+        // reason. The first version of this test did exactly that and went on
+        // passing with the weighting taken out.
+        let hue = |c: Color| match c {
+            Color::Rgb(r, g, b) => {
+                let m = r.max(g).max(b).max(1) as f32;
+                ((r as f32 / m * 8.0).round() as u8,
+                 (g as f32 / m * 8.0).round() as u8,
+                 (b as f32 / m * 8.0).round() as u8)
+            }
+            other => panic!("expected a hue, got {other:?}"),
+        };
+        let ground = hue(colour_of(|c| {
+            for y in 0..4 {
+                for x in 0..2 {
+                    c.plot(x, y, 0.5, &brush(TINT_GREEN));
+                }
+            }
+        }));
+        let road = hue(colour_of(|c| {
+            c.plot(0, 1, 0.9, &brush(TINT_MAJOR));
+            c.plot(1, 1, 0.9, &brush(TINT_MAJOR));
+        }));
+        assert_ne!(ground, road, "the two tints are not distinguishable to begin with");
+
+        // A hillside with a road through it: outnumbered three to one on
+        // coverage, and it still has to be the road you see.
+        let crossed = hue(colour_of(|c| {
+            for y in 0..4 {
+                for x in 0..2 {
+                    c.plot(x, y, 0.5, &brush(TINT_GREEN));
+                }
+            }
+            c.plot(0, 1, 0.9, &brush(TINT_MAJOR));
+            c.plot(1, 1, 0.9, &brush(TINT_MAJOR));
+        }));
+        assert_eq!(crossed, road, "the road was drowned out by the hillside");
+    }
+
+    /// And ground still reads as ground when it is the only thing there, so the
+    /// weighting is a tie-break and not a thumb on every scale.
+    #[test]
+    fn ground_on_its_own_is_still_ground() {
+        let alone = colour_of(|c| {
+            for y in 0..4 {
+                for x in 0..2 {
+                    c.plot(x, y, 0.6, &brush(TINT_GREEN));
+                }
+            }
+        });
+        let reference = colour_of(|c| c.plot(0, 0, 0.6, &brush(TINT_GREEN)));
+        // Same hue either way; brightness differs with coverage, which is fine.
+        let hue = |c: Color| match c {
+            Color::Rgb(r, g, b) => {
+                let m = r.max(g).max(b).max(1) as f32;
+                Some(((r as f32 / m * 8.0) as u8, (g as f32 / m * 8.0) as u8, (b as f32 / m * 8.0) as u8))
+            }
+            _ => None,
+        };
+        assert_eq!(hue(alone), hue(reference), "ground changed colour on its own");
+    }
+
+    /// Every tint has a weight, or the lookup would panic on the one that does
+    /// not -- and it would be whichever was added last.
+    #[test]
+    fn every_tint_has_a_pull() {
+        assert_eq!(TINT_PULL.len(), TINT_RGB.len());
+        for (i, p) in TINT_PULL.iter().enumerate() {
+            assert!(*p > 0.0, "tint {i} would never win a cell it was alone in");
+        }
     }
 }
