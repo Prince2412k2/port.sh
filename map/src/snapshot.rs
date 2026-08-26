@@ -47,7 +47,9 @@ pub fn render(app: &mut App, o: &Opts) -> std::io::Result<()> {
     if let Some(g) = o.ground {
         app.ground = g;
     }
-    app.globe = o.globe;
+    if o.globe {
+        app.set_zoom(crate::globe::OPENING);
+    }
     if let Some(w) = o.weight {
         app.road_weight = w;
     }

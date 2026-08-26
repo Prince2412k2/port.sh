@@ -25,7 +25,13 @@ pub const PIXEL_ASPECT: f64 = 2.0 / CELL_ASPECT;
 /// Closest a point may sit to the eye before the perspective divide is pinned.
 const NEAR_CLIP: f64 = 1.0;
 
-pub const MIN_ZOOM: f64 = 2.5;
+/// Low enough to stand off the planet.
+///
+/// Was 2.5, which framed a country and no more -- fine while Mercator was the
+/// only projection here, and the reason a globe had nowhere to live. The world
+/// is drawn as a sphere below `globe::UNTIL`, so the floor has to sit under
+/// that band rather than above it.
+pub const MIN_ZOOM: f64 = 0.0;
 pub const MAX_ZOOM: f64 = 18.0;
 
 pub fn lonlat_to_world(lon: f64, lat: f64) -> [f64; 2] {

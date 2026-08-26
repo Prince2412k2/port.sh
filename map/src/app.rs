@@ -85,8 +85,6 @@ pub struct App {
     pub show_terrain: bool,
     /// How the ground surface is drawn -- see `view::Ground`.
     pub ground: crate::view::Ground,
-    /// Looking at the planet rather than at the ground.
-    pub globe: bool,
     pub relief: crate::relief::Relief,
     pub road_glyph: RoadGlyph,
     /// Multiplies every stroke width, so road weight can be dialled in at
@@ -157,7 +155,6 @@ impl App {
             mono: true,
             show_terrain: true,
             ground: Default::default(),
-            globe: false,
             relief: Default::default(),
             road_glyph: RoadGlyph::Dotted,
             road_weight: 1.0,
@@ -376,7 +373,13 @@ impl App {
     /// Called once the canvas has a real size.
     pub fn fit_if_pending(&mut self) {
         if self.fit_pending {
+            // Fit for the *centre*, then stand back off it. The fit points the
+            // camera at whatever the data covers; the zoom is overridden so the
+            // app opens on the planet with that place facing you, and zooming
+            // in is how you get to it. `--zoom` still wins, because `set_zoom`
+            // clears the pending flag before this runs.
             self.vp.fit(self.source.bounds());
+            self.vp.zoom = crate::globe::OPENING;
             self.fit_pending = false;
         }
     }
@@ -645,10 +648,12 @@ impl App {
             // Cycles rather than toggles: there are three ways to draw ground
             // and the only way to judge between them is to see them in the
             // same place a moment apart.
+            // Not a mode: which projection is drawn follows the zoom. This is
+            // the way back out, the counterpart of zooming in on a country.
             KeyCode::Char(GLOBE_KEY) => {
-                self.globe = !self.globe;
-                self.toast =
-                    Some(if self.globe { "the whole planet" } else { "back to the ground" }.into());
+                self.vp.zoom = crate::globe::OPENING;
+                self.fit_pending = false;
+                self.toast = Some("the whole planet".into());
             }
             KeyCode::Char(GROUND_KEY) => {
                 self.ground = self.ground.next();

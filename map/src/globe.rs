@@ -26,6 +26,41 @@ use crate::canvas::{
 use crate::data::Layer;
 use crate::raster::{self, Pen};
 
+/// Zoom below which the world is a sphere.
+///
+/// Above it the curvature across a frame is too slight to be worth the
+/// projection, and the ground is what you came for.
+///
+/// Chosen by looking at the frame on the other side of it rather than by
+/// reasoning about curvature: at 4.0 the first ground view came up already
+/// cropping India, which reads as a jump. At 3.5 it holds the whole country,
+/// so the handoff says "the globe filled up, and here is the place that was
+/// facing you".
+pub const UNTIL: f64 = 3.5;
+
+/// Where the app opens: far enough out to see the planet, close enough that it
+/// is not a marble. The camera is pointed at whatever the data covers, so the
+/// first thing on screen is a world with the one place we know about facing
+/// you, and zooming in goes there.
+pub const OPENING: f64 = 1.6;
+
+/// Whether this zoom is a globe.
+pub fn shows(zoom: f64) -> bool {
+    zoom < UNTIL
+}
+
+/// How much of the frame the disc takes, across the globe's band of zoom.
+///
+/// Ramped rather than fixed so that zooming in on the planet does something --
+/// the disc grows towards the frame and the handoff to the ground reads as
+/// arriving rather than as a cut. It is not scale-continuous with Mercator and
+/// deliberately so: matching the sphere's centre scale to the map's makes the
+/// disc double in size every zoom step, which leaves about one step between a
+/// marble and a wall, and no room to turn the thing round and look at it.
+fn fill(zoom: f64) -> f64 {
+    0.60 + 0.34 * (zoom.max(0.0) / UNTIL).clamp(0.0, 1.0)
+}
+
 /// Degrees between graticule lines.
 ///
 /// Thirty, not fifteen. At the size a terminal globe actually is, fifteen
@@ -53,13 +88,13 @@ pub struct Globe {
 }
 
 impl Globe {
-    /// A globe centred in `canvas`, as large as it will go with a little air.
-    pub fn fit(canvas: &Canvas, lon: f64, lat: f64) -> Globe {
+    /// A globe centred in `canvas`, sized for the zoom it is standing in for.
+    pub fn fit(canvas: &Canvas, lon: f64, lat: f64, zoom: f64) -> Globe {
         let (w, h) = (canvas.sw as f64, canvas.sh as f64);
         Globe {
             lon,
             lat,
-            radius: (w.min(h) * 0.5) * 0.86,
+            radius: (w.min(h) * 0.5) * fill(zoom),
             cx: w * 0.5,
             cy: h * 0.5,
         }
@@ -374,7 +409,7 @@ mod tests {
 
         let ink = |lon: f64, lat: f64| {
             let mut canvas = Canvas::new(60, 30);
-            let g = Globe::fit(&canvas, lon, lat);
+            let g = Globe::fit(&canvas, lon, lat, OPENING);
             regions(&g, &mut canvas, &overlays)
         };
 
@@ -393,5 +428,47 @@ mod tests {
         assert!(limb_fade(0.5) > limb_fade(0.02));
         assert!(limb_fade(0.0) > 0.0);
         assert!(limb_fade(1.0) <= 1.0);
+    }
+}
+
+#[cfg(test)]
+mod zoom_tests {
+    use super::*;
+
+    /// The app opens on the planet, and zooming in leaves it.
+    #[test]
+    fn the_opening_view_is_the_globe_and_zooming_in_leaves_it() {
+        assert!(shows(OPENING), "the app should open on the globe");
+        assert!(shows(crate::geo::MIN_ZOOM), "and stay on it all the way out");
+        assert!(!shows(UNTIL), "and hand over at the threshold");
+        assert!(!shows(UNTIL + 4.0), "and stay handed over");
+    }
+
+    /// The zoom floor has to sit under the globe's band, or the globe is a
+    /// view you can never reach. It used to be 2.5, which is inside it.
+    #[test]
+    fn the_zoom_floor_leaves_room_for_the_planet() {
+        assert!(
+            crate::geo::MIN_ZOOM < OPENING && OPENING < UNTIL,
+            "MIN_ZOOM {} / OPENING {OPENING} / UNTIL {UNTIL} are not in order",
+            crate::geo::MIN_ZOOM
+        );
+    }
+
+    /// The disc grows as you come in, so zooming on the planet does something
+    /// and the handoff reads as arriving rather than as a cut. Bounded at both
+    /// ends: never a speck, never wider than the frame it has to sit in.
+    #[test]
+    fn the_disc_grows_towards_the_handoff() {
+        assert!(fill(UNTIL) > fill(0.0));
+        let mut z = 0.0;
+        let mut last = 0.0;
+        while z <= UNTIL {
+            let f = fill(z);
+            assert!(f >= last, "the disc shrank going in, at z{z}");
+            assert!((0.4..=1.0).contains(&f), "z{z} gave {f} of the frame");
+            last = f;
+            z += 0.1;
+        }
     }
 }

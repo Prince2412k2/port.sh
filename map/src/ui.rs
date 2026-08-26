@@ -181,7 +181,7 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" 0.1.0", Style::default().fg(DIM)),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled(
-            if app.globe { "GLOBE" } else { app.mode().label() },
+            if crate::globe::shows(app.vp.zoom) { "GLOBE" } else { app.mode().label() },
             Style::default().fg(FG),
         ),
         // The zoom mode and the ground style are different things and both were
@@ -190,7 +190,11 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         // neither applies -- there is no ground and no tilt to have a mode
         // about -- so it says what is under the camera instead.
         Span::styled(
-            if app.globe { String::new() } else { format!(" {}", app.ground.label()) },
+            if crate::globe::shows(app.vp.zoom) {
+                String::new()
+            } else {
+                format!(" {}", app.ground.label())
+            },
             Style::default().fg(if app.show_terrain { DIM } else { FAINT }),
         ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
@@ -207,12 +211,16 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         // looking at. The coordinates beside it still mean something -- they are
         // the point under the camera, which is the one number a globe has.
         Span::styled(
-            if app.globe { "the whole planet".into() } else { format!("z{:.1}", app.vp.zoom) },
+            if crate::globe::shows(app.vp.zoom) {
+                "the whole planet".into()
+            } else {
+                format!("z{:.1}", app.vp.zoom)
+            },
             Style::default().fg(FG),
         ),
         Span::styled("  │  ", Style::default().fg(FAINT)),
         Span::styled(
-            if app.globe || app.vp.is_flat() {
+            if crate::globe::shows(app.vp.zoom) || app.vp.is_flat() {
                 String::new()
             } else {
                 format!(
@@ -347,9 +355,10 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     // frame rather than sharing one. Nothing below this point runs: there is no
     // tile pyramid to resolve, no terrain under a sphere, and no viewport whose
     // bounds mean anything at planetary scale.
-    if app.globe {
+    app.fit_if_pending();
+    if crate::globe::shows(app.vp.zoom) {
         let (lon, lat) = app.vp.center_lonlat();
-        let g = crate::globe::Globe::fit(&app.canvas, lon, lat);
+        let g = crate::globe::Globe::fit(&app.canvas, lon, lat, app.vp.zoom);
         let overlays = app.source.overlay_tiles();
         crate::globe::draw(&g, &mut app.canvas, &overlays);
         crate::globe::mark(&g, &mut app.canvas, &overlays);
@@ -357,7 +366,6 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    app.fit_if_pending();
     app.open_tour_if_pending();
     app.sync_camera();
     // Tiles are resolved before drawing; a static source just hands back its one.
@@ -430,7 +438,7 @@ fn overlays(f: &mut Frame, area: Rect, app: &App) {
     // you are driving, and wrong for a thumbnail that is trying to read as part
     // of the page rather than as a window onto one. A ruled bar in the corner is
     // the most frame-like thing on it.
-    if !app.globe {
+    if !crate::globe::shows(app.vp.zoom) {
         // A ruled bar reading "2 km" laid over a planet is not merely useless,
         // it is wrong by four orders of magnitude. An orthographic globe has no
         // single scale to state: the middle of the disc is true and the limb is
@@ -880,7 +888,7 @@ fn help(f: &mut Frame, area: Rect) {
         row(")", "all layers on"),
         row("(", "terrain relief"),
         row("v", "relief / contour / hachure / shade"),
-        row("w", "globe"),
+        row("w", "back out to the globe"),
         row("x", "my location"),
         row("t", "toggle labels"),
         row("p", "toggle side panel"),
