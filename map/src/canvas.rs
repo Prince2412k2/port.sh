@@ -688,15 +688,15 @@ impl Canvas {
                 _ => {}
             }
         };
-        for y in 0..self.sh {
-            for x in 0..self.sw {
+        // The frame is not a landform. Ground running off the side of the
+        // screen has no edge there -- it carries on -- and outlining it drew a
+        // box round the map, which read as a border on the *window* rather
+        // than on anything in it.
+        for y in 1..self.sh.saturating_sub(2) {
+            for x in 1..self.sw.saturating_sub(2) {
                 let i = y * self.sw + x;
-                if x + 1 < self.sw {
-                    mark(i, i + 1, self, &mut edge);
-                }
-                if y + 1 < self.sh {
-                    mark(i, i + self.sw, self, &mut edge);
-                }
+                mark(i, i + 1, self, &mut edge);
+                mark(i, i + self.sw, self, &mut edge);
             }
         }
         for (i, depth, tint) in edge {
@@ -1108,6 +1108,8 @@ mod rim_tests {
         // an outline, it is a wash.
         let at = |x: usize, y: usize| c.cov[y * c.sw + x];
         assert!(at(c.sw / 2 - 1, 2) > 0.0, "the edge of the ground was not drawn");
+        // ...but not along the frame, which is a window and not a landform.
+        assert_eq!(at(0, 2), 0.0, "the screen edge was outlined");
         assert_eq!(at(1, 2), 0.0, "the inside of the ground was drawn as edge");
         assert_eq!(at(c.sw / 2, 2), 0.0, "the empty side was drawn as edge");
     }

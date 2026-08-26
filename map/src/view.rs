@@ -91,6 +91,37 @@ pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
     }
 }
 
+/// The smallest a feature may be on screen and still be drawn, in subpixels.
+///
+/// Rank alone cannot carry level of detail here, and the shipped basemap shows
+/// why: over India at z4.6 the road ranks fall into three tiers, and the floor
+/// either lets 103362 features through or two. There is no setting between
+/// "every lane in the country" and "nothing", because the classification was
+/// never made for this scale.
+///
+/// Screen extent is the question that actually matters and it does not depend
+/// on how the data was tagged. The numbers are around one subpixel, which
+/// sounds like it would do nothing and removes 98% of the features: the
+/// basemap stores roads as short fragments, and at country zoom almost every
+/// fragment is smaller than the smallest mark the terminal can make. A
+/// hundred thousand of those are the even stipple that made the frame
+/// unreadable. Over India at z4.6 this is 103362 features down to 2025, and
+/// what survives is what was long enough to be a line.
+///
+/// Roads only. A short *water* feature at country zoom is a lake, which is a
+/// thing in itself; a short road is a fragment of a thing.
+pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
+    if !matches!(layer, Layer::RoadMajor | Layer::RoadMedium | Layer::RoadMinor | Layer::Rail) {
+        return 0.0;
+    }
+    match zoom {
+        z if z < 6.0 => 1.5,
+        z if z < 8.0 => 1.0,
+        z if z < 10.0 => 0.5,
+        _ => 0.0,
+    }
+}
+
 /// How the ground surface is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Ground {
