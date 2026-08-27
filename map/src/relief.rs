@@ -115,9 +115,11 @@ pub fn drape_smoothing(vp: &Viewport) -> f64 {
 /// order of magnitude apart.
 ///
 /// So the pass exposes for what is actually in frame, the way the contour
-/// interval already does: whatever relief is in view is stretched to a bit
-/// over a quarter of the canvas, and the exaggeration is read off from that.
-const FILL: f64 = 0.75;
+/// interval already does: whatever relief is in view is stretched to this much
+/// of the canvas, and the exaggeration is read off from that. The number is
+/// shared with `geo`, which runs the ground slab the same distance past the
+/// bottom of the frame so that the lift has foreground to raise into.
+const FILL: f64 = crate::geo::LIFT_HEADROOM;
 
 /// Bounds on what the exposure may choose.
 ///
@@ -145,6 +147,22 @@ pub struct Lift {
     /// The relief the exposure was made for, metres: how far the highest
     /// ground in view stands above the lowest.
     pub relief: f32,
+}
+
+/// A slope measured along the camera's axes, turned into one along the
+/// compass: east and north.
+///
+/// The grid is laid out on the screen, so what comes off it is a slope in the
+/// camera's frame. The light is fixed to the compass, as every printed relief
+/// map has it, and shading the camera's frame instead turns the light with the
+/// map -- rotate the view and the sun goes round with it, which reads as the
+/// mountains changing shape rather than the camera moving.
+///
+/// `across` runs along a grid row, `along` runs away from the camera. At a
+/// bearing of zero those are already east and north.
+#[inline]
+fn to_compass(across: f32, along: f32, sin_b: f32, cos_b: f32) -> (f32, f32) {
+    (across * cos_b + along * sin_b, along * cos_b - across * sin_b)
 }
 
 /// Grid rows nearest first. Screen y grows downwards and a tilted camera puts
@@ -176,8 +194,20 @@ pub struct Relief {
     world: Vec<[f64; 2]>,
     /// Ground metres between this sample and the next along the row.
     span: Vec<f32>,
+    /// Ground metres between this sample and the one a row nearer.
+    ///
+    /// A separate number from `span`, and it has to be. Under a tilt the grid
+    /// is even on screen and nothing like even on the ground: at 69 degrees a
+    /// row step covers 2.8 times what a column step does, and it grows with
+    /// distance on top of that. Dividing the north-south rise by the east-west
+    /// run overstates the slope by exactly that factor, which tips every
+    /// surface normal towards the camera and skews the lighting -- the more
+    /// the camera leans, the more wrong it gets.
+    down: Vec<f32>,
     /// How far this sample stands above the lowest ground near it, metres.
     stands: Vec<f32>,
+    /// Scratch for the separable minimum behind `stands`.
+    low: Vec<f32>,
     gw: usize,
     gh: usize,
     /// The exposure chosen for the last frame drawn. Anything draped on the
@@ -199,12 +229,21 @@ impl Relief {
     /// samples landed.
     fn lay_out(&mut self, canvas: &Canvas, vp: &Viewport) {
         self.gw = (canvas.sw as f64 / STEP).ceil() as usize + 3;
-        self.gh = (canvas.sh as f64 / STEP).ceil() as usize + 3;
+        // Past the bottom of the frame, by the same headroom the exposure can
+        // spend. Every sample is drawn above where it was taken -- that is
+        // what the lift does -- so a grid that stops at the last row on screen
+        // leaves the foreground empty by however much it lifted. Over Spiti at
+        // 69 degrees the bottom 45% of the frame had nothing in it, and the
+        // ground that belonged there had never been sampled.
+        let reach = canvas.sh as f64 * (1.0 + crate::geo::LIFT_HEADROOM);
+        self.gh = (reach / STEP).ceil() as usize + 3;
         let n = self.gw * self.gh;
         self.world.clear();
         self.world.resize(n, [0.0; 2]);
         self.span.clear();
         self.span.resize(n, 0.0);
+        self.down.clear();
+        self.down.resize(n, 0.0);
 
         for gy in 0..self.gh {
             for gx in 0..self.gw {
@@ -226,11 +265,21 @@ impl Relief {
         for gy in 0..self.gh {
             for gx in 0..self.gw {
                 let i = gy * self.gw + gx;
-                let j = if gx + 1 < self.gw { i + 1 } else { i - 1 };
-                let (a, b) = (self.world[i], self.world[j]);
-                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-                let (_, lat) = world_to_lonlat(a[0], a[1]);
-                self.span[i] = ((dx * dx + dy * dy).sqrt() * meters_per_world_unit(lat)) as f32;
+                let (_, lat) = world_to_lonlat(self.world[i][0], self.world[i][1]);
+                let m = meters_per_world_unit(lat);
+                let gap = |j: usize| {
+                    let (a, b) = (self.world[i], self.world[j]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    ((dx * dx + dy * dy).sqrt() * m) as f32
+                };
+                self.span[i] = gap(if gx + 1 < self.gw { i + 1 } else { i - 1 });
+                // Two rows, halved -- not one row. Odd rows are staggered half
+                // a sample sideways, so the step to the *next* row is diagonal
+                // and comes out 12% long. Rows two apart share a stagger, the
+                // sideways part cancels, and two apart is exactly what the
+                // central difference below spans anyway.
+                let two = self.gw * 2;
+                self.down[i] = gap(if gy + 2 < self.gh { i + two } else { i - two }) * 0.5;
             }
         }
     }
@@ -241,8 +290,12 @@ impl Relief {
         self.h.resize(self.gw * self.gh, 0.0);
         for i in 0..self.h.len() {
             let (lon, lat) = world_to_lonlat(self.world[i][0], self.world[i][1]);
-            let smooth = self.span[i] as f64 * SMOOTH;
-            self.h[i] = t.sample_smooth(lon, lat, smooth);
+            // The two spacings in geometric mean, because the kernel is round
+            // and the footprint under a tilt is not. Taking the column spacing
+            // alone -- the smaller of the two -- under-filters along the rows
+            // and lets the far field alias again.
+            let foot = (self.span[i] as f64 * self.down[i].max(1.0) as f64).sqrt();
+            self.h[i] = t.sample_smooth(lon, lat, foot * SMOOTH);
         }
     }
 
@@ -256,31 +309,43 @@ impl Relief {
     /// zoom -- and over a hundred and twenty kilometres almost everywhere in
     /// India stands thirty metres above something, so it filtered nothing.
     fn measure_relief(&mut self) {
+        /// Half-width of the window, in grid steps.
         const R: isize = 3;
-        self.stands.clear();
-        self.stands.resize(self.gw * self.gh, 0.0);
         let (gw, gh) = (self.gw as isize, self.gh as isize);
+        let n = self.gw * self.gh;
+        self.stands.clear();
+        self.stands.resize(n, 0.0);
+        self.low.clear();
+        self.low.resize(n, 0.0);
+
+        // Separably: the lowest point in a square is the lowest of the row
+        // minima, so this is two passes of seven taps rather than one of
+        // forty-nine. Not a micro-optimisation -- the square version was
+        // 5.2 ms of a 10 ms frame over Spiti, more than half of it, and the
+        // grid it runs over got 75% bigger when the foreground was extended.
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let mut low = f32::MAX;
+                for dx in -R..=R {
+                    let x = (gx + dx).clamp(0, gw - 1);
+                    low = low.min(self.h[(gy * gw + x) as usize]);
+                }
+                self.low[(gy * gw + gx) as usize] = low;
+            }
+        }
         for gy in 0..gh {
             for gx in 0..gw {
                 let mut low = f32::MAX;
                 for dy in -R..=R {
-                    let y = gy + dy;
-                    if y < 0 || y >= gh {
-                        continue;
-                    }
-                    for dx in -R..=R {
-                        let x = gx + dx;
-                        if x < 0 || x >= gw {
-                            continue;
-                        }
-                        low = low.min(self.h[(y * gw + x) as usize]);
-                    }
+                    let y = (gy + dy).clamp(0, gh - 1);
+                    low = low.min(self.low[(y * gw + gx) as usize]);
                 }
                 let i = (gy * gw + gx) as usize;
                 self.stands[i] = self.h[i] - low;
             }
         }
     }
+
 
     /// Choose a datum and an exaggeration from the ground in view.
     ///
@@ -339,6 +404,8 @@ impl Relief {
         // it away. Ground still fading in is a hint, and a hint that deletes
         // the road behind it leaves a hole with nothing to explain the hole.
         let behind = if plot.strength >= 1.0 { Behind::Hide } else { Behind::Veil };
+        let (sb64, cb64) = vp.bearing.sin_cos();
+        let (bearing_sin, bearing_cos) = (sb64 as f32, cb64 as f32);
         let half = (STEP * 0.5).ceil() as isize;
         let mut plotted = 0usize;
 
@@ -369,12 +436,18 @@ impl Relief {
                 // take across two steps because the surface was low-passed to
                 // three and a half of them: there is no energy left at this
                 // scale for the difference to pick up as noise.
-                let run = self.span[i].max(1.0) * 2.0;
-                let dzdx = (self.h[i + 1] - self.h[i - 1]) / run * SHADE_EXAG;
+                //
+                // Each direction over its own run. They are the same length on
+                // screen and not on the ground.
+                let across = (self.h[i + 1] - self.h[i - 1]) / (self.span[i].max(1.0) * 2.0);
                 // Row 0 is the top of the screen, so a step down a row is a
-                // step *towards* the camera, which under a north-up camera is
-                // southwards. Hence the sign.
-                let dzdy = (self.h[i - self.gw] - self.h[i + self.gw]) / run * SHADE_EXAG;
+                // step *towards* the camera -- away from the horizon. Hence
+                // the sign: this is the rise going away from the camera.
+                let along = (self.h[i - self.gw] - self.h[i + self.gw])
+                    / (self.down[i].max(1.0) * 2.0);
+
+                let (dzdx, dzdy) = to_compass(across, along, bearing_sin, bearing_cos);
+                let (dzdx, dzdy) = (dzdx * SHADE_EXAG, dzdy * SHADE_EXAG);
 
                 let (nx, ny, nz) = (-dzdx, -dzdy, 1.0f32);
                 let len = (nx * nx + ny * ny + 1.0).sqrt();
@@ -477,10 +550,14 @@ mod tests {
 
     /// A ridge running east-west across two degrees, `peak` metres above its
     /// valleys, on a heightmap centred where the tests put the camera.
-    fn ridge(peak: f32) -> Terrain {
+    fn ridge(name: &str, peak: f32) -> Terrain {
         let side = 256usize;
+        // Named per test: these run in parallel, and two of them baking the
+        // same path had one reading the file while the other was truncating
+        // it -- which surfaces as "memory map offset is larger than length"
+        // and not as anything that points at the cause.
         let p = std::env::temp_dir()
-            .join(format!("termap-relief-{}-{peak}.tmhg", std::process::id()));
+            .join(format!("termap-relief-{}-{name}.tmhg", std::process::id()));
         let mut buf = Vec::new();
         buf.extend_from_slice(b"TMHG");
         buf.push(1);
@@ -535,7 +612,7 @@ mod tests {
     /// very different starting points.
     #[test]
     fn the_exposure_puts_the_mountain_in_the_frame() {
-        let t = ridge(4000.0);
+        let t = ridge("exposure", 4000.0);
         for (zoom, tilt) in [(8.0, 45.0), (9.5, 45.0), (11.0, 45.0), (9.5, 25.0), (9.5, 65.0)] {
             let vp = camera(zoom, tilt);
             let lift = exposed(&t, &vp);
@@ -554,10 +631,105 @@ mod tests {
         }
     }
 
+    /// The sun does not go round with the camera.
+    ///
+    /// A hillside has one aspect. Turn the camera and the *screen* slope
+    /// changes -- what ran across the frame now runs into it -- but the
+    /// compass slope, and so the shade, must not. Without the rotation the
+    /// light is nailed to the frame instead of to the map, and rotating the
+    /// view repaints every mountain.
+    #[test]
+    fn turning_the_camera_does_not_move_the_sun() {
+        // A slope falling to the south-east, in compass terms.
+        let (east, north) = (0.4f32, -0.25f32);
+        for deg in [0.0f32, 30.0, 90.0, 180.0, 270.0] {
+            let (s, c) = deg.to_radians().sin_cos();
+            // What the screen grid would measure at this bearing: the compass
+            // slope projected onto the camera's own axes.
+            let across = east * c - north * s;
+            let along = east * s + north * c;
+            let (gx, gy) = to_compass(across, along, s, c);
+            assert!(
+                (gx - east).abs() < 1e-5 && (gy - north).abs() < 1e-5,
+                "bearing {deg}: ({gx:.4}, {gy:.4}) against ({east}, {north})"
+            );
+        }
+    }
+
+    /// A row step and a column step are the same on screen and not on the
+    /// ground, and the shading has to divide each rise by its own run.
+    ///
+    /// Under a tilt the grid is foreshortened away from the camera, so a row
+    /// step covers more ground than a column step by roughly `1/cos(tilt)`.
+    /// Dividing the north-south rise by the east-west run overstates that
+    /// slope by the same factor, tipping every normal towards the camera.
+    #[test]
+    fn a_row_step_covers_more_ground_than_a_column_step() {
+        let t = ridge("spacing", 4000.0);
+        for tilt in [0.0f64, 45.0, 69.0] {
+            let vp = camera(9.5, tilt);
+            let mut r = Relief::default();
+            let canvas = Canvas::new(vp.sw as usize / SUB, vp.sh as usize / 4);
+            r.lay_out(&canvas, &vp);
+            r.sample(&t);
+            // At the middle of the frame, where the foreshortening is the
+            // plain `1/cos` with no perspective on top of it.
+            let i = (r.gh / 2) * r.gw + r.gw / 2;
+            let want = 1.0 / tilt.to_radians().cos();
+            let got = (r.down[i] / r.span[i]) as f64;
+            assert!(
+                (got - want).abs() < want * 0.1,
+                "tilt {tilt}: rows are {got:.2}x columns, expected {want:.2}x"
+            );
+        }
+    }
+
+    /// The separable minimum is the square one.
+    ///
+    /// It has to be exactly, not nearly: `stands` feeds the gate that decides
+    /// whether a sample is a landform, so a disagreement shows up as terrain
+    /// appearing and disappearing rather than as a slightly different tone.
+    /// Clamping at the edges rather than skipping is safe for the same reason
+    /// the split is -- a clamped index only repeats a value the window already
+    /// holds, and a minimum does not count.
+    #[test]
+    fn the_split_window_finds_the_same_low_ground_as_a_square_one() {
+        let t = ridge("window", 4000.0);
+        let vp = camera(9.5, 45.0);
+        let mut r = Relief::default();
+        let canvas = Canvas::new(vp.sw as usize / SUB, vp.sh as usize / 4);
+        r.lay_out(&canvas, &vp);
+        r.sample(&t);
+        r.measure_relief();
+
+        let (gw, gh) = (r.gw as isize, r.gh as isize);
+        for gy in (0..gh).step_by(7) {
+            for gx in (0..gw).step_by(11) {
+                let mut low = f32::MAX;
+                for dy in -3..=3 {
+                    for dx in -3..=3 {
+                        let (y, x) = (gy + dy, gx + dx);
+                        if y < 0 || y >= gh || x < 0 || x >= gw {
+                            continue;
+                        }
+                        low = low.min(r.h[(y * gw + x) as usize]);
+                    }
+                }
+                let i = (gy * gw + gx) as usize;
+                let want = r.h[i] - low;
+                assert!(
+                    (r.stands[i] - want).abs() < 1e-3,
+                    "({gx},{gy}): {} against {want}",
+                    r.stands[i]
+                );
+            }
+        }
+    }
+
     /// Ground with no relief must not be inflated into fictional mountains.
     #[test]
     fn a_plain_is_left_a_plain() {
-        let t = ridge(6.0);
+        let t = ridge("plain", 6.0);
         let lift = exposed(&t, &camera(9.5, 45.0));
         assert_eq!(
             lift.exag, EXAG_MIN,
@@ -574,7 +746,7 @@ mod tests {
     /// drawn at all.
     #[test]
     fn the_datum_sits_on_the_valley_floor_not_at_sea_level() {
-        let t = ridge(4000.0);
+        let t = ridge("datum", 4000.0);
         let lift = exposed(&t, &camera(9.5, 45.0));
         assert!(lift.datum > 1.0, "the datum went to sea: {}", lift.datum);
     }

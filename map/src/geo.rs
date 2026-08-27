@@ -25,6 +25,20 @@ pub const PIXEL_ASPECT: f64 = 2.0 / CELL_ASPECT;
 /// Closest a point may sit to the eye before the perspective divide is pinned.
 const NEAR_CLIP: f64 = 1.0;
 
+/// Where the slab's far and near edges are framed to land, as a fraction of
+/// the frame height either side of centre.
+const PLATE_FAR: f64 = 0.34;
+const PLATE_NEAR: f64 = 0.46;
+
+/// How far the terrain pass may raise the ground, as a fraction of the frame.
+///
+/// Lives here rather than in `relief`, because two things have to agree on it
+/// and neither owns it: the relief pass exposes the height in view to exactly
+/// this much of the canvas, and the slab runs this much further towards the
+/// camera so there is ground to raise into the foreground. One number, so they
+/// cannot drift apart.
+pub const LIFT_HEADROOM: f64 = 0.75;
+
 pub const MIN_ZOOM: f64 = 2.5;
 pub const MAX_ZOOM: f64 = 18.0;
 
@@ -206,10 +220,10 @@ impl Viewport {
     /// rather than computed forward. Under perspective the two differ a lot --
     /// sizing the slab with parallel maths leaves it hugging the top of the
     /// frame with the near half of the view empty.
-    pub fn plate(&self) -> [f64; 3] {
+    pub fn plate(&self) -> [f64; 4] {
         // Target rows for the far and near edges, relative to centre.
-        let far_py = -self.sh * 0.34;
-        let near_py = self.sh * 0.46;
+        let far_py = -self.sh * PLATE_FAR;
+        let near_py = self.sh * PLATE_NEAR;
 
         let ct = self.tilt.cos().max(0.20);
         let a = PIXEL_ASPECT * ct;
@@ -229,8 +243,26 @@ impl Viewport {
 
         // The near edge is magnified most, so it decides the width that fits.
         let half_w = self.sw * 0.44 / near_k.max(1e-6);
-        [half_w, far_y, near_y]
+
+        // ...and then the slab runs on past it, under the bottom of the frame.
+        //
+        // Ground is drawn where the *surface* is, not where the ground plane
+        // is: the relief pass lifts every sample by up to `LIFT_HEADROOM` of
+        // the frame, so ground sampled at the last row on screen is drawn well
+        // above it and the foreground empties out. Over Spiti at 69 degrees
+        // that was the bottom 45% of the frame with nothing in it. Running the
+        // slab further towards the camera gives the lift something to raise
+        // into that gap.
+        //
+        // Only the cut moves. `half_w` above and the fade below are both
+        // framing decisions and both stay keyed to `PLATE_NEAR`, or widening
+        // the foreground would narrow the slab under perspective and soften
+        // the horizon -- which is the one edge that has to stay crisp, because
+        // it is what makes the tilt legible in the first place.
+        let over = self.sh * LIFT_HEADROOM / a.max(1e-6);
+        [half_w, far_y, near_y + over, near_y]
     }
+
 
     /// Screen point back to a world point on the ground plane (elevation 0).
     /// Inverting the tilt is what keeps drag-pan honest once the camera moves.
@@ -316,12 +348,36 @@ impl Viewport {
         self.zoom = zx.min(zy).clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    pub fn pan_subpixels(&mut self, dx: f64, dy: f64) {
-        let s = self.scale();
-        self.center[0] += dx / s;
-        self.center[1] += dy / (s * PIXEL_ASPECT);
+    /// Drag the ground: the point under `from` ends up under `to`, both in
+    /// screen subpixels.
+    ///
+    /// Through `unproject`, which is the only thing that knows how the camera
+    /// is turned. The old version converted a screen delta straight into a
+    /// world one and so was right for exactly one camera -- north-up and
+    /// looking straight down. Rotate ninety degrees and dragging downwards
+    /// moved the map sideways, because "down the screen" had stopped meaning
+    /// "south"; lean the camera and a drag near the horizon moved the same
+    /// distance as one in the foreground, when the ground there is several
+    /// times further away per row.
+    pub fn pan_screen(&mut self, from: [f64; 2], to: [f64; 2]) {
+        let a = self.unproject(from);
+        let b = self.unproject(to);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        // Near the horizon `unproject` runs away, and under perspective it can
+        // pass the eye and come back non-finite. Either way the honest answer
+        // is to not move rather than to teleport.
+        if !dx.is_finite() || !dy.is_finite() {
+            return;
+        }
+        let reach = (self.sw + self.sh) / self.scale();
+        if dx.abs() > reach || dy.abs() > reach {
+            return;
+        }
+        self.center[0] -= dx;
+        self.center[1] -= dy;
         self.clamp();
     }
+
 
     /// Zoom while keeping the world point under `anchor` pinned to `anchor`.
     /// This is what makes scroll-wheel zoom feel like a real map instead of a
@@ -353,6 +409,61 @@ impl Viewport {
 
 #[cfg(test)]
 mod tests {
+
+    /// A drag puts the ground where you dropped it, whatever the camera.
+    ///
+    /// The old pan turned a screen delta straight into a world one, which is
+    /// right for exactly one camera. This walks the ones it was wrong for and
+    /// checks the only thing a drag has to do: the point you grabbed ends up
+    /// under the pointer.
+    #[test]
+    fn a_drag_leaves_the_ground_under_the_pointer() {
+        for (tilt, bearing) in [
+            (0.0f64, 0.0f64),
+            (0.0, 90.0),
+            (0.0, 215.0),
+            (45.0, 0.0),
+            (45.0, 90.0),
+            (62.0, 143.0),
+        ] {
+            let mut vp = Viewport::new(lonlat_to_world(77.0, 32.0), 9.0);
+            vp.sw = 400.0;
+            vp.sh = 200.0;
+            vp.tilt = tilt.to_radians();
+            vp.bearing = bearing.to_radians();
+
+            let from = [180.0, 130.0];
+            let to = [250.0, 60.0];
+            // The ground under the pointer before the drag.
+            let grabbed = vp.unproject(from);
+            vp.pan_screen(from, to);
+            // ...and where it sits after it.
+            let landed = vp.project(grabbed);
+
+            let off = ((landed[0] - to[0]).powi(2) + (landed[1] - to[1]).powi(2)).sqrt();
+            assert!(
+                off < 0.5,
+                "tilt {tilt} bearing {bearing}: dropped {off:.1} subpixels from the pointer"
+            );
+        }
+    }
+
+    /// Dragging a hair from the horizon must not throw the map across India.
+    #[test]
+    fn a_drag_at_the_horizon_does_nothing_rather_than_teleporting() {
+        let mut vp = Viewport::new(lonlat_to_world(77.0, 32.0), 9.0);
+        vp.sw = 400.0;
+        vp.sh = 200.0;
+        vp.tilt = 78f64.to_radians();
+        vp.persp = 0.6;
+        let before = vp.center;
+        // A row at the very top of the frame, which under this camera is at or
+        // past the horizon.
+        vp.pan_screen([200.0, 0.5], [200.0, 1.5]);
+        let moved = ((vp.center[0] - before[0]).powi(2) + (vp.center[1] - before[1]).powi(2)).sqrt();
+        let frame = (vp.sw + vp.sh) / vp.scale();
+        assert!(moved <= frame, "the horizon threw the camera {moved} world units");
+    }
     use super::*;
 
     fn vp() -> Viewport {

@@ -462,8 +462,12 @@ impl App {
     }
 
     fn pan_fraction(&mut self, fx: f64, fy: f64) {
-        let (dx, dy) = (self.vp.sw * fx, self.vp.sh * fy);
-        self.vp.pan_subpixels(dx, dy);
+        // Same path as a drag: grab the middle of the frame and pull it the
+        // other way. Keyboard pan had the same bug the mouse did -- `j` in a
+        // rotated view walked sideways.
+        let mid = [self.vp.sw * 0.5, self.vp.sh * 0.5];
+        let to = [mid[0] - self.vp.sw * fx, mid[1] - self.vp.sh * fy];
+        self.vp.pan_screen(mid, to);
     }
 
     fn zoom_centered(&mut self, dz: f64) {
@@ -763,10 +767,7 @@ impl App {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if let Some(from) = self.drag_from {
-                    let dx = from.0 as f64 - local.0 as f64;
-                    let dy = from.1 as f64 - local.1 as f64;
-                    self.vp
-                        .pan_subpixels(dx * SUB_X as f64, dy * SUB_Y as f64);
+                    self.vp.pan_screen(Self::to_sub(from), Self::to_sub(local));
                     self.drag_from = Some(local);
                 }
                 self.cursor = Some(local);

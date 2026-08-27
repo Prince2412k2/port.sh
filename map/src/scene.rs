@@ -339,16 +339,24 @@ const FADE: f64 = 0.22;
 /// A hard clip leaves a straight edge, and four straight edges read as a frame
 /// around the map rather than as ground running out. Dissolving over the last
 /// stretch bounds the plane just as firmly without ever drawing a box.
-pub fn plate_fade(m: [f64; 2], plate: [f64; 3]) -> f32 {
-    let (hw, far, near) = (plate[0], plate[1], plate[2]);
+pub fn plate_fade(m: [f64; 2], plate: [f64; 4]) -> f32 {
+    // `plate[3]`, the *framing* near edge, and only to size the ramp. The
+    // extended edge would widen the horizon ramp to match, and the horizon is
+    // the one edge that has to stay crisp -- it is what makes the tilt legible.
+    let (hw, far, near) = (plate[0], plate[1], plate[3]);
     let ramp = |d: f64, span: f64| {
         let t = (d / (span * FADE).max(1e-6)).clamp(0.0, 1.0);
         // Smoothstep: a linear ramp still shows a visible seam where it starts.
         t * t * (3.0 - 2.0 * t)
     };
     let fx = ramp(hw - m[0].abs(), hw);
-    let depth_span = (near - far) * 0.5;
-    let fy = ramp((m[1] - far).min(near - m[1]), depth_span);
+    // The far edge only. There used to be a matching fade at the near one, and
+    // it now sits below the bottom of the frame where it cannot be seen -- but
+    // it could still be *hit*, and it was: with the slab run forward to give
+    // the terrain lift some foreground, this cut eight and a half thousand of
+    // the twelve thousand samples in that extension, and the foreground stayed
+    // as empty as it had been before the extension was added.
+    let fy = ramp(m[1] - far, (near - far) * 0.5);
     (fx.min(fy)) as f32
 }
 
@@ -452,7 +460,7 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
 /// geometry is coarse relative to the view: at street zoom the basemap's
 /// vertices are hundreds of metres apart, so both ends of a road sit outside a
 /// small plate while the middle crosses it, and the road disappears entirely.
-fn clip_to_plate(mut a: [f64; 2], mut b: [f64; 2], plate: [f64; 3]) -> Option<([f64; 2], [f64; 2])> {
+fn clip_to_plate(mut a: [f64; 2], mut b: [f64; 2], plate: [f64; 4]) -> Option<([f64; 2], [f64; 2])> {
     let (hw, far, near) = (plate[0], plate[1], plate[2]);
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -841,6 +849,43 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
 
 #[cfg(test)]
 mod tests {
+
+    /// The foreground the terrain lift needs must survive the fade.
+    ///
+    /// The slab runs past the bottom of the frame so that ground raised by the
+    /// relief pass has somewhere to come from. That extension is useless if
+    /// the fade cuts it, and it did: the near-edge fade was keyed to the
+    /// framing edge, so everything beyond it went to zero and the foreground
+    /// stayed empty. The horizon has to keep its fade all the same, because
+    /// that soft edge is what makes a tilt legible.
+    #[test]
+    fn the_fade_spares_the_foreground_and_still_softens_the_horizon() {
+        let mut vp = crate::geo::Viewport::new(crate::geo::lonlat_to_world(79.2, 32.9), 7.6);
+        vp.sw = 400.0;
+        vp.sh = 200.0;
+        vp.tilt = 69f64.to_radians();
+        let plate = vp.plate();
+        assert!(plate[2] > plate[3] * 1.5, "the slab was not extended at all");
+
+        // Deep in the extension, on the centre line.
+        let deep = [0.0, (plate[3] + plate[2]) * 0.5];
+        assert!(
+            plate_fade(deep, plate) > 0.99,
+            "the foreground is faded out: {}",
+            plate_fade(deep, plate)
+        );
+
+        // Just inside the far edge, which is the horizon.
+        let span = plate[3] - plate[1];
+        let horizon = [0.0, plate[1] + span * 0.02];
+        assert!(
+            plate_fade(horizon, plate) < 0.5,
+            "the horizon lost its fade: {}",
+            plate_fade(horizon, plate)
+        );
+        // ...and well clear of it, full strength again.
+        assert!(plate_fade([0.0, plate[1] + span * 0.5], plate) > 0.99);
+    }
     use super::*;
 
     /// A building must never outbid a landmark for a label slot.
