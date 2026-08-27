@@ -123,22 +123,6 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
 
 
 
-/// Below this zoom the map is drawn in squares rather than braille.
-///
-/// The reason is that braille's resolution buys nothing here. Its eight dots
-/// per cell are for sub-cell placement, and at two hundred kilometres to the
-/// frame there is no sub-cell detail to place -- every road is a hairline
-/// whatever glyph carries it. A square says the same thing with one shape.
-///
-/// What this is measurably *not* is a large saving on our side. Frame time on
-/// a 190x48 view over Gujarat went 7.9 to 7.8 ms at z4.8 and 5.8 to 5.0 at
-/// z6.0, and the bytes on the wire did not move at all -- braille and a square
-/// are both three bytes of UTF-8. The cost braille actually carries is in the
-/// *terminal*, where the glyphs are unusual enough that many emulators fall
-/// off their fast path for them, and that is not something this side can
-/// measure. Worth knowing before anyone credits this with a speed-up it did
-/// not deliver here.
-pub const SQUARE_BELOW: f64 = 7.0;
 
 /// Ground fills are texture, and texture at region scale is just noise.
 pub fn draws_fills(mode: Mode) -> bool {

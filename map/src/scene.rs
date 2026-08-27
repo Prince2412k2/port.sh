@@ -141,12 +141,6 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                 (RoadGlyph::Dotted, MAT_SOLID) => MAT_DOT,
                 (_, m) => m,
             };
-            // Far enough out, everything is a square. See `SQUARE_BELOW`.
-            let mat = if o.vp.zoom < crate::view::SQUARE_BELOW {
-                crate::canvas::MAT_SQUARE
-            } else {
-                mat
-            };
             // Only strokes scale; a dithered fill has no width to speak of.
             let base = if st.mat == MAT_SOLID {
                 st.width * o.road_weight
