@@ -95,7 +95,7 @@ pub fn leave(who: &str, body: &str, from: &str) -> Sent {
     let p = path();
     if let Some(dir) = p.parent() {
         if !dir.as_os_str().is_empty() && !dir.exists() {
-            eprintln!("portfolio: {} does not exist, message not saved", dir.display());
+            crate::note!("portfolio: {} does not exist, message not saved", dir.display());
             return Sent::Unwritable;
         }
     }
@@ -116,7 +116,7 @@ pub fn leave(who: &str, body: &str, from: &str) -> Sent {
 /// and a message box that has quietly stopped accepting messages is exactly
 /// the failure worth being loud about.
 fn unwritable(p: &std::path::Path, e: std::io::Error) -> Sent {
-    eprintln!("portfolio: cannot write {}: {e}", p.display());
+    crate::note!("portfolio: cannot write {}: {e}", p.display());
     Sent::Unwritable
 }
 

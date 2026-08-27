@@ -192,7 +192,7 @@ pub fn note() -> Option<String> {
 /// they read `models()`, which is fine before the first check finishes.
 pub fn watch() {
     if tiers().is_empty() {
-        eprintln!("portfolio: no models configured, the ask section is off");
+        crate::note!("portfolio: no models configured, the ask section is off");
         return;
     }
     std::thread::spawn(|| loop {
@@ -217,10 +217,10 @@ pub fn check() {
         // and "one of its two models is up" are different facts and the second
         // one is the one that explains a slow answer later.
         for (model, why) in &refused {
-            eprintln!("portfolio: `{}` model `{model}` did not answer: {why}", t.name);
+            crate::note!("portfolio: `{}` model `{model}` did not answer: {why}", t.name);
         }
         if !live.is_empty() {
-            eprintln!(
+            crate::note!(
                 "portfolio: agent tier `{}` answering via `{}` ({}/{} models)",
                 t.name,
                 t.server.label(),
@@ -235,7 +235,7 @@ pub fn check() {
         }
         tried.push(t.name);
     }
-    eprintln!("portfolio: no agent tier answered ({})", tried.join(", "));
+    crate::note!("portfolio: no agent tier answered ({})", tried.join(", "));
     let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
     *s = State { tier: None };
 }
@@ -393,7 +393,7 @@ fn ask_one_word(server: &Server, model: &str) -> Result<(), String> {
         // without our tools is a working tier and a broken feature, and those
         // are worth telling apart in the log.
         if opened.is_none() && tools.is_some() {
-            eprintln!(
+            crate::note!(
                 "portfolio: `{}` will not take our tool server -- the agent works, \
                  the map does not. Check the mcpServers payload against ACP's schema.",
                 server.label()
@@ -410,7 +410,7 @@ fn ask_one_word(server: &Server, model: &str) -> Result<(), String> {
             // The agent already said what would fix it, so say that.
             if let Some(m) = methods.first() {
                 let hint = if m.description.is_empty() { &m.name } else { &m.description };
-                eprintln!("portfolio: `{}` needs authenticating -- {hint}", server.label());
+                crate::note!("portfolio: `{}` needs authenticating -- {hint}", server.label());
             }
             return Err("would not open a session".into());
         };

@@ -1167,7 +1167,7 @@ impl Ask {
                     // To the log, not to the page. Whoever runs this wants to
                     // know which tier and which server came up; the visitor
                     // wants to ask a question.
-                    eprintln!(
+                    crate::note!(
                         "portfolio: agent ready -- tier `{}` via `{}`, acp v{}{}",
                         r.tier,
                         r.server,

@@ -19,6 +19,8 @@ mod json;
 mod mcp;
 mod museum;
 mod net;
+#[macro_use]
+mod note;
 mod paint;
 mod portraits;
 mod reach;
@@ -540,6 +542,9 @@ fn plain_text() -> io::Result<()> {
 }
 
 fn setup() -> io::Result<Term> {
+    // From here the screen is a drawn page, and a stray line of stderr on it
+    // is not a message but a hole -- see `note`.
+    note::hold();
     enable_raw_mode()?;
     let mut out = io::stdout();
     execute!(out, EnterAlternateScreen, event::EnableMouseCapture, crossterm::cursor::Hide)?;
@@ -559,6 +564,7 @@ fn restore(term: &mut Term) -> io::Result<()> {
     execute!(out, crossterm::cursor::Show, event::DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     let _ = term.show_cursor();
+    note::release();
     Ok(())
 }
 
@@ -576,6 +582,9 @@ fn install_panic_hook() {
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
+        // The screen is back, so anything held during the run can be said --
+        // and a panic is exactly when those lines are worth having.
+        note::release();
         prev(info);
     }));
 }

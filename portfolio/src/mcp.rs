@@ -191,7 +191,7 @@ fn token() -> String {
     match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)) {
         Ok(()) => buf.iter().map(|b| format!("{b:02x}")).collect(),
         Err(e) => {
-            eprintln!("portfolio: no /dev/urandom ({e}), tool tokens are only unique");
+            crate::note!("portfolio: no /dev/urandom ({e}), tool tokens are only unique");
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let t = std::time::SystemTime::now()
@@ -294,14 +294,14 @@ pub fn warm_index() {
     std::thread::spawn(|| {
         let mut src = termap::tiles::Source::open(None);
         if !src.has_basemap() {
-            eprintln!("portfolio: no basemap, place lookup is off");
+            crate::note!("portfolio: no basemap, place lookup is off");
             let _ = INDEX.set(termap::gazetteer::Gazetteer::default());
             return;
         }
         let _ = COVERS.set(src.bounds());
         let started = std::time::Instant::now();
         let g = termap::gazetteer::Gazetteer::build(&mut src);
-        eprintln!(
+        crate::note!(
             "portfolio: place index ready -- {} names from z{:?} in {:?}",
             g.len(),
             g.swept,
@@ -368,7 +368,7 @@ fn look_nearby(centre: (f64, f64), what: &str) -> Option<termap::gazetteer::Entr
             // A tenth of a degree is about eleven kilometres, which covers a
             // city and not its neighbours.
             let g = termap::gazetteer::Gazetteer::around(src, centre, 0.10);
-            eprintln!(
+            crate::note!(
                 "portfolio: indexed {} landmarks around {:.3},{:.3} in {:?}",
                 g.len(),
                 centre.0,
@@ -502,8 +502,8 @@ fn geocode(query: &str) -> Option<Placed> {
 
     let found = ask_nominatim(query);
     match &found {
-        Some(p) => eprintln!("portfolio: geocoded `{query}` to {:.4},{:.4}", p.lat, p.lon),
-        None => eprintln!("portfolio: no geocode for `{query}`"),
+        Some(p) => crate::note!("portfolio: geocoded `{query}` to {:.4},{:.4}", p.lat, p.lon),
+        None => crate::note!("portfolio: no geocode for `{query}`"),
     }
     GEOCODED.with(|g| {
         let mut g = g.borrow_mut();
@@ -631,7 +631,7 @@ fn on_offer() -> Vec<&'static str> {
 /// whole diagnosis.
 fn say_what_is_offered() {
     let names = on_offer();
-    eprintln!(
+    crate::note!(
         "portfolio: serving {} tools: {}",
         names.len(),
         names.join(", ")
@@ -641,7 +641,7 @@ fn say_what_is_offered() {
         ("fetch_page", crate::browse::can_read(), "JINA_API_KEY"),
     ] {
         if !keyed {
-            eprintln!(
+            crate::note!(
                 "portfolio: no {what} -- ${var} is unset or empty, so the agent has no {}",
                 match what {
                     "search_web" => "way to search the web",
@@ -2262,7 +2262,7 @@ pub fn serve() {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("portfolio: no runtime for the tool server: {e}");
+                crate::note!("portfolio: no runtime for the tool server: {e}");
                 let _ = tx.send(None);
                 return;
             }
@@ -2271,7 +2271,7 @@ pub fn serve() {
             let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("portfolio: tool server could not bind: {e}");
+                    crate::note!("portfolio: tool server could not bind: {e}");
                     let _ = tx.send(None);
                     return;
                 }
@@ -2294,13 +2294,13 @@ pub fn serve() {
                 ),
             );
             if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("portfolio: tool server stopped: {e}");
+                crate::note!("portfolio: tool server stopped: {e}");
             }
         });
     });
     if let Ok(Some(addr)) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
         let _ = WHERE.set(addr);
-        eprintln!("portfolio: tool server on http://{addr}");
+        crate::note!("portfolio: tool server on http://{addr}");
         say_what_is_offered();
     }
 }

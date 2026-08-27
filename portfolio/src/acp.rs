@@ -618,15 +618,15 @@ fn converse(
         by_env,
         hello.as_ref().is_some_and(takes_http_tools),
     ) {
-        (Some(_), true, _) => eprintln!(
+        (Some(_), true, _) => crate::note!(
             "portfolio: `{}` was handed our tools in its environment",
             shot.server.label()
         ),
         (Some(_), false, _) => {
-            eprintln!("portfolio: offering our tools to `{}`", shot.server.label())
+            crate::note!("portfolio: offering our tools to `{}`", shot.server.label())
         }
         (None, _, true) => {}
-        (None, false, false) => eprintln!(
+        (None, false, false) => crate::note!(
             "portfolio: `{}` takes no http mcp server, so it gets no tools",
             shot.server.label()
         ),
@@ -649,7 +649,7 @@ fn converse(
         // travelled in the environment were configured before the process
         // started, so there is nothing to take back out of the request.
         if tools.is_some() {
-            eprintln!(
+            crate::note!(
                 "portfolio: `{}` refused a session with our tools attached ({why}); \
                  retrying without them -- the agent answers, the map does not",
                 shot.server.label()
@@ -660,7 +660,7 @@ fn converse(
     }
 
     if let (Err(why), Some(m)) = (&opened, methods.first()) {
-        eprintln!(
+        crate::note!(
             "portfolio: `{}` would not open a session ({why}); trying authenticate `{}`",
             shot.server.label(),
             m.id
@@ -684,7 +684,7 @@ fn converse(
             } else {
                 &m.description
             };
-            eprintln!(
+            crate::note!(
                 "portfolio: `{}` refused a session: {why}. It offers `{}`{}. \
                  If it is already logged in, check it can reach its own provider \
                  -- the same message covers a token that is missing and a token \
@@ -1095,7 +1095,7 @@ fn answer_request<W: Write>(w: &mut W, v: &Value, tx: &Sender<Event>, state: &mu
         // The whole request, when we say no. A refusal we cannot explain is the
         // expensive kind: this gate turned our own tools away for an entire
         // deploy and the only thing on screen was the word `other`.
-        eprintln!(
+        crate::note!(
             "portfolio: refusing a tool call -- title `{tool}`, kind `{kind}`: {}",
             call.map(|c| format!("{c:?}")).unwrap_or_default()
         );

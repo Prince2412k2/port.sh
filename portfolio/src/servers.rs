@@ -324,7 +324,7 @@ impl Server {
             // with nothing anywhere reporting a problem.
             static SAID: std::sync::OnceLock<()> = std::sync::OnceLock::new();
             if SAID.set(()).is_ok() {
-                eprintln!("portfolio: tools offered as `{flag} {list}`");
+                crate::note!("portfolio: tools offered as `{flag} {list}`");
             }
             c.arg(flag).arg(list);
         }
