@@ -11,6 +11,23 @@ use crate::geo::{meters_per_world_unit, world_to_lonlat, Viewport};
 use crate::terrain::Terrain;
 use crate::view::Ground;
 
+/// Share of the ground in frame that is drawn as a square halftone rather
+/// than as braille -- the highest of it.
+///
+/// High ground is where the frame most needs tone and least needs texture: it
+/// is steeper, there is more of it in view, and braille at the density it
+/// arrives in reads as speckle. A square closes the gaps between the dots, so
+/// coverage becomes a value instead of a count of specks, and the high country
+/// separates from the low by *material* as well as by brightness -- a stronger
+/// cue at this resolution than either on its own.
+///
+/// A share of the frame and not a height in metres. The first cut was 2200 m,
+/// which is a sound number for India and useless as a rule: Zanskar sits
+/// entirely above it and came out as a mosaic of squares with no braille left
+/// to contrast against, while Gujarat never reaches it and got none. "High"
+/// only means anything next to the rest of what is on screen.
+const HALFTONE_SHARE: f32 = 0.35;
+
 /// The least relief that counts as terrain worth drawing, metres.
 ///
 /// About a ten-storey building. Show something that would qualify as a
@@ -195,6 +212,18 @@ impl Relief {
             }
         }
 
+        // The height the top `HALFTONE_SHARE` of the frame's ground starts at.
+        let halftone_at = {
+            let mut hs: Vec<f32> =
+                self.heights.iter().copied().filter(|h| *h >= 1.0).collect();
+            if hs.is_empty() {
+                f32::MAX
+            } else {
+                hs.sort_by(f32::total_cmp);
+                hs[((hs.len() - 1) as f32 * (1.0 - HALFTONE_SHARE)) as usize]
+            }
+        };
+
         let (_, clat) = vp.center_lonlat();
         let m_per_world = meters_per_world_unit(clat);
         // Flat views have no vertical axis to displace along, and `Shade` is the
@@ -279,6 +308,8 @@ impl Relief {
                     // coverage as a shade block reads as ground.
                     mat: if ground == Ground::Shade {
                         crate::canvas::MAT_SHADE
+                    } else if h >= halftone_at {
+                        crate::canvas::MAT_SQUARE
                     } else {
                         MAT_DOT
                     },

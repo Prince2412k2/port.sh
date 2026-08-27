@@ -308,6 +308,25 @@ pub const MAT_HATCH: u8 = 2;
 /// A shade block at the same coverage reads as a surface, which is the right
 /// answer when the thing being drawn is ground rather than a line on it.
 pub const MAT_SHADE: u8 = 3;
+/// Squares: an edge, and the top of the tonal ladder.
+///
+/// Three glyphs and no more. Braille is the finest mark the terminal has and
+/// it is also the lightest -- eight dots with gaps around them -- so an
+/// outline drawn in it stays a dotted trail however dense the edges get, and a
+/// frame of crowded dotted trails is the mush. A square is the same mark with
+/// the gaps closed.
+///
+/// `◾` U+25FE is deliberately not among them, though it is the obvious partner
+/// to `◼`. Its East Asian Width is `W`: a terminal that honours that draws it
+/// two columns wide and every cell after it on the row shifts. `▪` U+25AA
+/// carries the same meaning at width `N`, which is a property of the character
+/// rather than of the font, so no amount of font work would have fixed it.
+pub const MAT_SQUARE: u8 = 4;
+
+/// Squares by how much of the cell is covered: a speck, a filled outline, a
+/// solid. `▣` sits in the middle because it reads as a square that is not
+/// quite full, which is exactly the tone between the other two.
+const SQUARES: [char; 3] = ['\u{25AA}', '\u{25A3}', '\u{25FC}'];
 
 /// Line glyphs by direction: horizontal, down-right, vertical, down-left.
 const HATCH: [char; 4] = ['\u{2500}', '\u{2572}', '\u{2502}', '\u{2571}'];
@@ -729,11 +748,14 @@ impl Canvas {
                 &Brush {
                     depth,
                     tint,
-                    // Braille, deliberately. The ask was for the ground to
-                    // have a border, not for it to stop being braille -- and
-                    // a run of dots along an edge reads as a line for the same
-                    // reason a dotted road does.
-                    mat: MAT_DOT,
+                    // Squares, not braille. A run of braille dots along an
+                    // edge is a dotted trail, and where edges crowd -- which
+                    // is wherever the ground is dissected, so exactly where an
+                    // outline is worth having -- the trails cross and the
+                    // whole thing goes back to being texture. A square closes
+                    // the gaps, so an edge stays one mark wide however many of
+                    // them there are.
+                    mat: MAT_SQUARE,
                     pick: u32::MAX,
                     // It is the boundary of the nearest thing in its column,
                     // so there is nothing it could be behind, and a z-fight
@@ -919,6 +941,7 @@ impl Canvas {
                 let mut dot_w = 0.0f32;
                 let mut hatch_w = 0.0f32;
                 let mut shade_w = 0.0f32;
+                let mut square_w = 0.0f32;
                 // Coverage-weighted moments of the lit subpixels, for `MAT_HATCH`
                 // to read a direction out of. A braille dot is square on the
                 // usual cell, so column and row are already in the same units
@@ -944,6 +967,7 @@ impl Canvas {
                             MAT_SOLID => solid_w += a,
                             MAT_HATCH => hatch_w += a,
                             MAT_SHADE => shade_w += a,
+                            MAT_SQUARE => square_w += a,
                             _ => dot_w += a,
                         }
                         let (fx, fy) = (col as f32, row as f32);
@@ -1004,6 +1028,14 @@ impl Canvas {
                     (solid_w, MAT_SOLID),
                     (hatch_w, MAT_HATCH),
                     (shade_w, MAT_SHADE),
+                    // Between a stroke and the ground: an outline is not the
+                    // subject, but it has to survive the ground it encloses.
+                    // Above the ground it encloses, below the strokes drawn
+                    // on it. The rim already outweighs the surface on coverage
+                    // -- it draws at full strength where the stipple is a
+                    // fraction -- so this only has to stop high ground taking
+                    // cells off the roads crossing it.
+                    (square_w * 1.3, MAT_SQUARE),
                 ]
                 .into_iter()
                 .fold((0.0f32, MAT_DOT), |a, b| if b.0 > a.0 { b } else { a })
@@ -1035,6 +1067,18 @@ impl Canvas {
                         }
                         continue;
                     }
+                }
+
+                if winner == MAT_SQUARE {
+                    // Same reading as the shade ladder -- how much of the cell
+                    // is covered -- over three rungs instead of four.
+                    let fill = sum / (SUB_X * SUB_Y) as f32;
+                    let k = ((fill * 3.0) as usize).min(2);
+                    if let Some(cell) = buf.cell_mut((sx, sy)) {
+                        let keep = tint == TINT_SELECT as usize || tint == TINT_HOME as usize;
+                        cell.set_char(SQUARES[k]).set_fg(theme.paint(tint, tone, mono, keep));
+                    }
+                    continue;
                 }
 
                 if winner == MAT_SHADE {
@@ -1104,6 +1148,64 @@ impl Canvas {
 #[cfg(test)]
 mod rim_tests {
     use super::*;
+
+    /// Every glyph the square ladder uses is one column wide.
+    ///
+    /// Not a font question -- East Asian Width is a property of the character,
+    /// so no font work would fix it. A terminal that honours `W` draws the
+    /// glyph in two columns and every cell after it on the row shifts, which
+    /// tears the whole grid, and the map has no way to detect that it
+    /// happened. `◾` U+25FE is the trap here: it is the obvious partner to
+    /// `◼` and it is `W`. `▪` U+25AA says the same thing at `N`.
+    ///
+    /// Listed explicitly rather than range-checked, because the point is that
+    /// each one was looked up.
+    #[test]
+    fn the_square_ladder_is_all_single_width_glyphs() {
+        // Unicode East Asian Width, checked against the standard: N, A, N.
+        // Ambiguous is what the shade blocks already are and what this
+        // terminal renders single, so it is the accepted risk; Wide is not.
+        assert_eq!(SQUARES, ['\u{25AA}', '\u{25A3}', '\u{25FC}']);
+        assert!(
+            !SQUARES.contains(&'\u{25FE}'),
+            "U+25FE is East Asian Wide and will tear the row it lands on"
+        );
+        assert!(!SQUARES.contains(&'\u{25FD}'), "U+25FD is Wide too");
+    }
+
+    /// The ladder climbs: more of the cell covered means a heavier square.
+    #[test]
+    fn the_square_ladder_climbs_with_coverage() {
+        let mut c = Canvas::new(3, 1);
+        let ink = |c: &Canvas, cx: usize| {
+            let mut sum = 0.0;
+            for row in 0..SUB_Y {
+                for col in 0..SUB_X {
+                    sum += c.cov[row * c.sw + cx * SUB_X + col];
+                }
+            }
+            sum
+        };
+        let brush = Brush {
+            depth: 0.5,
+            tint: TINT_GREEN,
+            mat: MAT_SQUARE,
+            pick: u32::MAX,
+            behind: Behind::Ignore,
+        };
+        // Three cells, each covered a bit more than the last.
+        for (cx, n) in [(0usize, 1usize), (1, 4), (2, 8)] {
+            for k in 0..n {
+                c.plot((cx * SUB_X + k % SUB_X) as isize, (k / SUB_X) as isize, 1.0, &brush);
+            }
+        }
+        assert!(ink(&c, 0) < ink(&c, 1) && ink(&c, 1) < ink(&c, 2));
+        // And the ladder index those coverages land on must climb too.
+        let rung = |fill: f32| ((fill * 3.0) as usize).min(2);
+        assert_eq!(rung(0.1), 0);
+        assert_eq!(rung(0.5), 1);
+        assert_eq!(rung(1.0), 2);
+    }
 
     /// Ground that stops gets an edge; ground that goes on does not.
     #[test]
