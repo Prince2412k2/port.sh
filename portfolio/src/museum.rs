@@ -358,7 +358,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
             } else {
                 p.frames[0]
             };
-            paint::portrait(f, area, x as u16, top, frame, p.cols, th);
+            paint::portrait(f, area, x as u16, top, frame, p.cols);
         }
     }
 

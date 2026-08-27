@@ -171,7 +171,7 @@ pub fn render(f: &mut Frame, area: Rect, a: &About, t: f64, th: Theme) {
             // it runs comes from the size of the bake, so a wide window buys a
             // bigger picture rather than a dearer one.
             let frame = crate::paint::portrait_loop(m, t, t < crate::paint::lively_for(m));
-            crate::paint::portrait(f, area, x0, y, frame, m.cols, th);
+            crate::paint::portrait(f, area, x0, y, frame, m.cols);
         }
     }
 

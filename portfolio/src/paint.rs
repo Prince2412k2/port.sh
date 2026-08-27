@@ -168,7 +168,8 @@ pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32, th: Theme)
 /// Blit one baked plate at `x`,`y`, clipped to `area`.
 ///
 /// Unlike the emblems these carry real colour and are drawn as they were
-/// baked; there is no tint to apply. Cells chafa left as pure background are
+/// baked; there is no tint to apply, and so no theme to apply it with. A
+/// photograph on cream is a photograph on cream. Cells chafa left as pure background are
 /// skipped rather than painted, so a plate sits on the page instead of on a
 /// rectangle of its own.
 pub fn ink(i: portraits::Ink) -> Color {
@@ -184,11 +185,15 @@ pub fn ink(i: portraits::Ink) -> Color {
 /// which symbol class won the cell. Either one over our own background is a
 /// cell to leave alone, so a plate sits on the page rather than on a rectangle
 /// of its own.
-fn is_ground(ch: char, bg: portraits::Ink, th: Theme) -> bool {
+fn is_ground(ch: char, bg: portraits::Ink) -> bool {
     if ch != ' ' && ch != '\u{2800}' {
         return false;
     }
-    let (kr, kg, kb) = th.ground();
+    // The colour the *bake* used, not the one the theme is on. This asked the
+    // theme, which is a different number in every theme and the right one in
+    // none: the truecolor arm could never match, and the whole test was being
+    // carried by the indexed arm below.
+    let (kr, kg, kb) = portraits::BAKED_BG;
     match bg {
         portraits::Ink::C(r, g, b) => (r, g, b) == (kr, kg, kb),
         // Quantised, so our ground has landed on whatever palette entry is
@@ -205,7 +210,6 @@ pub fn portrait(
     y: u16,
     cells: &[portraits::Cell],
     cols: u16,
-    th: Theme,
 ) {
     for (i, &(ch, fg, bg)) in cells.iter().enumerate() {
         let (c, r) = (i as u16 % cols, i as u16 / cols);
@@ -213,7 +217,7 @@ pub fn portrait(
         if px >= area.x + area.width || py >= area.y + area.height {
             continue;
         }
-        if is_ground(ch, bg, th) {
+        if is_ground(ch, bg) {
             continue;
         }
         if let Some(cell) = f.buffer_mut().cell_mut((px, py)) {
@@ -374,6 +378,32 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A plate sits on the page, not on a rectangle of its own.
+    ///
+    /// The test is against the colour the *bake* used. It was against the live
+    /// theme's page, which is a different number in every theme and the right
+    /// one in none -- so the truecolor arm could never match and the whole
+    /// thing was being carried by the indexed arm beside it. A plate with real
+    /// transparency, baked unquantised, kept its dark backing on every page.
+    #[test]
+    fn a_plate_sheds_the_ground_it_was_baked_against() {
+        use crate::portraits::{Ink, BAKED_BG};
+        let (r, g, b) = BAKED_BG;
+
+        // A blank cell still carrying the bake's ground: not part of the
+        // picture, whatever theme is on.
+        assert!(is_ground(' ', Ink::C(r, g, b)));
+        assert!(is_ground('\u{2800}', Ink::C(r, g, b)));
+        // ...and the quantised plates, where it landed on a palette entry.
+        assert!(is_ground(' ', Ink::I(16)));
+
+        // A blank cell that is some other colour is a blank *in the picture*
+        // -- a patch of night sky -- and has to be painted.
+        assert!(!is_ground(' ', Ink::C(30, 30, 46)));
+        // And anything with a glyph in it is picture by definition.
+        assert!(!is_ground('#', Ink::C(r, g, b)));
+    }
     use super::*;
 
     /// A loop that stops stops where a loop ends.

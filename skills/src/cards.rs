@@ -324,7 +324,7 @@ fn strip(f: &mut Frame, area: Rect, v: &View) {
     for pass in 0..2 {
         let mut x = -offset + pass * total;
         for l in &arts {
-            tile::draw(buf, area, area.x as i32 + x, area.y as i32, l, true, 0.8, v.theme);
+            tile::draw(buf, area, (area.x as i32 + x, area.y as i32), l, true, 0.8, v.theme);
             x += (l.sm.cols + PAD) as i32;
         }
     }

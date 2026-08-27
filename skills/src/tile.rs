@@ -48,13 +48,13 @@ pub fn mix(c: (u8, u8, u8), a: f32, th: Theme) -> Color {
 pub fn draw(
     buf: &mut Buffer,
     clip: Rect,
-    x: i32,
-    y: i32,
+    at: (i32, i32),
     logo: &Logo,
     small: bool,
     light: f32,
     th: Theme,
 ) {
+    let (x, y) = at;
     if light <= 0.01 {
         return;
     }
@@ -101,13 +101,13 @@ pub fn size(logo: &Logo, small: bool) -> (u16, u16) {
 pub fn caption(
     buf: &mut Buffer,
     clip: Rect,
-    cx: i32,
-    y: i32,
+    at: (i32, i32),
     text: &str,
     c: (u8, u8, u8),
     light: f32,
     th: Theme,
 ) {
+    let (cx, y) = at;
     if light <= 0.01 || y < clip.y as i32 || y >= (clip.y + clip.height) as i32 {
         return;
     }

@@ -14,6 +14,19 @@
 //! drawing can be tinted against the page. These are photographs; there is
 //! nothing to tint.
 
+/// The ground these were baked against.
+///
+/// chafa was handed this as `--bg`, so it is what filled every
+/// transparent pixel in the source. A cell that still carries it is not
+/// part of the picture, and `paint::is_ground` skips those so a plate
+/// sits on the page instead of on a rectangle of its own.
+///
+/// Emitted rather than written twice. It is a fact about the bake, not
+/// about the theme -- the reader has no way to know it otherwise, and the
+/// consumer had drifted to comparing against the live page colour, which
+/// is a different number in every theme and the right one in none.
+pub const BAKED_BG: (u8, u8, u8) = (8, 9, 11);
+
 /// One colour, as chafa wrote it.
 ///
 /// `I` is an xterm palette index and `C` is truecolor, and the

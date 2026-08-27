@@ -116,7 +116,7 @@ fn skills(f: &mut Frame, area: Rect, app: &mut App) {
         // is high enough that an untouched sheet still reads as a full board of
         // tools rather than as darkness with a spotlight in it.
         let light = 0.42 + 0.58 * t.lift as f32;
-        tile::draw(buf, area, x, y, t.logo, false, light, theme);
+        tile::draw(buf, area, (x, y), t.logo, false, light, theme);
 
         // Names arrive with the lift. Labelling every tile at rest would be a
         // wall of type; labelling none would make the board a mystery.
@@ -125,8 +125,7 @@ fn skills(f: &mut Frame, area: Rect, app: &mut App) {
             tile::caption(
                 buf,
                 area,
-                x + tw as i32 / 2,
-                y + th as i32,
+                (x + tw as i32 / 2, y + th as i32),
                 t.logo.name,
                 (200, 206, 214),
                 name.min(1.0) * 0.95,
