@@ -47,6 +47,14 @@ const WHEEL: f64 = 26.0;
 const STILL: f64 = 0.02;
 
 pub struct App {
+    /// The ground everything is drawn against.
+    ///
+    /// Held on the app rather than passed at each call because the portfolio
+    /// drives this renderer too, and one visitor changing theme must not
+    /// change anybody else's -- so it cannot be a global, and threading it
+    /// from the outside at every entry point would be the same field written
+    /// six times.
+    pub theme: termap::canvas::Theme,
     pub tab: Tab,
 
     pub projects: Vec<crate::data::Project>,
@@ -89,6 +97,7 @@ impl App {
         let projects = data::parse(include_str!("../data/projects.txt"))
             .expect("the built-in project sheet must parse; it is covered by a test");
         App {
+            theme: Default::default(),
             tab: Tab::Projects,
             projects,
             at: 0,

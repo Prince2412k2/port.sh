@@ -354,6 +354,18 @@ impl Shell {
     pub fn set_ground(&mut self, g: termap::canvas::Ground) {
         self.ground = g;
         self.map.theme = self.map.theme.with_ground(g);
+        self.sheet.theme = self.map.theme;
+    }
+
+    /// The one theme, everywhere.
+    ///
+    /// Both embedded renderers keep their own copy because each is also a
+    /// standalone binary with its own key handling. The shell owns the answer
+    /// and pushes it down every frame, which is what stops the map and the
+    /// sheet drifting on to different grounds -- they were on different ones,
+    /// and it showed as the projects tab having its own background.
+    fn sync_theme(&mut self) {
+        self.sheet.theme = self.map.theme;
     }
 
     pub fn new() -> Self {
@@ -743,6 +755,7 @@ impl Shell {
                     && self.map.query.is_none() =>
             {
                 self.map.theme = self.map.theme.next().with_ground(self.ground);
+                self.sync_theme();
                 return;
             }
             _ => {}
@@ -1063,6 +1076,7 @@ impl Shell {
         // key that flips it lands. A `static` would be simpler and wrong:
         // one process serves every visitor, so it would repaint all of them.
         let th = self.map.theme;
+        self.sync_theme();
         let area = f.area();
         Block::default()
             .style(Style::default().bg(th.page()))
@@ -1184,6 +1198,7 @@ impl Shell {
                                 },
                                 p,
                                 story,
+                                th,
                             );
                         }
                         // The mark: asked for, or standing in for a diagram that
@@ -1205,14 +1220,14 @@ impl Shell {
                                 (false, _) => stage,
                             };
                             if room.height > 0 {
-                                skysheet::cards::mark_into(f.buffer_mut(), room, m, 1.0);
+                                skysheet::cards::mark_into(f.buffer_mut(), room, m, 1.0, th);
                             }
                         }
                     }
                     paint::veil(f, at, fade, th);
                 }
                 if let Some((at, spec, fade, t, running)) = ask::diagram_panel(body, &self.ask) {
-                    skysheet::diagram::render(f.buffer_mut(), at, spec, t, running);
+                    skysheet::diagram::render(f.buffer_mut(), at, spec, t, running, th);
                     paint::veil(f, at, fade, th);
                 }
                 ask::render(f, body, &self.ask, th);

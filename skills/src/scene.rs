@@ -16,6 +16,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use termap::canvas::Theme;
+
 use crate::data::Project;
 
 pub const INK: (u8, u8, u8) = (188, 194, 206);
@@ -194,7 +196,7 @@ pub fn spark(buf: &mut Buffer, clip: Rect, x: i32, y: i32, vals: &[f64], c: (u8,
 
 /// Draw a project's diagram. Returns false when it has none yet, so the caller
 /// can fall back to prose rather than leaving a hole.
-pub fn draw(buf: &mut Buffer, area: Rect, p: &Project, t: f64) -> bool {
+pub fn draw(buf: &mut Buffer, area: Rect, p: &Project, t: f64, th: Theme) -> bool {
     let f: fn(&mut Buffer, Rect, f64) = match p.id.as_str() {
         "netjail" => netjail,
         "watch-party" => watch_party,
@@ -209,6 +211,10 @@ pub fn draw(buf: &mut Buffer, area: Rect, p: &Project, t: f64) -> bool {
         _ => return false,
     };
     f(buf, area, t);
+    // Every colour in here is a literal chosen against black; this is where
+    // they are turned round for a light page. One sweep of the rect rather
+    // than a theme threaded through forty-four `put` calls.
+    termap::canvas::recast_region(buf, area, th);
     true
 }
 
@@ -946,7 +952,7 @@ mod tests {
     fn frame(p: &crate::data::Project, t: f64, w: u16, h: u16) -> Buffer {
         let area = Rect::new(0, 0, w, h);
         let mut buf = Buffer::empty(area);
-        assert!(draw(&mut buf, area, p, t), "{} has no diagram", p.id);
+        assert!(draw(&mut buf, area, p, t, Theme::Night), "{} has no diagram", p.id);
         buf
     }
 
@@ -960,7 +966,7 @@ mod tests {
             let ink = |aw: u16, ah: u16| {
                 let area = Rect::new(0, 0, aw, ah);
                 let mut buf = Buffer::empty(area);
-                draw(&mut buf, area, &p, 2.0);
+                draw(&mut buf, area, &p, 2.0, Theme::Night);
                 (0..ah)
                     .flat_map(|y| (0..aw).map(move |x| (x, y)))
                     .filter(|&(x, y)| buf.cell((x, y)).unwrap().symbol() != " ")
@@ -983,7 +989,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 30);
         for p in all() {
             let mut buf = Buffer::empty(area);
-            assert!(draw(&mut buf, area, &p, 1.0), "{} still falls back to prose", p.id);
+            assert!(draw(&mut buf, area, &p, 1.0, Theme::Night), "{} still falls back to prose", p.id);
         }
     }
 
@@ -1016,7 +1022,7 @@ mod tests {
                 for h in [10u16, 18, 26, 40] {
                     let area = Rect::new(3, 2, w, h);
                     let mut buf = Buffer::empty(Rect::new(0, 0, w + 6, h + 4));
-                    draw(&mut buf, area, &p, 1.7);
+                    draw(&mut buf, area, &p, 1.7, Theme::Night);
                     for y in 0..h + 4 {
                         for x in 0..w + 6 {
                             let inside = x >= 3 && x < 3 + w && y >= 2 && y < 2 + h;
@@ -1066,7 +1072,7 @@ mod probe {
             let ink = |aw: u16, ah: u16| {
                 let area = Rect::new(0, 0, aw, ah);
                 let mut buf = Buffer::empty(area);
-                draw(&mut buf, area, p, 2.0);
+                draw(&mut buf, area, p, 2.0, Theme::Night);
                 (0..ah)
                     .flat_map(|y| (0..aw).map(move |x| (x, y)))
                     .filter(|&(x, y)| buf.cell((x, y)).unwrap().symbol() != " ")

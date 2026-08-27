@@ -1730,7 +1730,10 @@ fn answered(token: &str, name: &str, args: Option<&Value>) -> String {
             };
             let area = ratatui::layout::Rect::new(0, 0, 100, 34);
             let mut buffer = ratatui::buffer::Buffer::empty(area);
-            if !skysheet::diagram::render(&mut buffer, area, &spec, 1.0, false) {
+            // A text preview for the agent, so the ground it is drawn against
+            // does not matter -- `plain` throws the colours away anyway.
+            let th = termap::canvas::Theme::Night;
+            if !skysheet::diagram::render(&mut buffer, area, &spec, 1.0, false, th) {
                 return err("preview_diagram could not render the scene");
             }
             let preview = termap::snapshot::plain(&buffer);

@@ -565,6 +565,11 @@ fn put(buf: &mut Buffer, clip: Rect, point: Point, ch: char, color: (u8, u8, u8)
     }
 }
 
+#[cfg(test)]
+fn render_night(buf: &mut Buffer, area: Rect, spec: &Spec, t: f64, running: bool) -> bool {
+    render(buf, area, spec, t, running, termap::canvas::Theme::Night)
+}
+
 fn mapped(content: Rect, logical: RectSpec) -> Rect {
     let x = u32::from(content.x) + u32::from(logical.x) * u32::from(content.width) / 100;
     let y = u32::from(content.y) + u32::from(logical.y) * u32::from(content.height) / 100;
@@ -1194,7 +1199,14 @@ fn draw_element(
     }
 }
 
-pub fn render(buf: &mut Buffer, area: Rect, spec: &Spec, t: f64, running: bool) -> bool {
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    spec: &Spec,
+    t: f64,
+    running: bool,
+    th: termap::canvas::Theme,
+) -> bool {
     if area.width < 20 || area.height < 9 || validate(spec).is_err() {
         return false;
     }
@@ -1288,6 +1300,11 @@ pub fn render(buf: &mut Buffer, area: Rect, spec: &Spec, t: f64, running: bool) 
             true,
         );
     }
+    // As in `scene::draw`: the colours in here are literals chosen against
+    // black, turned round in one sweep rather than threaded through every
+    // `put`. Diagram outlines going white on cream was the visible half of
+    // this; the boxes were drawn in `MUTE` and `FAINT`, which are pale greys.
+    termap::canvas::recast_region(buf, area, th);
     true
 }
 
@@ -1511,8 +1528,8 @@ mod tests {
         let area = Rect::new(0, 0, 120, 38);
         let mut first = Buffer::empty(area);
         let mut later = Buffer::empty(area);
-        assert!(render(&mut first, area, &spec, 0.2, true));
-        assert!(render(&mut later, area, &spec, 1.2, true));
+        assert!(render(&mut first, area, &spec, 0.2, true, termap::canvas::Theme::Night));
+        assert!(render(&mut later, area, &spec, 1.2, true, termap::canvas::Theme::Night));
         let output = symbols(&later);
         for text in [
             "ingress",
@@ -1543,8 +1560,8 @@ mod tests {
         let area = Rect::new(0, 0, 120, 38);
         let mut early = Buffer::empty(area);
         let mut late = Buffer::empty(area);
-        assert!(render(&mut early, area, &spec, 0.0, false));
-        assert!(render(&mut late, area, &spec, 99.0, false));
+        assert!(render(&mut early, area, &spec, 0.0, false, termap::canvas::Theme::Night));
+        assert!(render(&mut late, area, &spec, 99.0, false, termap::canvas::Theme::Night));
         assert_eq!(early, late);
         let output = symbols(&early);
         assert!(output.contains("90 %"), "{output}");
@@ -1567,8 +1584,8 @@ mod tests {
         let area = Rect::new(0, 0, 120, 38);
         let mut focused_frame = Buffer::empty(area);
         let mut plain_frame = Buffer::empty(area);
-        assert!(render(&mut focused_frame, area, &focused, 99.0, false));
-        assert!(render(&mut plain_frame, area, &plain, 99.0, false));
+        assert!(render(&mut focused_frame, area, &focused, 99.0, false, termap::canvas::Theme::Night));
+        assert!(render(&mut plain_frame, area, &plain, 99.0, false, termap::canvas::Theme::Night));
         assert_eq!(
             focused_frame, plain_frame,
             "the final focus left the scene faint"
@@ -1619,8 +1636,8 @@ mod tests {
         let clip = Rect::new(4, 3, 80, 24);
         let mut first = Buffer::empty(whole);
         let mut same = Buffer::empty(whole);
-        assert!(render(&mut first, clip, &spec, 0.75, true));
-        assert!(render(&mut same, clip, &spec, 0.75, true));
+        assert!(render(&mut first, clip, &spec, 0.75, true, termap::canvas::Theme::Night));
+        assert!(render(&mut same, clip, &spec, 0.75, true, termap::canvas::Theme::Night));
         assert_eq!(first, same);
         for y in whole.y..whole.bottom() {
             for x in whole.x..whole.right() {
@@ -1629,7 +1646,7 @@ mod tests {
                 }
             }
         }
-        assert!(!render(
+        assert!(!render_night(
             &mut first,
             Rect::new(0, 0, 19, 8),
             &spec,

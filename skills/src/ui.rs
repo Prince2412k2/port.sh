@@ -9,14 +9,21 @@ use ratatui::Frame;
 use crate::app::{App, Tab};
 use crate::tile;
 
-const BG: Color = Color::Rgb(6, 7, 10);
-const FG: Color = Color::Rgb(196, 200, 206);
-const DIM: Color = Color::Rgb(96, 102, 112);
-const FAINT: Color = Color::Rgb(54, 58, 68);
+/// The standalone binary's own chrome, as chosen against a dark ground. The
+/// portfolio draws its own and never reaches these.
+const FG: (u8, u8, u8) = (196, 200, 206);
+const DIM: (u8, u8, u8) = (96, 102, 112);
+const FAINT: (u8, u8, u8) = (54, 58, 68);
+
+/// One of the chrome colours, on whatever ground the app is on.
+fn ink(app: &App, c: (u8, u8, u8)) -> Color {
+    let (r, g, b) = app.theme.recast_strength(c);
+    termap::canvas::ink(r, g, b)
+}
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    Block::default().style(Style::default().bg(BG)).render(area, f.buffer_mut());
+    Block::default().style(Style::default().bg(app.theme.page())).render(area, f.buffer_mut());
 
     let [head, body, foot] = L::vertical([
         Constraint::Length(1),
@@ -49,9 +56,9 @@ fn tabs(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(
             format!(" {} {} ", i + 1, t.label()),
             if on {
-                Style::default().fg(BG).bg(FG).add_modifier(Modifier::BOLD)
+                Style::default().fg(app.theme.page()).bg(ink(app, FG)).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(DIM)
+                Style::default().fg(ink(app, DIM))
             },
         ));
         spans.push(Span::styled(" ", Style::default()));
@@ -68,7 +75,7 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
     };
     let left = Line::from(vec![
         Span::styled(" ", Style::default()),
-        Span::styled(hint, Style::default().fg(DIM)),
+        Span::styled(hint, Style::default().fg(ink(app, DIM))),
     ]);
     let right = Line::from(vec![Span::styled(
         match app.tab {
@@ -76,7 +83,7 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
             Tab::Skills => "held ".to_string(),
             Tab::Projects => format!("{} of {} ", app.at + 1, app.projects.len()),
         },
-        Style::default().fg(FAINT),
+        Style::default().fg(ink(app, FAINT)),
     )]);
     f.render_widget(Paragraph::new(left), area);
     let w = right.spans.iter().map(|s| s.content.chars().count() as u16).sum::<u16>();
@@ -93,6 +100,7 @@ fn skills(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
     app.sheet_area = area;
+    let theme = app.theme;
     let sheet = app.sheet();
 
     let buf = f.buffer_mut();
@@ -108,7 +116,7 @@ fn skills(f: &mut Frame, area: Rect, app: &mut App) {
         // is high enough that an untouched sheet still reads as a full board of
         // tools rather than as darkness with a spotlight in it.
         let light = 0.42 + 0.58 * t.lift as f32;
-        tile::draw(buf, area, x, y, t.logo, false, light);
+        tile::draw(buf, area, x, y, t.logo, false, light, theme);
 
         // Names arrive with the lift. Labelling every tile at rest would be a
         // wall of type; labelling none would make the board a mystery.
@@ -122,6 +130,7 @@ fn skills(f: &mut Frame, area: Rect, app: &mut App) {
                 t.logo.name,
                 (200, 206, 214),
                 name.min(1.0) * 0.95,
+                theme,
             );
         }
     }
@@ -133,6 +142,7 @@ fn projects(f: &mut Frame, area: Rect, app: &mut App) {
         at: app.at,
         scroll: app.scroll,
         t: app.t,
+        theme: app.theme,
     };
     app.hit = crate::cards::render(f, area, &view);
 }

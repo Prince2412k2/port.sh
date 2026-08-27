@@ -10,10 +10,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::logos::Logo;
+use termap::canvas::{ink, Theme};
 
-/// The ground the marks are composited against.
-pub const BG: (u8, u8, u8) = (6, 7, 10);
+use crate::logos::Logo;
 
 /// Steps in each channel of a composited edge.
 ///
@@ -25,17 +24,19 @@ pub const BG: (u8, u8, u8) = (6, 7, 10);
 /// this size against a near-black ground; the wire cost is not.
 const STEPS: f32 = 16.0;
 
+/// A coverage of the mark's colour, over whatever ground the theme is on.
 #[inline]
-fn mix(c: (u8, u8, u8), a: f32) -> Color {
+pub fn mix(c: (u8, u8, u8), a: f32, th: Theme) -> Color {
     // Quantise the coverage rather than the colour: a mark's flat interior then
     // lands on exactly its brand colour instead of a rounded approximation of
     // it, and only the antialiased edge is stepped.
     let a = (a.clamp(0.0, 1.0) * STEPS).round() / STEPS;
-    Color::Rgb(
-        (BG.0 as f32 + (c.0 as f32 - BG.0 as f32) * a) as u8,
-        (BG.1 as f32 + (c.1 as f32 - BG.1 as f32) * a) as u8,
-        (BG.2 as f32 + (c.2 as f32 - BG.2 as f32) * a) as u8,
-    )
+    let g = th.ground();
+    // A brand colour: darkened on a light page only as far as it must be, so
+    // it keeps its hue -- see `Theme::recast_identity`.
+    let c = th.recast_identity(c);
+    let f = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * a) as u8;
+    ink(f(g.0, c.0), f(g.1, c.1), f(g.2, c.2))
 }
 
 /// Paint a mark with its top-left at `(x, y)` in buffer coordinates.
@@ -52,6 +53,7 @@ pub fn draw(
     logo: &Logo,
     small: bool,
     light: f32,
+    th: Theme,
 ) {
     if light <= 0.01 {
         return;
@@ -73,9 +75,17 @@ pub fn draw(
             }
             let (fa, ba) = (f as f32 / 255.0 * light, b as f32 / 255.0 * light);
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_char(ch)
-                    .set_fg(mix(logo.rgb, fa))
-                    .set_bg(mix(logo.rgb, ba));
+                cell.set_char(ch).set_fg(mix(logo.rgb, fa, th));
+                // Only where there is background coverage to paint.
+                //
+                // This used to set both unconditionally, so every cell with
+                // any ink in it also got a background of `mix(rgb, 0)` -- the
+                // hardcoded near-black. That is the black tile behind every
+                // logo on a light page, and under the system theme it would
+                // punch an opaque hole in a transparent terminal.
+                if ba > 0.004 {
+                    cell.set_bg(mix(logo.rgb, ba, th));
+                }
             }
         }
     }
@@ -88,14 +98,23 @@ pub fn size(logo: &Logo, small: bool) -> (u16, u16) {
 }
 
 /// Centred text under a tile, in the mark's own colour.
-pub fn caption(buf: &mut Buffer, clip: Rect, cx: i32, y: i32, text: &str, c: (u8, u8, u8), light: f32) {
+pub fn caption(
+    buf: &mut Buffer,
+    clip: Rect,
+    cx: i32,
+    y: i32,
+    text: &str,
+    c: (u8, u8, u8),
+    light: f32,
+    th: Theme,
+) {
     if light <= 0.01 || y < clip.y as i32 || y >= (clip.y + clip.height) as i32 {
         return;
     }
     let n = text.chars().count() as i32;
     let x0 = cx - n / 2;
     let style = Style::default()
-        .fg(mix(c, light))
+        .fg(mix(c, light, th))
         .add_modifier(if light > 0.85 { Modifier::BOLD } else { Modifier::empty() });
     for (i, ch) in text.chars().enumerate() {
         let sx = x0 + i as i32;

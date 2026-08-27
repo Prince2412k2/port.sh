@@ -19,10 +19,15 @@ pub struct Opts {
     pub at: Option<f64>,
     /// Rows into a scrolling section.
     pub scroll: Option<u16>,
+    /// Which ground to draw on. `None` leaves the default, which is system.
+    pub theme: Option<termap::canvas::Theme>,
 }
 
 pub fn render(o: &Opts) -> std::io::Result<()> {
     let mut shell = Shell::new();
+    if let Some(t) = o.theme {
+        shell.map.theme = t;
+    }
     let mut term = Terminal::new(TestBackend::new(o.width, o.height)).unwrap();
 
     // `--section boot` is the only way to see the opening in a snapshot;

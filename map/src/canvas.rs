@@ -218,6 +218,25 @@ impl Theme {
         }
     }
 
+    /// A colour that names a thing, on this theme's ground.
+    ///
+    /// For the palettes that live outside this module and were all written
+    /// for black -- `skysheet`'s project identities, chiefly. On a dark ground
+    /// it is the colour it always was; on a light one it is darkened just far
+    /// enough to be read, and no further, so a brand keeps its hue.
+    pub fn recast_identity(self, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+        if self.dark() { rgb } else { legible(rgb, self.ground()) }
+    }
+
+    /// A colour whose brightness *is* its loudness, on this theme's ground.
+    ///
+    /// The other half of `recast_identity`, and the distinction matters: see
+    /// the note above `by_strength`. Chrome greys go through here, brand
+    /// colours through there.
+    pub fn recast_strength(self, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+        if self.dark() { rgb } else { by_strength(rgb, self.ground()) }
+    }
+
     /// The colour a mark fades into as its strength goes to zero.
     ///
     /// This is the one place the direction of the whole palette is decided.
@@ -580,6 +599,193 @@ pub fn ink(r: u8, g: u8, b: u8) -> Color {
         return Color::Indexed(232 + i);
     }
     Color::Rgb(r, g, b)
+}
+
+// Two ways to move a colour from a dark ground to a light one, because there
+// are two kinds of colour and they want opposite things.
+//
+// A **strength** colour encodes how loud a mark is: on black the strongest is
+// near-white and the faintest is near-black. Moving it has to preserve the
+// loudness, which means the faint one gets *lighter* on cream -- faint is low
+// contrast, and on a light page low contrast is pale.
+//
+// An **identity** colour is just a colour. TypeScript blue is `(49, 120, 198)`
+// because that is what TypeScript blue is. Moving it must never wash it out,
+// so it may only ever go darker, and only as far as it must.
+//
+// One function cannot do both, and the first version of this tried. It
+// mirrored lightness, which is the strength rule, and applied it to the sheet
+// of logos: TypeScript blue came out at `(89, 160, 238)`, lighter than it
+// started, on a page that was already light. Then the contrast rule replaced
+// it and broke the other half -- the faintest grey in a ladder came out with
+// twice the contrast of the one above it, because it was already dark.
+//
+// So: `by_strength` for palettes where brightness means loudness, `legible`
+// for palettes where a colour is a name.
+
+/// Re-express a mark's loudness against a light page.
+///
+/// Whatever contrast it had against black, scaled and applied against the new
+/// page -- in either direction, because a faint mark has to *rise* towards a
+/// light page just as a strong one has to fall away from it.
+///
+/// The scale is 0.62, which is roughly what the hand-picked `TINT_PAPER` did:
+/// its twelve entries sit between 0.37 and 0.91 of their night contrast,
+/// clustered around six tenths. Less than one because a hue cannot be both
+/// saturated and 16:1 against cream -- something gives, and on a printed map
+/// it is the contrast.
+pub fn by_strength(rgb: (u8, u8, u8), page: (u8, u8, u8)) -> (u8, u8, u8) {
+    const KEEP: f32 = 0.62;
+    /// The faintest thing still has to be a mark and not the page.
+    const FLOOR: f32 = 1.4;
+    const CEILING: f32 = 13.0;
+    let want = (KEEP * contrast(rgb, (0, 0, 0))).clamp(FLOOR, CEILING);
+    walk_to_contrast(rgb, page, want, true)
+}
+
+/// Darken a colour until it can be read on a light page, and no further.
+///
+/// A colour that is already dark enough comes back untouched, which is the
+/// point: a brand keeps the exact value it is supposed to be.
+pub fn legible(rgb: (u8, u8, u8), page: (u8, u8, u8)) -> (u8, u8, u8) {
+    /// Below this it is not a mark on this page.
+    const FLOOR: f32 = 3.0;
+    const CEILING: f32 = 13.0;
+    let want = (0.62 * contrast(rgb, (0, 0, 0))).clamp(FLOOR, CEILING);
+    if contrast(rgb, page) >= want {
+        return rgb;
+    }
+    walk_to_contrast(rgb, page, want, false)
+}
+
+/// Move a colour's lightness until it has `want` contrast against `page`,
+/// keeping hue and absolute chroma.
+///
+/// Absolute chroma and not HLS saturation: saturation is relative to
+/// lightness, so holding it while the lightness drops *adds* colour. An early
+/// version of this turned a grey with six points of spread into an olive with
+/// twenty-two.
+///
+/// `both_ways` allows moving towards the page as well as away from it, which
+/// only a strength palette wants.
+fn walk_to_contrast(
+    rgb: (u8, u8, u8),
+    page: (u8, u8, u8),
+    want: f32,
+    both_ways: bool,
+) -> (u8, u8, u8) {
+    let (h, l, s) = to_hls(rgb);
+    let chroma = s * (1.0 - (2.0 * l - 1.0).abs());
+    let page_l = to_hls(page).1;
+    let away = if page_l > 0.5 { -1.0 } else { 1.0 };
+
+    let mut best = rgb;
+    let mut best_gap = f32::MAX;
+    for i in 0..=64 {
+        let t = i as f32 / 64.0;
+        // From the page outwards. A strength colour stops at the first
+        // lightness that matches; an identity one has already been let through
+        // if it did not need moving at all.
+        let nl = if away < 0.0 { page_l * (1.0 - t) } else { page_l + (1.0 - page_l) * t };
+        let room = 1.0 - (2.0 * nl - 1.0).abs();
+        let ns = if room < 1e-6 { 0.0 } else { (chroma / room).min(1.0) };
+        let c = from_hls(h, nl, ns);
+        let gap = (contrast(c, page) - want).abs();
+        if gap < best_gap {
+            best_gap = gap;
+            best = c;
+        }
+        if !both_ways && contrast(c, page) >= want {
+            return c;
+        }
+    }
+    best
+}
+
+/// WCAG contrast ratio, 1.0 for identical and 21.0 for black on white.
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+    let lum = |c: (u8, u8, u8)| {
+        let ch = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
+    };
+    let (x, y) = (lum(a), lum(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+fn to_hls(rgb: (u8, u8, u8)) -> (f32, f32, f32) {
+    let (r, g, b) = (rgb.0 as f32 / 255.0, rgb.1 as f32 / 255.0, rgb.2 as f32 / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d < 1e-6 {
+        return (0.0, l, 0.0);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs()).max(1e-6);
+    let h = if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } / 6.0;
+    (h, l, s.min(1.0))
+}
+
+fn from_hls(h: f32, l: f32, s: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h * 6.0;
+    let x = c * (1.0 - (hp.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let q = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (q(r), q(g), q(b))
+}
+
+/// Move a finished drawing from a dark ground onto this theme's.
+///
+/// For the drawing code that predates the theme and funnels every colour
+/// through one `put`: `skysheet`'s scenes and diagrams are forty-four and
+/// twenty-nine call sites of that shape, all of them handed a literal chosen
+/// against black. Threading a theme to each would be a hundred edits to two
+/// files that are otherwise none of this module's business, so the rect is
+/// swept once after it is drawn instead. A few thousand cells, and it picks up
+/// any colour those files grow later without being told about it.
+///
+/// Two things are left alone. A cell nobody painted, which is a `Reset` and
+/// has no components to move. And a cell painted the *page* colour, which is
+/// not a mark at all -- without that test the sweep recasts the background it
+/// is drawn on, and the rect comes out as a dark panel sitting on the page.
+/// Which is the same "every tab has its own background" that this whole change
+/// is meant to end.
+pub fn recast_region(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, th: Theme) {
+    if th.dark() {
+        return;
+    }
+    let page = th.ground();
+    for y in area.y..area.y.saturating_add(area.height) {
+        for x in area.x..area.x.saturating_add(area.width) {
+            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let turn = |c: Color| match rgb_of(c) {
+                Some(rgb) if rgb != page => {
+                    let (r, g, b) = by_strength(rgb, page);
+                    ink(r, g, b)
+                }
+                _ => c,
+            };
+            let (fg, bg) = (turn(cell.fg), turn(cell.bg));
+            cell.set_fg(fg).set_bg(bg);
+        }
+    }
 }
 
 /// The inverse of `ink` for the colours this renderer actually emits.
@@ -1014,6 +1220,110 @@ impl Canvas {
 
 #[cfg(test)]
 mod theme_tests {
+
+    /// Nothing gets lighter on a light page.
+    ///
+    /// The bug this replaced: the first rule mirrored lightness, which assumes
+    /// every colour is a bright mark on black. Brand colours are not -- they
+    /// are just colours -- so TypeScript blue came out *lighter* than it went
+    /// in, on a page that was already light, and the sheet of logos rendered
+    /// as pale ghosts.
+    #[test]
+    fn a_colour_never_moves_towards_a_light_page() {
+        let page = PAGE[1];
+        let lum = |c: (u8, u8, u8)| {
+            0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32
+        };
+        // Brand colours, which is the case the mirror got wrong: real logo
+        // values, several of them already darker than the page.
+        let brands = [
+            (240, 219, 79),  // javascript
+            (49, 120, 198),  // typescript
+            (0, 173, 216),   // go
+            (60, 135, 58),   // node
+            (222, 165, 132), // rust
+        ];
+        for c in brands.iter().chain(TINT_NIGHT.iter()) {
+            let got = legible(*c, page);
+            assert!(
+                lum(got) <= lum(*c) + 1.0,
+                "{c:?} was lightened to {got:?} on a page of {page:?}"
+            );
+        }
+    }
+
+    /// Everything ends up readable, and what already was is left alone.
+    #[test]
+    fn only_what_cannot_be_read_is_moved() {
+        let page = PAGE[1];
+        // Already dark enough against cream: untouched, so a brand keeps the
+        // exact colour it is supposed to be.
+        for c in [(49, 120, 198), (60, 135, 58), (34, 32, 30)] {
+            assert_eq!(legible(c, page), c, "{c:?} was moved for no reason");
+        }
+        // Too pale to read: taken down until it is.
+        for c in [(240, 219, 79), (232, 232, 226), (196, 220, 236)] {
+            let got = legible(c, page);
+            assert_ne!(got, c, "{c:?} was left illegible");
+            assert!(
+                contrast(got, page) >= 2.9,
+                "{c:?} -> {got:?} is still only {:.1}:1",
+                contrast(got, page)
+            );
+        }
+    }
+
+    /// The order survives, or the palette stops meaning anything.
+    ///
+    /// A flat contrast target would put the strongest ink and the faintest
+    /// rule on the same footing. Scaling each colour's own contrast keeps the
+    /// ranking it was designed with.
+    #[test]
+    fn the_strong_stay_stronger_than_the_faint() {
+        let page = PAGE[1];
+        // Strongest to faintest, as chosen against black.
+        let ladder = [(232, 232, 226), (168, 166, 162), (118, 124, 140), (74, 80, 92)];
+        let on_page: Vec<f32> =
+            ladder.iter().map(|c| contrast(by_strength(*c, page), page)).collect();
+        for w in on_page.windows(2) {
+            assert!(w[0] > w[1], "the ladder came out {on_page:?}");
+        }
+    }
+
+    /// Hue survives the move: a project's colour is its identity.
+    #[test]
+    fn a_colour_keeps_its_hue() {
+        let page = PAGE[1];
+        let channel = |c: (u8, u8, u8)| {
+            let m = [c.0, c.1, c.2];
+            (0..3).max_by_key(|&k| m[k]).unwrap()
+        };
+        for c in TINT_NIGHT.iter().filter(|c| {
+            c.0.max(c.1).max(c.2) - c.0.min(c.1).min(c.2) > 24
+        }) {
+            let got = legible(*c, page);
+            assert_eq!(channel(got), channel(*c), "{c:?} changed hue: {got:?}");
+        }
+    }
+
+    /// A near-neutral must not pick up a colour cast on the way down.
+    ///
+    /// HLS saturation is relative to lightness, so holding it while the
+    /// lightness drops *adds* chroma: an early version turned the text tint, a
+    /// grey with six points of spread, into an olive with twenty-two.
+    #[test]
+    fn a_grey_stays_grey_on_the_way_down() {
+        let spread = |c: (u8, u8, u8)| c.0.max(c.1).max(c.2) as i32 - c.0.min(c.1).min(c.2) as i32;
+        for grey in [(232, 232, 226), (168, 166, 162), (118, 124, 140)] {
+            let got = legible(grey, PAGE[1]);
+            assert!(
+                spread(got) <= spread(grey) + 4,
+                "{grey:?} picked up a cast: {got:?}, spread {} -> {}",
+                spread(grey),
+                spread(got)
+            );
+        }
+    }
 
     /// System paints nothing, so whatever the terminal has stays.
     ///

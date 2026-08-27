@@ -18,6 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
+use termap::canvas::Theme;
 
 use crate::data::Project;
 use crate::logos;
@@ -44,18 +45,21 @@ const STRIP_H: u16 = 5;
 const BOB: f64 = 1.4;
 const BOB_SECS: f64 = 5.5;
 
-const FG: Color = Color::Rgb(198, 202, 208);
-const BODY: Color = Color::Rgb(152, 158, 170);
-const FAINT: Color = Color::Rgb(74, 80, 92);
+/// The card's own greys, as chosen against a dark ground. Turned round by
+/// `Theme::recast` wherever they are used, like every other colour in here.
+const FG: (u8, u8, u8) = (198, 202, 208);
+const BODY: (u8, u8, u8) = (152, 158, 170);
+const FAINT: (u8, u8, u8) = (74, 80, 92);
 
-fn mix(c: (u8, u8, u8), a: f32) -> Color {
-    let bg = tile::BG;
-    let a = a.clamp(0.0, 1.0);
-    Color::Rgb(
-        (bg.0 as f32 + (c.0 as f32 - bg.0 as f32) * a) as u8,
-        (bg.1 as f32 + (c.1 as f32 - bg.1 as f32) * a) as u8,
-        (bg.2 as f32 + (c.2 as f32 - bg.2 as f32) * a) as u8,
-    )
+/// A project's own colour, at a coverage. An identity, so it keeps its hue.
+fn mix(c: (u8, u8, u8), a: f32, th: Theme) -> Color {
+    tile::mix(c, a, th)
+}
+
+/// One of the card's greys, where brightness is loudness rather than a name.
+fn grey(c: (u8, u8, u8), th: Theme) -> Color {
+    let (r, g, b) = th.recast_strength(c);
+    termap::canvas::ink(r, g, b)
 }
 
 pub struct View<'a> {
@@ -63,6 +67,8 @@ pub struct View<'a> {
     pub at: usize,
     pub scroll: u16,
     pub t: f64,
+    /// The ground everything in the card is drawn against.
+    pub theme: Theme,
 }
 
 /// Where the pips landed, so one can be clicked.
@@ -104,7 +110,7 @@ pub fn render(f: &mut Frame, full: Rect, v: &View) -> Hit {
             width: area.width - rail,
             ..area
         };
-        if !scene::draw(f.buffer_mut(), inset(stage, 2, 1), p, v.t) {
+        if !scene::draw(f.buffer_mut(), inset(stage, 2, 1), p, v.t, v.theme) {
             prose(f, inset(stage, 2, 1), v, accent);
         }
     } else {
@@ -171,7 +177,7 @@ fn corner(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
     let bob = ((v.t / BOB_SECS) * std::f64::consts::TAU).sin() * BOB;
     let mx = bx as i32 + (bw as i32 - m.art.cols as i32) / 2;
     let my = by as i32 + 2 + (mh as i32 - m.art.rows as i32) / 2 + bob.round() as i32;
-    draw_mark(f.buffer_mut(), inset(bounds, 1, 1), mx, my, m, 1.0);
+    draw_mark(f.buffer_mut(), inset(bounds, 1, 1), mx, my, m, 1.0, v.theme);
 
     // Pips: which of the nine, and how many there are, in one row.
     let py = by + bh - 2;
@@ -215,25 +221,25 @@ fn corner(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
         let w = area.width.saturating_sub(4) as usize;
         let mut lines = vec![Line::from(Span::styled(
             p.name.clone(),
-            Style::default().fg(mix(accent, 1.0)).add_modifier(Modifier::BOLD),
+            Style::default().fg(mix(accent, 1.0, v.theme)).add_modifier(Modifier::BOLD),
         ))];
         for l in wrap(&p.tag, w) {
-            lines.push(Line::from(Span::styled(l, Style::default().fg(FG))));
+            lines.push(Line::from(Span::styled(l, Style::default().fg(grey(FG, v.theme)))));
         }
         lines.push(Line::default());
         for l in wrap(&p.stats, w) {
-            lines.push(Line::from(Span::styled(l, Style::default().fg(FAINT))));
+            lines.push(Line::from(Span::styled(l, Style::default().fg(grey(FAINT, v.theme)))));
         }
         if p.repo != "local" && p.repo != "private" {
             lines.push(Line::from(Span::styled(
                 p.repo.strip_prefix("github.com/").unwrap_or(&p.repo).to_string(),
-                Style::default().fg(FAINT),
+                Style::default().fg(grey(FAINT, v.theme)),
             )));
         }
         if p.draft {
             lines.push(Line::from(Span::styled(
                 "· from a summary, not the source",
-                Style::default().fg(FAINT).add_modifier(Modifier::ITALIC),
+                Style::default().fg(grey(FAINT, v.theme)).add_modifier(Modifier::ITALIC),
             )));
         }
         f.render_widget(
@@ -257,13 +263,21 @@ fn corner(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
 /// the chat draw the same art the same way rather than each owning a copy of
 /// the half-block blitter -- which is the whole reason this crate is a library
 /// as well as a binary.
-pub fn mark_into(buf: &mut Buffer, area: Rect, m: &marks::Mark, light: f32) {
+pub fn mark_into(buf: &mut Buffer, area: Rect, m: &marks::Mark, light: f32, th: Theme) {
     let x = area.x as i32 + (area.width as i32 - m.art.cols as i32) / 2;
     let y = area.y as i32 + (area.height as i32 - m.art.rows as i32) / 2;
-    draw_mark(buf, area, x, y, m, light);
+    draw_mark(buf, area, x, y, m, light, th);
 }
 
-fn draw_mark(buf: &mut Buffer, clip: Rect, x: i32, y: i32, m: &marks::Mark, light: f32) {
+fn draw_mark(
+    buf: &mut Buffer,
+    clip: Rect,
+    x: i32,
+    y: i32,
+    m: &marks::Mark,
+    light: f32,
+    th: Theme,
+) {
     let a = &m.art;
     for r in 0..a.rows as i32 {
         let sy = y + r;
@@ -281,8 +295,11 @@ fn draw_mark(buf: &mut Buffer, clip: Rect, x: i32, y: i32, m: &marks::Mark, ligh
             }
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_char(ch)
-                    .set_fg(mix(m.rgb, fa as f32 / 255.0 * light))
-                    .set_bg(mix(m.rgb, ba as f32 / 255.0 * light));
+                    .set_fg(mix(m.rgb, fa as f32 / 255.0 * light, th));
+                // As in `tile::draw`: only where there is a background to paint.
+                if ba > 0 {
+                    cell.set_bg(mix(m.rgb, ba as f32 / 255.0 * light, th));
+                }
             }
         }
     }
@@ -307,7 +324,7 @@ fn strip(f: &mut Frame, area: Rect, v: &View) {
     for pass in 0..2 {
         let mut x = -offset + pass * total;
         for l in &arts {
-            tile::draw(buf, area, area.x as i32 + x, area.y as i32, l, true, 0.8);
+            tile::draw(buf, area, area.x as i32 + x, area.y as i32, l, true, 0.8, v.theme);
             x += (l.sm.cols + PAD) as i32;
         }
     }
@@ -317,7 +334,7 @@ fn strip(f: &mut Frame, area: Rect, v: &View) {
 fn prose(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) {
     let p = &v.projects[v.at];
     let w = area.width.max(20) as usize;
-    let acc = mix(accent, 1.0);
+    let acc = mix(accent, 1.0, v.theme);
 
     let mut lines: Vec<Line> = Vec::new();
     for b in &p.beats {
@@ -329,7 +346,7 @@ fn prose(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) {
             )));
         }
         for l in wrap(&b.body, w) {
-            lines.push(Line::from(Span::styled(l, Style::default().fg(BODY))));
+            lines.push(Line::from(Span::styled(l, Style::default().fg(grey(BODY, v.theme)))));
         }
     }
 
@@ -345,7 +362,7 @@ fn prose(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "▾  j to read on",
-                Style::default().fg(FAINT),
+                Style::default().fg(grey(FAINT, v.theme)),
             ))),
             Rect { y: area.y + body_h, height: 1, width: 18.min(area.width), ..area },
         );
@@ -422,7 +439,7 @@ mod tests {
         // compared a value with itself and would have passed whatever the
         // layout did.
         let heights: Vec<u16> = (0..ps.len())
-            .map(|at| mark_h(&View { projects: &ps, at, scroll: 0, t: 0.0 }))
+            .map(|at| mark_h(&View { projects: &ps, at, scroll: 0, t: 0.0, theme: Theme::Night }))
             .collect();
         assert!(heights.windows(2).all(|w| w[0] == w[1]), "{heights:?}");
     }

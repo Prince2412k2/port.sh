@@ -2810,6 +2810,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "serde",
+ "termap",
 ]
 
 [[package]]

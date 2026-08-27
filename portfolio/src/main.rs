@@ -115,7 +115,19 @@ fn main() -> io::Result<()> {
                     section: None,
                     at: None,
                     scroll: None,
+                    theme: None,
                 });
+            }
+            "--theme" => {
+                let t = match args.next().as_deref() {
+                    Some("light") | Some("paper") => Some(termap::canvas::Theme::Paper),
+                    Some("dark") | Some("night") => Some(termap::canvas::Theme::Night),
+                    Some("system") => Some(termap::canvas::Theme::default()),
+                    _ => None,
+                };
+                if let Some(s) = shot.as_mut() {
+                    s.theme = t;
+                }
             }
             "--health" => {
                 println!("ok");
