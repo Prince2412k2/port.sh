@@ -435,6 +435,9 @@ fn audience_loop(term: &mut Term, mut browser: audience::Browser) -> io::Result<
 /// reason to look at one of these rather than at the text.
 fn watch(term: &mut Term, turns: Vec<crate::ask::SavedTurn>, whose: String) -> io::Result<()> {
     let mut shell = Shell::new();
+    if let Some(g) = ground_from_env() {
+        shell.set_ground(g);
+    }
     shell.replay(turns, whose);
     let mut last = Instant::now();
     loop {
@@ -463,6 +466,9 @@ fn watch(term: &mut Term, turns: Vec<crate::ask::SavedTurn>, whose: String) -> i
 
 fn run(term: &mut Term, start: Option<String>) -> io::Result<()> {
     let mut shell = Shell::new();
+    if let Some(g) = ground_from_env() {
+        shell.set_ground(g);
+    }
     let idle_after = idle_limit();
     let mut last_input = Instant::now();
     if let Some(name) = start {
@@ -554,6 +560,34 @@ fn setup() -> io::Result<Term> {
     out.write_all(wire::ENABLE_KEYS)?;
     out.flush()?;
     Terminal::new(CrosstermBackend::new(out))
+}
+
+/// What the terminal's background is, for the local run.
+///
+/// `COLORFGBG` and not an OSC 11 query, which is what the SSH path uses. The
+/// query is the better question but it needs an answer read back off the
+/// input stream, and locally that stream belongs to crossterm -- whose parser
+/// has no notion of an OSC reply, so the colour would arrive as a handful of
+/// keystrokes typed into whatever has focus. Racing crossterm for stdin to
+/// avoid that is a worse trade than a missing answer: the default is dark,
+/// which is what a terminal that will not say is overwhelmingly likely to be,
+/// and `d` cycles to an explicit choice in one keystroke.
+///
+/// Over SSH there is no such problem -- `wire::Decoder` is our own parser and
+/// already handles the capability probes -- so that path asks properly.
+///
+/// The variable is `fg;bg` in palette indices, set by xterm, urxvt, konsole
+/// and the VTE family; kitty and alacritty do not set it.
+fn ground_from_env() -> Option<termap::canvas::Ground> {
+    let v = std::env::var("COLORFGBG").ok()?;
+    let bg: u8 = v.rsplit(';').next()?.trim().parse().ok()?;
+    // The low eight are the ANSI colours; 7 and 15 are the light ones, and
+    // everything from 8 up in the cube is lighter than not by index alone.
+    let dark = !matches!(bg, 7 | 15) && bg < 8;
+    Some(termap::canvas::Ground {
+        rgb: if dark { (8, 9, 11) } else { (238, 234, 224) },
+        dark,
+    })
 }
 
 fn restore(term: &mut Term) -> io::Result<()> {

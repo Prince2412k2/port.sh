@@ -3376,7 +3376,7 @@ fn question(f: &mut Frame, area: Rect, a: &Ask, th: Theme) {
 /// `t` of 0 is the background exactly, so a panel starts invisible and arrives;
 /// 1 is the colour untouched, which is what a QR code has to end at.
 fn mix(rgb: (u8, u8, u8), t: f32, th: Theme) -> ratatui::style::Color {
-    let page = termap::canvas::rgb_of(th.page()).unwrap_or((8, 9, 11));
+    let page = th.ground();
     let t = t.clamp(0.0, 1.0);
     let f = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
     ratatui::style::Color::Rgb(f(page.0, rgb.0), f(page.1, rgb.1), f(page.2, rgb.2))

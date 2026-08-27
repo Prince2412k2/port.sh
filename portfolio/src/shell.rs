@@ -100,6 +100,12 @@ pub struct Shell {
     pub section: Section,
     pub about: About,
     pub map: termap::app::App,
+    /// What the terminal said its background is, once it has answered.
+    ///
+    /// Kept beside the theme rather than only inside it, so cycling away to
+    /// dark and back to system does not throw the answer away and leave the
+    /// session guessing again.
+    pub ground: termap::canvas::Ground,
     pub sheet: skysheet::app::App,
     pub quit: bool,
     pub museum: Museum,
@@ -340,6 +346,16 @@ impl Locator {
 }
 
 impl Shell {
+    /// Take the terminal's answer to the background query.
+    ///
+    /// Applied to the theme only while it is on system: someone who has
+    /// explicitly chosen dark or light has said what they want, and a late
+    /// reply from the terminal is not an argument against it.
+    pub fn set_ground(&mut self, g: termap::canvas::Ground) {
+        self.ground = g;
+        self.map.theme = self.map.theme.with_ground(g);
+    }
+
     pub fn new() -> Self {
         let sheet_taste = taste::load();
         let mut map = termap::app::App::new(termap::tiles::Source::open(None));
@@ -356,6 +372,7 @@ impl Shell {
             scroll: 0.0,
             vel: 0.0,
             map,
+            ground: Default::default(),
             sheet: skysheet::app::App::new(),
             quit: false,
             switch: 0.0,
@@ -725,7 +742,7 @@ impl Shell {
                     && self.section != Section::Ask
                     && self.map.query.is_none() =>
             {
-                self.map.theme = self.map.theme.next();
+                self.map.theme = self.map.theme.next().with_ground(self.ground);
                 return;
             }
             _ => {}

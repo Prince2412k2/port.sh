@@ -322,6 +322,11 @@ pub async fn run(
         Clear(ClearType::All),
     )?;
     terminal.backend_mut().write_all(b"\x1b[c\x1b[?u")?;
+    // What colour is your background? Asked once, alongside the capability
+    // probes, because the answer decides which way the whole palette runs
+    // under the default theme -- and because a terminal that ignores it costs
+    // nothing but the seven bytes.
+    terminal.backend_mut().write_all(crate::wire::ASK_BG)?;
     // Both traits the backend implements have a `flush`; this one is pushing
     // the bytes just written, so it is the writer's.
     std::io::Write::flush(terminal.backend_mut())?;
@@ -516,6 +521,9 @@ fn absorb(
                     crossterm::event::Event::Mouse(m) => shell.on_mouse(m),
                     _ => {}
                 }
+            }
+            if let Some(rgb) = decoder.take_bg() {
+                shell.set_ground(termap::canvas::Ground::of(rgb));
             }
             if decoder.take_da1()
                 && Instant::now() <= probe.until

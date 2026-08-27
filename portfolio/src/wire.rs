@@ -19,6 +19,7 @@ pub struct Decoder {
     buf: Vec<u8>,
     da1: bool,
     keyboard: bool,
+    bg: Option<(u8, u8, u8)>,
 }
 
 impl Decoder {
@@ -28,6 +29,11 @@ impl Decoder {
 
     pub fn take_keyboard(&mut self) -> bool {
         std::mem::take(&mut self.keyboard)
+    }
+
+    /// The background colour the terminal reported, if it has answered.
+    pub fn take_bg(&mut self) -> Option<(u8, u8, u8)> {
+        self.bg.take()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Event> {
@@ -105,6 +111,7 @@ impl Decoder {
         match self.buf[1] {
             b'[' => self.decode_csi(),
             b'O' => self.decode_ss3(),
+            b']' => self.decode_osc(),
             0x7f | 0x08 => {
                 self.buf.drain(..2);
                 Some(key(KeyCode::Backspace, KeyModifiers::ALT))
@@ -117,6 +124,39 @@ impl Decoder {
                 self.next_event()
             }
         }
+    }
+
+    /// An operating-system command: `ESC ] ... BEL` or `ESC ] ... ESC \`.
+    ///
+    /// Only one of these is ever expected -- the reply to the OSC 11
+    /// background query -- but the arm has to exist whether or not the reply
+    /// is wanted. Without it the `_` arm below drops the escape and re-parses,
+    /// so `ESC]11;rgb:...` arrives as a dozen keystrokes: `]`, `1`, `1`, and
+    /// the rest of the colour typed into whatever has focus.
+    fn decode_osc(&mut self) -> Option<Event> {
+        /// Longest reply worth waiting for. A terminal that has sent this much
+        /// without a terminator is not sending one, and holding the buffer for
+        /// it would swallow every keystroke after it.
+        const CAP: usize = 128;
+
+        let end = self.buf.iter().enumerate().skip(2).find_map(|(i, &b)| match b {
+            0x07 => Some((i, i + 1)),
+            0x1b if self.buf.get(i + 1) == Some(&b'\\') => Some((i, i + 2)),
+            _ => None,
+        });
+        let Some((body, after)) = end else {
+            if self.buf.len() > CAP {
+                // Give up on it and let the normal path have the bytes back.
+                self.buf.drain(..1);
+                return self.next_event();
+            }
+            return None; // the rest is still in flight
+        };
+        if let Some(rgb) = parse_osc_colour(&self.buf[2..body]) {
+            self.bg = Some(rgb);
+        }
+        self.buf.drain(..after);
+        self.next_event()
     }
 
     fn decode_ss3(&mut self) -> Option<Event> {
@@ -300,6 +340,45 @@ fn utf8_len(byte: u8) -> usize {
 
 /// Enable the modes the client needs to send: any-motion mouse tracking (1003)
 /// and SGR extended coordinates (1006, so columns past 223 do not wrap).
+/// Ask the terminal what colour its background is.
+///
+/// Answered by xterm, kitty, foot, wezterm, alacritty, iTerm2 and the VTE
+/// family; ignored by anything that does not know it, which is why the reply
+/// is optional everywhere downstream and the default is "dark".
+pub const ASK_BG: &[u8] = b"\x1b]11;?\x1b\\";
+
+/// The reply to `ASK_BG`, as a colour.
+///
+/// `11;rgb:RRRR/GGGG/BBBB` is the usual shape -- sixteen bits a channel, of
+/// which the top eight are taken. `rgb:RR/GG/BB` and `#RRGGBB` also appear in
+/// the wild and cost two lines each to accept.
+pub fn parse_osc_colour(body: &[u8]) -> Option<(u8, u8, u8)> {
+    let text = std::str::from_utf8(body).ok()?;
+    let spec = text.strip_prefix("11;")?;
+    if let Some(hex) = spec.strip_prefix('#') {
+        let n = hex.len() / 3;
+        if n == 0 || hex.len() % 3 != 0 {
+            return None;
+        }
+        let at = |i: usize| u32::from_str_radix(&hex[i * n..i * n + n], 16).ok();
+        // Two hex digits a channel or four; either way the top byte is wanted.
+        let top = |v: u32| (if n <= 2 { v << (8 - 4 * n) } else { v >> (4 * n - 8) }) as u8;
+        return Some((top(at(0)?), top(at(1)?), top(at(2)?)));
+    }
+    let mut parts = spec.strip_prefix("rgb:")?.split('/');
+    let mut next = || -> Option<u8> {
+        let h = parts.next()?;
+        let v = u32::from_str_radix(h, 16).ok()?;
+        Some(match h.len() {
+            1 => (v * 17) as u8,
+            2 => v as u8,
+            n => (v >> (4 * n - 8)) as u8,
+        })
+    };
+    let rgb = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(rgb)
+}
+
 pub const ENABLE_MOUSE: &[u8] = b"\x1b[?1003h\x1b[?1006h";
 pub const DISABLE_MOUSE: &[u8] = b"\x1b[?1003l\x1b[?1006l";
 pub const ENABLE_KEYS: &[u8] = b"\x1b[>1u";
@@ -307,6 +386,69 @@ pub const DISABLE_KEYS: &[u8] = b"\x1b[<u";
 
 #[cfg(test)]
 mod tests {
+
+    /// The reply to the background query, in the shapes terminals send it.
+    #[test]
+    fn the_background_reply_is_read_in_every_shape_terminals_send_it() {
+        let cases: [(&str, (u8, u8, u8)); 5] = [
+            // xterm and the VTE family: sixteen bits a channel.
+            ("11;rgb:1e1e/1e1e/2e2e", (0x1e, 0x1e, 0x2e)),
+            // eight bits a channel.
+            ("11;rgb:08/09/0b", (0x08, 0x09, 0x0b)),
+            // four bits, which scales by seventeen and not by sixteen so that
+            // f maps to ff and not to f0.
+            ("11;rgb:f/f/f", (255, 255, 255)),
+            ("11;#eeeae0", (0xee, 0xea, 0xe0)),
+            ("11;#eeeeeaeae0e0", (0xee, 0xea, 0xe0)),
+        ];
+        for (body, want) in cases {
+            assert_eq!(parse_osc_colour(body.as_bytes()), Some(want), "{body}");
+        }
+        for junk in ["10;rgb:0/0/0", "11;rgb:0/0", "11;rgb:0/0/0/0", "11;puce", "", "11;"] {
+            assert_eq!(parse_osc_colour(junk.as_bytes()), None, "{junk}");
+        }
+    }
+
+    /// The reply must not be typed into the app.
+    ///
+    /// This is a bug whether or not the query is ever sent: some terminals
+    /// volunteer an OSC reply, and before there was an arm for it the escape
+    /// was dropped and the rest re-parsed, so `ESC]11;rgb:...` arrived as a
+    /// dozen keystrokes into whatever had focus.
+    #[test]
+    fn an_osc_reply_is_swallowed_rather_than_typed() {
+        let mut d = Decoder::default();
+        let evs = keys(&mut d, b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\");
+        assert!(evs.is_empty(), "the reply arrived as keystrokes: {evs:?}");
+        assert_eq!(d.take_bg(), Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(d.take_bg(), None, "the answer is taken once");
+
+        // Terminated with BEL instead, and with a real keystroke behind it.
+        let mut d = Decoder::default();
+        let evs = keys(&mut d, b"\x1b]11;#eeeae0\x07q");
+        assert_eq!(d.take_bg(), Some((0xee, 0xea, 0xe0)));
+        assert_eq!(evs.len(), 1, "the key after the reply was lost: {evs:?}");
+    }
+
+    /// A reply split across packets, which is the normal case over SSH.
+    #[test]
+    fn a_reply_split_across_packets_is_still_read() {
+        let mut d = Decoder::default();
+        assert!(keys(&mut d, b"\x1b]11;rgb:ee").is_empty());
+        assert_eq!(d.take_bg(), None, "answered before the reply arrived");
+        assert!(keys(&mut d, b"ee/eaea/e0e0\x1b\\").is_empty());
+        assert_eq!(d.take_bg(), Some((0xee, 0xea, 0xe0)));
+    }
+
+    /// An OSC that never terminates must not eat the keyboard.
+    #[test]
+    fn an_unterminated_osc_gives_the_keystrokes_back() {
+        let mut d = Decoder::default();
+        let mut junk = vec![0x1b, b']'];
+        junk.extend(std::iter::repeat_n(b'x', 200));
+        let evs = keys(&mut d, &junk);
+        assert!(!evs.is_empty(), "the buffer swallowed everything after it");
+    }
 
     /// A ctrl-wheel is not a plain wheel.
     ///

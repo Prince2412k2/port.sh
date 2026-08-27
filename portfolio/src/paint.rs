@@ -141,7 +141,7 @@ pub fn portrait_loop(p: &portraits::Portrait, t: f64, alive: bool) -> &'static [
 /// are left alone — the test is the page's own ground, not brightness, or the
 /// darkest parts of the field would be indistinguishable from empty.
 pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32, th: Theme) {
-    let Some((kr, kg, kb)) = termap::canvas::rgb_of(th.page()) else { return };
+    let (kr, kg, kb) = th.ground();
     let buf = f.buffer_mut();
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
@@ -188,7 +188,7 @@ fn is_ground(ch: char, bg: portraits::Ink, th: Theme) -> bool {
     if ch != ' ' && ch != '\u{2800}' {
         return false;
     }
-    let Some((kr, kg, kb)) = termap::canvas::rgb_of(th.page()) else { return false };
+    let (kr, kg, kb) = th.ground();
     match bg {
         portraits::Ink::C(r, g, b) => (r, g, b) == (kr, kg, kb),
         // Quantised, so our ground has landed on whatever palette entry is
@@ -230,10 +230,11 @@ pub fn portrait(
 /// cost real time once already.
 pub fn toward_bg(c: Color, k: f32, th: Theme) -> Color {
     let Some((r, g, b)) = termap::canvas::rgb_of(c) else { return c };
-    // `rgb_of` on *both* sides. The page is a grey-ramp index too, and matching
-    // the truecolor variant on it made this whole function a no-op -- the third
-    // time that pattern has bitten, and the paragraph above is about the first.
-    let Some((br, bg, bb)) = termap::canvas::rgb_of(th.page()) else { return c };
+    // `ground` and not `page`. The page is a grey-ramp index, and matching the
+    // truecolor variant on it made this whole function a no-op once; under
+    // system it is `Reset` and has no components at all, which would do it
+    // again. `ground` is the method that always has an answer.
+    let (br, bg, bb) = th.ground();
     let mix = |a: u8, t: u8| (t as f32 + (a as f32 - t as f32) * k).round().clamp(0.0, 255.0) as u8;
     termap::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
 }

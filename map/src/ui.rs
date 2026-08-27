@@ -440,13 +440,11 @@ fn hint(f: &mut Frame, area: Rect, app: &App) {
 
 /// Blend toward the page ground, for anything that fades in and out.
 fn fade(c: Color, a: f32, th: Theme) -> Color {
-    // `rgb_of`, not a `Color::Rgb` pattern: the page comes back as a grey-ramp
-    // index, so matching on the variant silently returned the colour unfaded
-    // and the fade band stopped working entirely.
-    let (Some((r, g, b)), Some((br, bg, bb))) = (crate::canvas::rgb_of(c), crate::canvas::rgb_of(th.page()))
-    else {
-        return c;
-    };
+    // `ground`, not `page`. The page comes back as a grey-ramp index -- so
+    // matching on `Color::Rgb` silently returned the colour unfaded once --
+    // and under system it is `Reset`, which has no components at all.
+    let Some((r, g, b)) = crate::canvas::rgb_of(c) else { return c };
+    let (br, bg, bb) = th.ground();
     let mix = |v: u8, t: u8| (t as f32 + (v as f32 - t as f32) * a) as u8;
     crate::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
 }
@@ -657,7 +655,7 @@ fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32, th: T
 /// appearing to work on everything else.
 fn toward_bg(c: Color, k: f32, th: Theme) -> Color {
     let Some((r, g, b)) = crate::canvas::rgb_of(c) else { return c };
-    let Some((br, bg_, bb)) = crate::canvas::rgb_of(th.page()) else { return c };
+    let (br, bg_, bb) = th.ground();
     let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * k).round().clamp(0.0, 255.0) as u8;
     crate::canvas::ink(mix(r, br), mix(g, bg_), mix(b, bb))
 }

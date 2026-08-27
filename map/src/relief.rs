@@ -468,13 +468,15 @@ impl Relief {
                 // it.
                 //
                 // Only half the ground is ever drawn, and that is the point:
-                // on black the sunlit faces are the mark and the shadowed ones
-                // are the page, on paper the other way about. Either way, the
+                // on a dark ground the sunlit faces are the mark and the
+                // shadowed ones are the page, on a light one the other way
+                // about. Either way, the
                 // faces turned the other way and everything level are the
                 // background -- which is what gives the mountain an outside.
-                let lit = match plot.theme {
-                    Theme::Night => (lambert - FLAT_LIT) / (1.0 - FLAT_LIT),
-                    Theme::Paper => (FLAT_LIT - lambert) / FLAT_LIT,
+                let lit = if plot.theme.dark() {
+                    (lambert - FLAT_LIT) / (1.0 - FLAT_LIT)
+                } else {
+                    (FLAT_LIT - lambert) / FLAT_LIT
                 }
                 .clamp(0.0, 1.0);
                 let slope = (dzdx * dzdx + dzdy * dzdy).sqrt();

@@ -82,13 +82,66 @@ pub const TINT_HOME: u8 = 11;
 /// strength between 0 and 1, and the two themes spend that strength in
 /// opposite directions. Swapping only the numbers would give white ink on
 /// white paper.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Theme {
-    /// Light on black: the terminal's own ground.
-    #[default]
+    /// The terminal's own ground, left exactly as the user set it.
+    ///
+    /// No background is painted at all, so a transparent terminal stays
+    /// transparent and a themed one keeps its theme. What the renderer needs
+    /// in exchange is to know what it is drawing *on* -- see `Ground`.
+    System(Ground),
+    /// Light on black.
     Night,
     /// Ink on paper.
     Paper,
+}
+
+impl Default for Theme {
+    /// System, assuming dark until the terminal says otherwise.
+    ///
+    /// Dark rather than light because a terminal that will not answer the
+    /// question is overwhelmingly likely to be dark, and because light ink on
+    /// an unknown ground is invisible where dark ink on a light one is merely
+    /// low-contrast.
+    fn default() -> Self {
+        Theme::System(Ground::default())
+    }
+}
+
+/// What the terminal told us it is.
+///
+/// Asked for with OSC 11 and answered by most terminals; when nothing answers,
+/// this is the assumption in `Ground::default`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ground {
+    /// The background the terminal reported.
+    ///
+    /// Used as the colour a mark fades into, not as a colour to paint. A faint
+    /// mark on a Catppuccin terminal has to fade towards `#1e1e2e` and not to
+    /// black, or the faintest ink comes out *darker* than the page it is
+    /// sitting on and reads as a smudge rather than a whisper.
+    pub rgb: (u8, u8, u8),
+    /// Whether ink is added to that ground or taken out of it.
+    pub dark: bool,
+}
+
+impl Default for Ground {
+    fn default() -> Self {
+        Ground { rgb: PAGE[0], dark: true }
+    }
+}
+
+impl Ground {
+    /// Read a reported background colour.
+    ///
+    /// The cut is on perceived lightness rather than a plain mean: a saturated
+    /// blue terminal at the same mean as a grey one is much darker to look at,
+    /// and getting this backwards inverts the whole palette.
+    pub fn of(rgb: (u8, u8, u8)) -> Self {
+        let (r, g, b) = rgb;
+        let y = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+        Ground { rgb, dark: y < 128.0 }
+    }
 }
 
 /// The page: what a cell looks like where nothing was drawn.
@@ -108,24 +161,80 @@ const PAGE: [(u8, u8, u8); 2] = [
 ];
 
 impl Theme {
+    /// Cycle: system, dark, light. System leads because it is the default and
+    /// the one that leaves the terminal alone.
     pub fn next(self) -> Theme {
         match self {
+            Theme::System(_) => Theme::Night,
             Theme::Night => Theme::Paper,
-            Theme::Paper => Theme::Night,
+            Theme::Paper => Theme::default(),
+        }
+    }
+
+    /// Keep the detected ground across a cycle, so returning to system does
+    /// not throw away an answer the terminal already gave.
+    pub fn with_ground(self, g: Ground) -> Theme {
+        match self {
+            Theme::System(_) => Theme::System(g),
+            t => t,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Theme::Night => "night",
-            Theme::Paper => "paper",
+            Theme::System(_) => "system",
+            Theme::Night => "dark",
+            Theme::Paper => "light",
         }
     }
 
     /// The colour of an untouched cell.
+    ///
+    /// `Reset` under system, and that is the whole point of the mode: a cell
+    /// nobody painted is left for the terminal to fill, so whatever the user
+    /// has behind it -- a colour, an image, transparency -- survives. Painting
+    /// even a matching colour would put an opaque tile over it.
     pub fn page(self) -> Color {
-        let (r, g, b) = PAGE[self as usize];
-        ink(r, g, b)
+        match self {
+            Theme::System(_) => Color::Reset,
+            Theme::Night => ink(PAGE[0].0, PAGE[0].1, PAGE[0].2),
+            Theme::Paper => ink(PAGE[1].0, PAGE[1].1, PAGE[1].2),
+        }
+    }
+
+    /// The ground as a concrete colour, for compositing against.
+    ///
+    /// `page` says what to *paint*; this says what is *there*. They agree
+    /// except under system, where nothing is painted and something is behind
+    /// it all the same -- and `page` is `Reset`, which has no components, so
+    /// anything that reaches for `rgb_of(page())` to blend against silently
+    /// stops working. That has now bitten four times, hence two methods with
+    /// one job each.
+    pub fn ground(self) -> (u8, u8, u8) {
+        match self {
+            Theme::System(g) => g.rgb,
+            Theme::Night => PAGE[0],
+            Theme::Paper => PAGE[1],
+        }
+    }
+
+    /// The colour a mark fades into as its strength goes to zero.
+    ///
+    /// This is the one place the direction of the whole palette is decided.
+    /// On a dark ground a mark is *added* to it, so zero strength is the
+    /// ground; on a light one a mark is taken *out*, so zero strength is
+    /// again the ground. Same statement either way, which is why the two
+    /// branches this replaced were always the same formula written twice.
+    ///
+    /// Night floors at black rather than at its own page of `(8, 9, 11)`.
+    /// That is a four-percent difference which `ink` quantises away for most
+    /// cells, and it is what the renderer has always done.
+    fn floor(self) -> (u8, u8, u8) {
+        match self {
+            Theme::System(g) => g.rgb,
+            Theme::Night => (0, 0, 0),
+            Theme::Paper => PAGE[1],
+        }
     }
 
     /// The colour of a mark at full strength: chrome text, the strongest rule.
@@ -168,8 +277,19 @@ impl Theme {
 
     fn tints(self) -> &'static [(u8, u8, u8); 12] {
         match self {
+            Theme::System(g) if g.dark => &TINT_NIGHT,
+            Theme::System(_) => &TINT_PAPER,
             Theme::Night => &TINT_NIGHT,
             Theme::Paper => &TINT_PAPER,
+        }
+    }
+
+    /// Whether ink is added to the ground or taken out of it.
+    pub fn dark(self) -> bool {
+        match self {
+            Theme::System(g) => g.dark,
+            Theme::Night => true,
+            Theme::Paper => false,
         }
     }
 
@@ -186,14 +306,9 @@ impl Theme {
         let table = self.tints();
         let (r, g, b) = if mono && !keep { table[0] } else { table[tint] };
         let l = quantise_for(lum, r, g, b);
-        match self {
-            Theme::Night => ink((r as f32 * l) as u8, (g as f32 * l) as u8, (b as f32 * l) as u8),
-            Theme::Paper => {
-                let (pr, pg, pb) = PAGE[1];
-                let mix = |page: u8, tint: u8| (page as f32 + (tint as f32 - page as f32) * l) as u8;
-                ink(mix(pr, r), mix(pg, g), mix(pb, b))
-            }
-        }
+        let (fr, fg, fb) = self.floor();
+        let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * l) as u8;
+        ink(mix(fr, r), mix(fg, g), mix(fb, b))
     }
 }
 
@@ -899,6 +1014,57 @@ impl Canvas {
 
 #[cfg(test)]
 mod theme_tests {
+
+    /// System paints nothing, so whatever the terminal has stays.
+    ///
+    /// The whole mode is this one property. A page colour that merely
+    /// *matches* the terminal is not the same thing: it is an opaque tile, and
+    /// it would cover a background image or a transparent window.
+    #[test]
+    fn the_system_theme_never_paints_a_page() {
+        for g in [Ground::of((0, 0, 0)), Ground::of((30, 30, 46)), Ground::of((238, 234, 224))] {
+            assert_eq!(Theme::System(g).page(), Color::Reset, "{g:?}");
+        }
+        assert_ne!(Theme::Night.page(), Color::Reset);
+        assert_ne!(Theme::Paper.page(), Color::Reset);
+    }
+
+    /// ...but it still knows what it is drawing on.
+    ///
+    /// Ink has to run the other way on a light terminal, and a faint mark has
+    /// to fade towards the terminal's own colour rather than to black -- on a
+    /// Catppuccin ground, fading to black makes the faintest ink *darker* than
+    /// the page, so a whisper reads as a smudge.
+    #[test]
+    fn system_ink_follows_the_ground_it_was_told_about() {
+        let dark = Theme::System(Ground::of((30, 30, 46)));
+        let light = Theme::System(Ground::of((238, 234, 224)));
+        assert!(dark.dark() && !light.dark());
+
+        let lum = |c: Color| {
+            let (r, g, b) = rgb_of(c).expect("a painted colour has components");
+            0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+        };
+        // Full-strength ink is far from the ground; faint ink is near it.
+        assert!(lum(dark.ink()) > lum(dark.faint()), "dark ink runs the wrong way");
+        assert!(lum(light.ink()) < lum(light.faint()), "light ink runs the wrong way");
+
+        // And the faintest mark sits at the ground it was told about, not at
+        // black: on this terminal that is a luminance of about 31.
+        let whisper = lum(dark.grey(0.0));
+        assert!((whisper - 31.0).abs() < 12.0, "faintest ink landed at {whisper:.0}, not the page");
+    }
+
+    /// A cycle does not forget what the terminal said.
+    #[test]
+    fn the_reported_ground_survives_a_trip_through_the_other_themes() {
+        let g = Ground::of((30, 30, 46));
+        let mut t = Theme::System(g);
+        for _ in 0..3 {
+            t = t.next().with_ground(g);
+        }
+        assert_eq!(t, Theme::System(g), "came back as {t:?}");
+    }
     use super::*;
 
     fn lum_of(c: Color) -> f32 {
@@ -1116,6 +1282,7 @@ mod veil_tests {
 
 #[cfg(test)]
 mod tint_tests {
+
     use super::*;
 
     fn brush(tint: u8) -> Brush {

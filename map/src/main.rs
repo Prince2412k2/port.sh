@@ -74,6 +74,9 @@ fn main() -> io::Result<()> {
                 let t = match args.next().as_deref() {
                     Some("paper") | Some("light") => Some(canvas::Theme::Paper),
                     Some("night") | Some("dark") => Some(canvas::Theme::Night),
+                    // No background painted at all: whatever the terminal has
+                    // behind it shows through, transparency included.
+                    Some("system") => Some(canvas::Theme::default()),
                     _ => None,
                 };
                 if let Some(s) = shot.as_mut() {
