@@ -81,6 +81,25 @@ impl Viewport {
         self.tilt.abs() < 1e-9 && self.bearing.abs() < 1e-9
     }
 
+    /// Whether the ground is bounded to a slab.
+    ///
+    /// Tilt, and *only* tilt. The slab exists to make a tilt legible: a
+    /// parallel projection has no vanishing point, so tilted ground covers the
+    /// whole frame with no edge for the eye to read, and cutting it to a
+    /// finite plate manufactures a horizon. Turn the camera about the vertical
+    /// axis instead and none of that applies -- a rotated flat map is still a
+    /// flat map, and there is no horizon to manufacture.
+    ///
+    /// This used to key off `is_flat`, which is false for a bearing alone. A
+    /// camera left with three degrees of residual rotation from a flight --
+    /// invisible on screen, and rounded to `tilt 0°` in the status bar -- was
+    /// therefore drawing a slab, and the slab clips. Long dashed features are
+    /// dropped whole if any vertex leaves it, so twelve of the fourteen state
+    /// borders in view vanished and the map lost its outlines.
+    pub fn bounded(&self) -> bool {
+        self.tilt.abs() > 1e-9
+    }
+
     /// Subpixels per world unit. One subpixel stands in for one slippy-map
     /// pixel, so zoom levels line up with what other map tools call z.
     #[inline]
@@ -341,6 +360,37 @@ mod tests {
         v.sw = 400.0;
         v.sh = 200.0;
         v
+    }
+
+    /// Turning the camera is not tilting it, and only tilting bounds the
+    /// ground.
+    ///
+    /// `is_flat` answers "is this the plain 2D path", and a bearing takes it
+    /// out of that -- rotation needs the same projection tilt does. `bounded`
+    /// answers a different question: is there a horizon to manufacture. There
+    /// is not, for a rotation.
+    ///
+    /// Conflating the two cost the map its outlines. A camera left with three
+    /// degrees of residual bearing from a flight -- invisible on screen, and
+    /// rounded away to `tilt 0°` in the status bar -- drew a ground slab, and
+    /// the slab clips: a dashed feature loses *all* of itself if one vertex
+    /// falls outside, so twelve of the fourteen state borders in view went.
+    #[test]
+    fn a_turned_camera_is_not_a_tilted_one() {
+        let mut v = vp();
+        v.tilt = 0.0;
+        v.bearing = 0.0;
+        assert!(v.is_flat() && !v.bounded(), "no camera move at all");
+
+        v.bearing = -0.059;
+        assert!(!v.is_flat(), "a bearing still needs the projected path");
+        assert!(!v.bounded(), "a rotation manufactured a horizon it has none of");
+
+        v.tilt = 0.3;
+        assert!(!v.is_flat() && v.bounded(), "a tilt has a horizon and wants a slab");
+
+        v.bearing = 0.0;
+        assert!(v.bounded(), "a tilt with no bearing still wants one");
     }
 
     #[test]

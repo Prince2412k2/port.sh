@@ -56,6 +56,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
     // Per-vertex camera depth, only populated when the camera is tilted.
     let mut zs: Vec<f32> = Vec::with_capacity(512);
     let tilted = !o.vp.is_flat();
+    let bounded = o.vp.bounded();
     // The ground slab: features stop where it stops, or roads run out into the
     // black past the edge of the plate.
     let plate = o.vp.plate();
@@ -106,8 +107,8 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                 for &p in &f.pts {
                     let h = 0.0;
                     let m = o.vp.plane_of(p);
-                        let outside =
-                        m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2];
+                    let outside = bounded
+                        && (m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2]);
                     let (sp, z) = o.vp.project3(p, h);
                     proj.push(sp);
                     zs.push(if outside { f32::INFINITY } else { z });
@@ -130,7 +131,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             // made roads vanish at street zoom, where the basemap's vertices
             // are further apart than the plate is wide.
             let is_area = (st.density > 0 && f.closed) || st.dash.is_some();
-            if tilted && is_area && zs.iter().any(|z| !z.is_finite()) {
+            if bounded && is_area && zs.iter().any(|z| !z.is_finite()) {
                 continue;
             }
             stats.features += 1;
@@ -197,7 +198,16 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                 for seg in f.pts.windows(2) {
                     let m0 = o.vp.plane_of(seg[0]);
                     let m1 = o.vp.plane_of(seg[1]);
-                    let Some((c0, c1)) = clip_to_plate(m0, m1, plate) else { continue };
+                    // Only a tilted view has a slab to clip against; a rotated
+                    // flat one is still flat.
+                    let (c0, c1) = if bounded {
+                        match clip_to_plate(m0, m1, plate) {
+                            Some(pair) => pair,
+                            None => continue,
+                        }
+                    } else {
+                        (m0, m1)
+                    };
                     let w0 = o.vp.world_of_plane(c0);
                     let w1 = o.vp.world_of_plane(c1);
                     let lift = |_w: [f64; 2]| 0.0;
@@ -206,7 +216,11 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                     if !z0.is_finite() || !z1.is_finite() {
                         continue;
                     }
-                    let fade = plate_fade(c0, plate).min(plate_fade(c1, plate));
+                    let fade = if bounded {
+                        plate_fade(c0, plate).min(plate_fade(c1, plate))
+                    } else {
+                        1.0
+                    };
                     if fade <= 0.02 {
                         continue;
                     }
@@ -487,7 +501,7 @@ fn draw_buildings(
                 continue;
             }
             let c = [(f.bbox[0] + f.bbox[2]) * 0.5, (f.bbox[1] + f.bbox[3]) * 0.5];
-            if tilted {
+            if o.vp.bounded() {
                 let m = o.vp.plane_of(c);
                 if m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2] {
                     continue;
