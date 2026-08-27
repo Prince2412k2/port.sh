@@ -527,82 +527,74 @@ const INDEX: &str = r##"<!doctype html>
      is given. The app is told how many columns this covers -- see `sendGutter`
      -- so it keeps the start of that row clear rather than drawing underneath.
 
-     Top left, on the same row as the section rail, because these are chrome and
-     that row is where this app keeps its chrome.
-
-     Written as `[shader]` in the terminal's own font and palette rather than as
-     buttons: they sit on a terminal, and a rounded pill with a border and a
-     hover box on top of one looks like a browser that has landed on it. The
-     brackets are the same idiom the rail uses two inches to the right. */
+     A panel, not a row of words. Two controls and nothing else: a power
+     button, and a knob that says which of the nine it is on. They were three
+     bracketed words, which is the idiom the section rail uses two inches to
+     the right -- and reading a word to find out what a control does is what a
+     control with a shape does not make you do. The shapes are drawn rather
+     than lettered, so they say what they are before they are read. */
   #chrome {
     position: absolute; top: 0; left: 0; height: 100%; z-index: 3;
     display: flex; flex-direction: column;
-    justify-content: center; align-items: flex-start; gap: .45em;
+    justify-content: center; align-items: center; gap: 1.1em;
     /* Two columns in rather than hard against the edge. The tube bends the
        edges away from the viewer, and the leftmost thing on the screen is the
        first to go over the horizon. */
-    padding: 0 1ch 0 2ch;
+    padding: 0 1.4ch 0 2ch;
     font: 13px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace;
     line-height: 1.2;
-    /* The strip is as tall as the window so the switches can sit in the middle
-       of it, which would otherwise make the whole left edge unclickable. */
+    /* The strip is as tall as the window so the controls can sit in the
+       middle of it, which would otherwise make the whole left edge
+       unclickable. */
     pointer-events: none;
   }
-  #chrome button { pointer-events: auto; }
-  #chrome button {
-    background: transparent; border: 0; padding: 0; margin: 0;
-    font: inherit; cursor: pointer;
-    --ink: #3a3e46; color: var(--ink);
-    /* Grown from the left edge, which is where they are anchored: scaling
-       about the centre would walk them sideways under the pointer and the
-       one being pointed at would move out from under it. */
-    transform-origin: left center;
+  #chrome > * { pointer-events: auto; }
+  #chrome #power {
+    background: transparent; border: 0; padding: 0; margin: 0; cursor: pointer;
+    display: block; line-height: 0;
+    /* Grown from the middle: these are round, and an off-centre origin walks
+       them out from under the pointer. */
+    transform-origin: center;
     transform: var(--bend, none);
-    transition: color .2s ease, transform .12s ease;
+    transition: transform .12s ease;
   }
-  /* Bigger under the pointer, because at 13px on the far left of a wide
+  /* `[hidden]` first, and it has to be: the rule below sets `display`, and a
+     stylesheet `display: flex` beats the user agent's `[hidden] { display:
+     none }` -- so the knob stayed on screen with the shader off, drawn but
+     not laid out. */
+  #chrome #knob[hidden] { display: none; }
+  #chrome #knob {
+    display: flex; flex-direction: column; align-items: center; gap: .15em;
+    cursor: pointer; transform-origin: center;
+    transform: var(--bend, none);
+    transition: transform .12s ease;
+  }
+  /* Bigger under the pointer, because at this size on the far left of a wide
      window these are small targets a long way from wherever the eye is. The
      size is the affordance: it says these are the things on this page that
      answer to a pointer, which nothing else here does. */
-  #chrome button:hover, #chrome button:focus-visible {
-    transform: var(--bend, none) scale(1.35);
+  #chrome #power:hover, #chrome #power:focus-visible,
+  #chrome #knob:hover, #chrome #knob:focus-within {
+    transform: var(--bend, none) scale(1.3);
   }
   /* While the layout is being read. See `measure`. */
-  #chrome.measuring button { transform: none; transition: none; }
-  #chrome button::before { content: "["; }
-  #chrome button::after { content: "]"; }
-  #chrome button:hover { --ink: #c4c8ce; }
-  #chrome button[aria-pressed="true"] { --ink: #ffb040; }
-  #chrome button[disabled] { opacity: .35; cursor: default; }
-  /* Which screen, rather than whether.
-     Nine positions, and until now a button you pressed to advance one, which
-     tells you neither how many there are nor where in them you are -- so
-     reaching the panel from the first tube was eight presses and a guess. A
-     dial says both: one tick per position, the one you are on lit, and every
-     tick is a click. */
-  #chrome #dial {
-    pointer-events: auto; display: flex; align-items: baseline; gap: .5ch;
-    --ink: #606670; color: var(--ink);
-    transform-origin: left center;
-    transform: var(--bend, none);
-    transition: color .2s ease, transform .12s ease;
+  #chrome.measuring #power, #chrome.measuring #knob {
+    transform: none; transition: none;
   }
-  #chrome #dial:hover { --ink: #c4c8ce; transform: var(--bend, none) scale(1.35); }
-  #chrome.measuring #dial { transform: none; transition: none; }
-  #chrome #dial-ticks { letter-spacing: .12em; cursor: pointer; }
-  /* The lit one is the amber the pressed switch uses, so the two agree about
-     what "this one" looks like. */
-  #chrome #dial-ticks b { font-weight: normal; color: #ffb040; }
-  #chrome.shaded #dial { color: transparent; }
-  #chrome.shaded #dial-ticks b { color: transparent; }
-  /* With the tube on, these give up their paint and keep their clicks: the
-     same three words are drawn into the picture instead, so they arrive
-     through the glass with everything else. The colour still resolves here --
-     that is what `--ink` is for -- it is only the ink that goes. */
-  #chrome.shaded button { color: transparent; }
+  #chrome #knob-name {
+    font-size: 9px; letter-spacing: .18em; text-transform: uppercase;
+    color: #606670; transition: color .2s ease;
+  }
+  #chrome #knob:hover #knob-name { color: #c4c8ce; }
+  /* With a shader on, these give up their paint and keep their clicks: the
+     same two controls are drawn into the picture instead, so they arrive
+     through the glass with everything else. */
+  #chrome.shaded #power-face, #chrome.shaded #knob-face { opacity: 0; }
+  #chrome.shaded #knob-name { color: transparent; }
   @media (prefers-reduced-motion: reduce) {
-    #hint, #chrome button { transition: none; }
-    /* The size still changes -- it is the affordance, not the animation. */
+    /* The size and the colour still change -- those are the affordance, not
+       the animation. Only the easing goes. */
+    #hint, #chrome #power, #chrome #knob, #chrome #knob-name { transition: none; }
   }
 </style>
 </head>
@@ -610,9 +602,13 @@ const INDEX: &str = r##"<!doctype html>
 <div id="term"></div>
 <canvas id="glass"></canvas>
 <div id="chrome">
-  <div id="dial" hidden><span id="dial-ticks"></span><span id="dial-name">p22</span></div>
-  <button id="shader" type="button" aria-pressed="false" title="post-processing">shader</button>
-  <button id="full" type="button" aria-pressed="false" title="full screen (ctrl-f)">full</button>
+  <button id="power" type="button" aria-pressed="false" title="shader">
+    <canvas id="power-face" width="22" height="22"></canvas>
+  </button>
+  <div id="knob" hidden>
+    <canvas id="knob-face" width="38" height="38"></canvas>
+    <span id="knob-name">p22</span>
+  </div>
 </div>
 <div id="hint">click to focus &middot; ctrl-f for full screen &middot; this is the same program you get over ssh</div>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -872,20 +868,18 @@ const place = () => {
 const measure = () => {
   laidOut.length = 0;
   switches.classList.add('measuring');
+  const kinds = { 'power-face': 'power', 'knob-face': 'knob', 'knob-name': 'label' };
   for (const el of switches.children) {
     if (el.hidden) continue;
-    const at = el.getBoundingClientRect();
-    // A switch is one word and gets drawn as one. The dial is several pieces
-    // in several colours, so its parts are laid out and painted separately --
-    // and bent separately, which at this size is under a tenth of a pixel of
-    // difference but costs nothing to get right.
+    // A control is drawn from its own box, and the knob is two boxes -- the
+    // face and the name under it -- which are painted and bent separately.
     const parts = el.children.length ? [...el.children] : [el];
     for (const part of parts) {
-      const box = part === el ? at : part.getBoundingClientRect();
+      const box = part.getBoundingClientRect();
       laidOut.push({
         el: part,
         x: box.left, y: box.top, w: box.width, h: box.height,
-        brackets: part.tagName === 'BUTTON',
+        kind: kinds[part.id] || 'label',
       });
     }
   }
@@ -992,8 +986,11 @@ addEventListener('resize', () => {
 // `ctrl-f` because it is free: the app binds plain `f` (the map's depth focus)
 // and `ctrl-c`, and nothing binds this. The browser does -- it is Find -- so it
 // has to be taken before either the browser or xterm sees it.
-const fullButton = document.getElementById('full');
-
+//
+// There is no button for it any more. It was a third bracketed word in a
+// corner that is now two drawn controls, and a chrome that says `[full]` is
+// chrome about the browser rather than about this program -- the key stays,
+// and the hint under the terminal is where it is advertised.
 const isFull = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
 
 const setFull = (on) => {
@@ -1030,7 +1027,6 @@ const refit = () => {
   sendSize();
   tube.resize();
   measure();
-  fullButton.setAttribute('aria-pressed', isFull() ? 'true' : 'false');
   term.focus();
 };
 addEventListener('fullscreenchange', refit);
@@ -1055,7 +1051,6 @@ addEventListener('keydown', (e) => {
   toggleFull();
 }, true);
 
-fullButton.addEventListener('click', () => toggleFull());
 
 // ---------------------------------------------------------------------------
 // No pasting into the question box.
@@ -2150,16 +2145,32 @@ const tube = {
     if (!glass.clientWidth) return;
     const scale = this.size.w / glass.clientWidth;
     const ctx = this.sctx;
-    ctx.textBaseline = 'top';
-    ctx.font = `${13 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
+    const hot = power.matches(':hover, :focus-visible') || knob.matches(':hover, :focus-within');
+    const ink = hot ? '#c4c8ce' : '#606670';
     for (const it of laidOut) {
-      // Its own colour, not its parent's: the lit tick on the dial is amber
-      // and everything either side of it is not, and painting the row in one
-      // colour is what would lose that.
-      const cs = getComputedStyle(it.el);
-      ctx.fillStyle = cs.getPropertyValue('--ink').trim() || cs.color || '#3a3e46';
-      ctx.fillText(it.brackets ? `[${it.el.textContent}]` : it.el.textContent,
-                   it.x * scale, it.y * scale);
+      const x = it.x * scale, y = it.y * scale;
+      const w = it.w * scale, h = it.h * scale;
+      // The same two functions the corner canvases use, at the tube's scale.
+      // Not a lettered stand-in: what comes through the glass has to be the
+      // control, or the picture and the page disagree about what is there.
+      if (it.kind === 'power') {
+        drawPower(ctx, x + w / 2, y + h / 2, scale,
+                  this.on ? '#ffb040' : ink);
+      } else if (it.kind === 'knob') {
+        const at = SCREENS.indexOf(screenById(this.screen));
+        drawKnob(ctx, x + w / 2, y + h / 2, scale, at, SCREENS.length, ink, '#ffb040');
+      } else {
+        ctx.textBaseline = 'top';
+        ctx.font = `${9 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
+        ctx.fillStyle = ink;
+        // The label is letterspaced in CSS and canvas has no such property,
+        // so it is placed a character at a time to the same rhythm.
+        const text = it.el.textContent.toUpperCase();
+        const step = w / Math.max(text.length, 1);
+        for (let i = 0; i < text.length; i++) {
+          ctx.fillText(text[i], x + i * step, y);
+        }
+      }
     }
   },
 
@@ -2247,10 +2258,114 @@ const tube = {
       });
   },
 };
-const button = document.getElementById('shader');
-const dial = document.getElementById('dial');
-const dialTicks = document.getElementById('dial-ticks');
-const dialName = document.getElementById('dial-name');
+const power = document.getElementById('power');
+const powerFace = document.getElementById('power-face');
+const knob = document.getElementById('knob');
+const knobFace = document.getElementById('knob-face');
+const knobName = document.getElementById('knob-name');
+
+// The two controls, as drawings.
+//
+// One function each, and each is called twice: once into the small canvas in
+// the corner, and once -- at the tube's own scale -- into the picture, so what
+// arrives through the glass is the same object and not a lettered stand-in for
+// it. Everything is in CSS pixels and multiplied by `k`, which is the only
+// thing that differs between the two calls.
+const KNOB_R = 11;
+const POWER_R = 7;
+/// The sweep a knob turns through, and where it starts. Three quarters of a
+/// circle with the gap at the bottom, which is where every panel knob has its
+/// gap because that is where the shaft comes out.
+const SWEEP_FROM = Math.PI * 0.75;
+const SWEEP_TO = Math.PI * 2.25;
+
+const knobAngle = (at, n) => SWEEP_FROM + (SWEEP_TO - SWEEP_FROM) * (n < 2 ? 0.5 : at / (n - 1));
+
+const drawKnob = (ctx, cx, cy, k, at, n, ink, lit) => {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.lineCap = 'butt';
+  // A tick per position, so the knob says how many there are as well as which
+  // one -- the thing a button that advances by one cannot say.
+  for (let i = 0; i < n; i++) {
+    const a = knobAngle(i, n);
+    const r0 = (KNOB_R + 3) * k;
+    const r1 = r0 + (i === at ? 4.5 : 2.5) * k;
+    ctx.strokeStyle = i === at ? lit : ink;
+    ctx.lineWidth = (i === at ? 1.6 : 1.0) * k;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r0, Math.sin(a) * r0);
+    ctx.lineTo(Math.cos(a) * r1, Math.sin(a) * r1);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.2 * k;
+  ctx.beginPath();
+  ctx.arc(0, 0, KNOB_R * k, 0, Math.PI * 2);
+  ctx.stroke();
+  // The pointer, from the middle out to the rim.
+  const a = knobAngle(at, n);
+  ctx.strokeStyle = lit;
+  ctx.lineWidth = 1.8 * k;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(Math.cos(a) * KNOB_R * k * 0.18, Math.sin(a) * KNOB_R * k * 0.18);
+  ctx.lineTo(Math.cos(a) * KNOB_R * k * 0.82, Math.sin(a) * KNOB_R * k * 0.82);
+  ctx.stroke();
+  ctx.restore();
+};
+
+const drawPower = (ctx, cx, cy, k, ink) => {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.6 * k;
+  ctx.lineCap = 'round';
+  // The IEC mark: a ring with a gap at the top and a stem through it. Drawn
+  // rather than written, so it needs no language and no legend.
+  const gap = 0.42;
+  ctx.beginPath();
+  ctx.arc(0, 0, POWER_R * k, -Math.PI / 2 + gap, -Math.PI / 2 - gap + Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, -(POWER_R + 2.4) * k);
+  ctx.lineTo(0, -POWER_R * k * 0.2);
+  ctx.stroke();
+  ctx.restore();
+};
+
+/// Redraw the two little canvases in the corner.
+///
+/// The picture-side copies are painted by `tube.switches` from the same two
+/// functions; this is the version you see when no shader is on.
+const paintChrome = () => {
+  const dpr = window.devicePixelRatio || 1;
+  const fit = (c, w, h) => {
+    if (c.width !== Math.round(w * dpr)) {
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(h * dpr);
+      c.style.width = w + 'px';
+      c.style.height = h + 'px';
+    }
+    const g = c.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    return g;
+  };
+  const hot = power.matches(':hover, :focus-visible') || knob.matches(':hover, :focus-within');
+  const ink = hot ? '#c4c8ce' : '#606670';
+  const on = power.getAttribute('aria-pressed') === 'true';
+
+  drawPower(fit(powerFace, 22, 22), 11, 11, 1, on ? '#ffb040' : ink);
+  if (!knob.hidden) {
+    const at = SCREENS.indexOf(screenById(tube.screen));
+    drawKnob(fit(knobFace, 38, 38), 19, 19, 1, at, SCREENS.length, ink, '#ffb040');
+  }
+};
+
+/// The power button, under the name the rest of this file already used for
+/// the thing that switches the shader on.
+const button = power;
 
 const showScreen = () => {
   const s = screenById(tube.screen);
@@ -2263,11 +2378,9 @@ const showScreen = () => {
   // Ambiguous -- so a terminal that honours it draws each one two columns
   // wide, nine of them come to eighteen columns, and the gutter this asks the
   // app to keep clear went to 27. Both of these are width N.
-  dialTicks.innerHTML = SCREENS
-    .map((_, i) => (i === at ? '<b>\u25aa</b>' : '\u00b7'))
-    .join('');
-  dialName.textContent = s.id;
-  dial.title = s.hint;
+  knobName.textContent = s.id;
+  knob.title = `${s.id} \u2014 ${s.hint}`;
+  paintChrome();
   // The shader decides the ground, and only while it is on: with nothing over
   // the terminal the page is its own dark self again.
   setGround(tube.on ? (s.ground || SCREEN_BASE.ground) : 'dark');
@@ -2299,7 +2412,7 @@ const setShader = (on) => {
     return;
   }
   button.setAttribute('aria-pressed', on ? 'true' : 'false');
-  dial.hidden = !on;
+  knob.hidden = !on;
   // The switch appears with the tube and goes with it, so the room it needs
   // does too. `place` comes after the branch below rather than here, because
   // whether these are being bent at all is `tube.on`, and that has not moved
@@ -2350,10 +2463,10 @@ const setShader = (on) => {
 // -- except the switches, whose hover is drawn into the frame now and so needs
 // a frame to be drawn into.
 term.onRender(() => tube.schedule());
-switches.addEventListener('mouseover', () => tube.wake());
-switches.addEventListener('mouseout', () => tube.wake());
-switches.addEventListener('focusin', () => tube.wake());
-switches.addEventListener('focusout', () => tube.wake());
+switches.addEventListener('mouseover', () => { paintChrome(); tube.wake(); });
+switches.addEventListener('mouseout', () => { paintChrome(); tube.wake(); });
+switches.addEventListener('focusin', () => { paintChrome(); tube.wake(); });
+switches.addEventListener('focusout', () => { paintChrome(); tube.wake(); });
 
 // A tab in the background is not a tube anybody is looking at. The frames it
 // would have drawn are not owed to it afterwards either -- whatever was fading
@@ -2381,23 +2494,29 @@ if (window.CanvasAddon) {
   button.addEventListener('click', () => {
     setShader(button.getAttribute('aria-pressed') !== 'true');
   });
-  // Anywhere on the ticks: which tick decides which screen, so the dial can
-  // be turned straight to a position instead of stepped round to it.
-  dialTicks.addEventListener('click', (e) => {
-    const box = dialTicks.getBoundingClientRect();
-    const at = Math.floor(((e.clientX - box.left) / box.width) * SCREENS.length);
-    setScreen(SCREENS[Math.min(Math.max(at, 0), SCREENS.length - 1)].id);
-  });
-  // The name is the other half of it: click it to step one on, which is what
-  // the old button did and is still the right gesture for "show me the next".
-  dialName.addEventListener('click', () => {
+  // A knob turns. Click steps one on, the wheel turns it either way, and the
+  // arrow keys do the same for anyone not using a pointer.
+  const turn = (by) => {
     const ids = SCREENS.map((s) => s.id);
-    setScreen(ids[(ids.indexOf(tube.screen) + 1) % ids.length]);
+    const at = (ids.indexOf(tube.screen) + by + ids.length) % ids.length;
+    setScreen(ids[at]);
+  };
+  knob.addEventListener('click', () => turn(1));
+  knob.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    turn(e.deltaY > 0 ? 1 : -1);
+  }, { passive: false });
+  knob.tabIndex = 0;
+  knob.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === ' ') turn(1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') turn(-1);
+    else return;
+    e.preventDefault();
   });
   if (want === '1' && !reducedMotion) setShader(true);
 } else {
   button.disabled = true;
-  dial.hidden = true;
+  knob.hidden = true;
   button.title = 'the canvas renderer this needs did not load';
 }
 
@@ -2729,10 +2848,10 @@ mod tests {
     fn the_screen_switch_opens_on_the_screen_the_tube_starts_on() {
         let first = part("const SCREENS = [\n  {\n    id: '", "'");
         assert!(
-            INDEX.contains(&format!(r#"id="dial-name">{first}<"#)),
-            "the dial does not open on `{first}`"
+            INDEX.contains(&format!(r#"id="knob-name">{first}<"#)),
+            "the knob does not open on `{first}`"
         );
-        // ...and the dial is hidden until there is something to point it at.
-        assert!(INDEX.contains(r#"<div id="dial" hidden>"#), "the dial ships visible");
+        // ...and the knob is hidden until there is something to point it at.
+        assert!(INDEX.contains(r#"<div id="knob" hidden>"#), "the knob ships visible");
     }
 }
