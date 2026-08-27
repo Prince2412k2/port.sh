@@ -56,30 +56,38 @@ impl Section {
 
     /// What the footer offers here. Every section has different verbs and a
     /// single global hint line would be wrong in three places out of four.
+    /// The long form and the short one, for a frame that cannot hold the long.
+    ///
+    /// Both follow one convention and have to: two spaces between a key and
+    /// what it does, three or more between one pair and the next. That is what
+    /// `keyed` reads to decide what gets lit, and the compact forms used a
+    /// single space -- so on any window narrow enough to fall back to them,
+    /// not one key was highlighted. One character per pair to fix, which is
+    /// cheap for the thing the short form exists to buy.
     fn hints(self) -> (&'static str, &'static str) {
         match self {
-            Section::Home => ("1-5  open a section    /  all keys", "1-5 open    / keys"),
+            Section::Home => ("1-5  open a section    /  all keys", "1-5  open    /  keys"),
             // `p` rather than the layer keys themselves: the panel is where they
             // are written down, next to what each one draws.
             Section::Experience => (
                 "n b  places    ?  find    drag  pan    wheel  zoom    esc  home    /  all keys",
-                "n/b places   ? find   esc home   / keys",
+                "n/b  places   ?  find   esc  home   /  keys",
             ),
             Section::Projects => (
                 "← →  projects    ↑ ↓  read    esc  home    /  all keys",
-                "←/→ projects   ↑/↓ read   esc home   / keys",
+                "←/→  projects   ↑/↓  read   esc  home   /  keys",
             ),
             Section::Skills => (
                 "drag / wheel  move    hover  inspect    space  drift    esc  home    /  all keys",
-                "drag/wheel move   space drift   esc home",
+                "drag/wheel  move   space  drift   esc  home",
             ),
             Section::Taste => (
                 "← → / wheel  browse the loop    esc  home    /  all keys",
-                "←/→ browse   esc home   / keys",
+                "←/→  browse   esc  home   /  keys",
             ),
             Section::Ask => (
                 "enter  send    shift-enter  new line    ctrl/alt-backspace  delete word    /  commands",
-                "enter send   shift-enter newline   / commands",
+                "enter  send   shift-enter  newline   /  commands",
             ),
         }
     }
@@ -1097,12 +1105,17 @@ impl Shell {
             ..area
         };
 
+        // Two rows for the footer, and the hints go in the first of them.
+        // Sitting on the very last row put them against the edge of the
+        // window, where a terminal with no padding clips their descenders and
+        // every one of them reads as a smudge.
         let [head, body, foot] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .areas(area);
+        let foot = Rect { height: 1, ..foot };
         self.body = body;
 
         self.rail(f, head, th);
@@ -1411,7 +1424,8 @@ impl Shell {
             ));
         }
         if self.section != Section::Ask {
-            right.push(Span::styled("q  quit  ", Style::default().fg(th.faint())));
+            right.extend(keyed("q  quit", th, false));
+            right.push(Span::styled("  ", Style::default()));
         }
         let right_width = right
             .iter()
@@ -1424,19 +1438,15 @@ impl Shell {
             // `enter send` under a conversation that already happened is an
             // invitation to type into it and find out that nothing happens.
             (true, _) => "up down  step through the answers   q  back",
-            (_, true) => "driving map   n/b places   esc typing",
+            (_, true) => "driving map   n/b  places   esc  typing",
             _ if full.chars().count() <= available => full,
             _ => compact,
         };
         let hint: String = hint.chars().take(available).collect();
+        let mut spans = vec![Span::styled("  ", Style::default())];
+        spans.extend(keyed(&hint, th, self.driving));
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(
-                    hint,
-                    Style::default().fg(if self.driving { th.amber() } else { th.ghost() }),
-                ),
-            ])),
+            Paragraph::new(Line::from(spans)),
             Rect {
                 width: area.width.saturating_sub(right_width),
                 ..area
@@ -1444,6 +1454,55 @@ impl Shell {
         );
         f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), area);
     }
+}
+
+/// A hint line, split so the keys are louder than what they do.
+///
+/// The whole line used to go out in one colour, and that colour was `ghost` --
+/// the faintest tint there is, a quarter of the way from the page to the ink.
+/// Which meant the one part a reader is scanning for, the key itself, was
+/// exactly as quiet as the sentence explaining it, in every theme. Nothing to
+/// catch the eye and nothing to catch it *with*.
+///
+/// The convention the strings already used is that a key is separated from its
+/// label by two spaces and one pair from the next by three or more. So there
+/// is nothing to restructure -- only to read.
+///
+/// A group with no double space in it is a state and not a key: "driving map"
+/// says where you are, and lighting it up like something you can press would
+/// be a lie about what it is.
+fn keyed(hint: &str, th: Theme, driving: bool) -> Vec<Span<'static>> {
+    // Driving lights the whole line: it is a mode, and the mode is the message.
+    let label = Style::default().fg(if driving { th.amber() } else { th.faint() });
+    let key = Style::default().fg(th.amber()).add_modifier(Modifier::BOLD);
+
+    let mut out = Vec::new();
+    let mut rest = hint;
+    while !rest.is_empty() {
+        // Up to the next run of three spaces, which is where this pair ends.
+        let end = find_gap(rest).unwrap_or(rest.len());
+        let (group, tail) = rest.split_at(end);
+        match group.find("  ") {
+            Some(at) => {
+                out.push(Span::styled(group[..at].to_string(), key));
+                out.push(Span::styled(group[at..].to_string(), label));
+            }
+            None => out.push(Span::styled(group.to_string(), label)),
+        }
+        // The separator belongs to nobody, so it goes out unstyled.
+        let gap = tail.len() - tail.trim_start_matches(' ').len();
+        if gap > 0 {
+            out.push(Span::styled(tail[..gap].to_string(), Style::default()));
+        }
+        rest = &tail[gap..];
+    }
+    out
+}
+
+/// Where the next run of three or more spaces starts.
+fn find_gap(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    (0..b.len().saturating_sub(2)).find(|&i| b[i] == b' ' && b[i + 1] == b' ' && b[i + 2] == b' ')
 }
 
 impl Default for Shell {
@@ -1454,6 +1513,56 @@ impl Default for Shell {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every hint line splits into keys and labels, and nothing is lost.
+    ///
+    /// The whole line used to render in `ghost`, the faintest tint there is,
+    /// so the key a reader is scanning for was exactly as quiet as the
+    /// sentence explaining it. This checks the split against the real strings
+    /// rather than invented ones -- the convention lives in those strings, and
+    /// a hint written to a different one would silently come out unlit.
+    #[test]
+    fn every_hint_line_puts_its_keys_forward() {
+        let th = Theme::Night;
+        let amber = th.amber();
+
+        let mut lines: Vec<&str> = Vec::new();
+        for section in Section::ALL {
+            let (full, compact) = section.hints();
+            lines.push(full);
+            lines.push(compact);
+        }
+        lines.push("up down  step through the answers   q  back");
+        lines.push("driving map   n/b  places   esc  typing");
+
+        for line in lines {
+            let spans = keyed(line, th, false);
+            // Nothing dropped: the spans put the line back together exactly.
+            let back: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(back, line, "the split lost text");
+
+            // "driving map" is a state, not a key, and is the one line here
+            // with nothing to press.
+            if line.starts_with("driving map") {
+                continue;
+            }
+            let lit = spans.iter().filter(|s| s.style.fg == Some(amber)).count();
+            assert!(lit > 0, "no key was lit in {line:?}");
+            // ...and the labels stayed quiet, or there is no hierarchy.
+            let quiet = spans.iter().filter(|s| s.style.fg == Some(th.faint())).count();
+            assert!(quiet > 0, "nothing was left quiet in {line:?}");
+        }
+    }
+
+    /// A state is not a key.
+    #[test]
+    fn a_state_is_not_lit_like_something_you_can_press() {
+        let th = Theme::Night;
+        let spans = keyed("driving map   n/b  places", th, false);
+        let lit: Vec<&str> =
+            spans.iter().filter(|s| s.style.fg == Some(th.amber())).map(|s| s.content.as_ref()).collect();
+        assert_eq!(lit, vec!["n/b"], "lit the wrong things: {lit:?}");
+    }
     use super::*;
 
     fn mcp_handle(board: &str, request: &str) -> Option<String> {
