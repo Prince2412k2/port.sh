@@ -409,14 +409,28 @@ fn parse_resize(s: &str) -> Option<(u16, u16)> {
     Some((c.trim().parse().ok()?, r.trim().parse().ok()?))
 }
 
-/// The whole text channel: a size, or the width of the client's own chrome.
+/// `b#rrggbb`, the colour the page is drawn on.
+fn parse_ground(s: &str) -> Option<[u8; 3]> {
+    let hex = s.strip_prefix("b#")?;
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let at = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([at(0)?, at(2)?, at(4)?])
+}
+
+/// The whole text channel: a size, the width of the client's own chrome, or
+/// the colour it is drawing on.
 ///
 /// Bytes typed at the terminal come in on the binary channel and nowhere else,
 /// so anything arriving here is a statement about the window rather than input.
-/// Anything that is neither of these two is dropped rather than guessed at.
+/// Anything that is none of the three is dropped rather than guessed at.
 fn parse_text(s: &str) -> Option<session::In> {
     if let Some((c, r)) = parse_resize(s) {
         return Some(session::In::Resize(c, r));
+    }
+    if let Some(rgb) = parse_ground(s) {
+        return Some(session::In::Ground(rgb));
     }
     let cols = s.strip_prefix('g')?.trim().parse().ok()?;
     Some(session::In::Gutter(cols))
@@ -427,13 +441,16 @@ fn parse_text(s: &str) -> Option<session::In> {
 /// xterm.js comes from a CDN rather than being vendored, which is the one
 /// outside dependency on this page -- swap it for a local copy if that matters.
 ///
-/// The CRT switch in the corner is a real post-processing chain, not a stack
+/// The shader switch in the corner is a real post-processing chain, not a stack
 /// of CSS overlays: the terminal is rendered to a canvas, that canvas is
 /// uploaded as a texture, and four programs turn it into a photograph of a
 /// display -- a composite signal, a phosphor with a memory, a bloom, and then
-/// the glass, the beam and the mask. The switch beside it says which display,
-/// and there are seven of them: two colour tubes, a television, amber and
-/// green monochrome, the same television fed off a tape, and an early panel.
+/// the glass, the beam and the mask. The dial beside it says which one, and
+/// there are nine: two colour tubes, a television, amber and green
+/// monochrome, the same television fed off a tape, an early panel -- and two
+/// that are not displays at all, a sheet of paper and a page of newsprint,
+/// which run the whole thing backwards and take ink out of a page instead of
+/// adding light to a screen.
 ///
 /// Doing it in shaders is what buys the parts that are not overlays at all.
 /// Bending the image means sampling it somewhere other than where the pixel
@@ -450,7 +467,7 @@ fn parse_text(s: &str) -> Option<session::In> {
 /// Which renderer xterm uses is part of the mechanism rather than a detail.
 /// Its WebGL renderer owns a drawing buffer that is not reliably readable as a
 /// texture from another context -- without `preserveDrawingBuffer` the contents
-/// are undefined once composited -- so turning the CRT on switches xterm to its
+/// are undefined once composited -- so turning a shader on switches xterm to its
 /// canvas renderer, whose 2D canvas is always a valid texture source, and
 /// turning it off switches back.
 const INDEX: &str = r##"<!doctype html>
@@ -480,7 +497,7 @@ const INDEX: &str = r##"<!doctype html>
     background: #08090b; overflow: hidden;
   }
   #term { position: absolute; inset: 0; }
-  /* With the CRT on, the terminal is still the thing being rendered and still
+  /* With a shader on, the terminal is still the thing being rendered and still
      the thing taking clicks -- it is just not the thing you look at. It stays
      laid out and hit-testable underneath, and the shader draws what it holds. */
   #term.shaded .xterm-screen { opacity: 0; }
@@ -513,7 +530,7 @@ const INDEX: &str = r##"<!doctype html>
      Top left, on the same row as the section rail, because these are chrome and
      that row is where this app keeps its chrome.
 
-     Written as `[crt]` in the terminal's own font and palette rather than as
+     Written as `[shader]` in the terminal's own font and palette rather than as
      buttons: they sit on a terminal, and a rounded pill with a border and a
      hover box on top of one looks like a browser that has landed on it. The
      brackets are the same idiom the rail uses two inches to the right. */
@@ -536,8 +553,22 @@ const INDEX: &str = r##"<!doctype html>
     background: transparent; border: 0; padding: 0; margin: 0;
     font: inherit; cursor: pointer;
     --ink: #3a3e46; color: var(--ink);
-    transition: color .2s ease;
+    /* Grown from the left edge, which is where they are anchored: scaling
+       about the centre would walk them sideways under the pointer and the
+       one being pointed at would move out from under it. */
+    transform-origin: left center;
+    transform: var(--bend, none);
+    transition: color .2s ease, transform .12s ease;
   }
+  /* Bigger under the pointer, because at 13px on the far left of a wide
+     window these are small targets a long way from wherever the eye is. The
+     size is the affordance: it says these are the things on this page that
+     answer to a pointer, which nothing else here does. */
+  #chrome button:hover, #chrome button:focus-visible {
+    transform: var(--bend, none) scale(1.35);
+  }
+  /* While the layout is being read. See `measure`. */
+  #chrome.measuring button { transform: none; transition: none; }
   #chrome button::before { content: "["; }
   #chrome button::after { content: "]"; }
   #chrome button:hover { --ink: #c4c8ce; }
@@ -555,6 +586,7 @@ const INDEX: &str = r##"<!doctype html>
   #chrome.shaded button { color: transparent; }
   @media (prefers-reduced-motion: reduce) {
     #hint, #chrome button { transition: none; }
+    /* The size still changes -- it is the affordance, not the animation. */
   }
 </style>
 </head>
@@ -563,7 +595,7 @@ const INDEX: &str = r##"<!doctype html>
 <canvas id="glass"></canvas>
 <div id="chrome">
   <button id="screen" type="button" title="which screen" hidden>p22</button>
-  <button id="crt" type="button" aria-pressed="false" title="old tube">crt</button>
+  <button id="shader" type="button" aria-pressed="false" title="post-processing">shader</button>
   <button id="full" type="button" aria-pressed="false" title="full screen (ctrl-f)">full</button>
 </div>
 <div id="hint">click to focus &middot; ctrl-f for full screen &middot; this is the same program you get over ssh</div>
@@ -616,13 +648,24 @@ const term = new Terminal({
   customGlyphs: false,
   scrollback: 0,
 });
+// The two grounds a shader can ask for.
+//
+// `dark` is the page's own, and the same `#08090b` the app calls night and the
+// portraits were baked against. `paper` is the app's light page, and the ink
+// on it is the app's own pen -- both taken from `termap::canvas`, so the parts
+// of the frame the shader does not touch agree with the parts it does.
+const GROUNDS = {
+  dark: { bg: '#08090b', fg: '#c4c8ce' },
+  paper: { bg: '#eeeae0', fg: '#22201e' },
+};
+
 const screen = document.getElementById('term');
 const switches = document.getElementById('chrome');
 const fit = new FitAddon.FitAddon();
 term.open(screen);
 term.loadAddon(fit);
 
-// Which renderer is loaded is the CRT's business, so it is swappable rather
+// Which renderer is loaded is the shader's business, so it is swappable rather
 // than set once. WebGL is the fast path and the default; the shader needs the
 // canvas one, for the reason in this module's doc comment. If neither addon is
 // present xterm falls back to its DOM renderer on its own, which is slower but
@@ -677,6 +720,9 @@ const sendSize = () => {
   if (ws.readyState === WebSocket.OPEN) ws.send(`r${term.cols}x${term.rows}`);
 };
 
+// Said once at the start and again whenever it changes. A session that opens
+// on a light shader has to arrive light, not flip a frame later.
+
 // How many columns the switches in the corner cover, so the app can keep the
 // start of the header row clear instead of drawing the name underneath them.
 //
@@ -689,6 +735,29 @@ const sendSize = () => {
 // width in pixels over its width in columns -- because that is the same
 // division the app's layout is on the other side of.
 let gutter = -1;
+// Tell the app what it is drawing on.
+//
+// The browser's half of the question a terminal answers with OSC 11. There is
+// no terminal under this to ask -- the page is the terminal -- so it says so,
+// and the app's system theme follows it exactly as it follows a real one.
+let ground = null;
+const setGround = (name) => {
+  const g = GROUNDS[name] || GROUNDS.dark;
+  if (ground === name) return;
+  ground = name;
+  document.body.style.background = g.bg;
+  term.options.theme = { background: g.bg, foreground: g.fg };
+  sendGround();
+  // The renderer keeps the old colours until something asks it to draw again,
+  // and a page nobody has typed on has nothing of its own to repaint.
+  term.refresh(0, term.rows - 1);
+};
+
+const sendGround = () => {
+  const g = GROUNDS[ground] || GROUNDS.dark;
+  if (ws.readyState === WebSocket.OPEN) ws.send('b' + g.bg);
+};
+
 const sendGutter = () => {
   if (ws.readyState !== WebSocket.OPEN || !term.cols) return;
   const cell = screen.clientWidth / term.cols;
@@ -756,7 +825,7 @@ const place = () => {
   const bent = tube.on && glass.clientWidth > 0 && glass.clientHeight > 0;
   for (const it of laidOut) {
     if (!bent) {
-      it.el.style.transform = 'none';
+      it.el.style.removeProperty('--bend');
       continue;
     }
     // The centre of the label, because a run of text does not bend uniformly
@@ -767,22 +836,32 @@ const place = () => {
     const [ux, uy] = unbend(cx, cy);
     const dx = (ux - cx) * glass.clientWidth;
     const dy = (uy - cy) * glass.clientHeight;
-    it.el.style.transform = `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px)`;
+    // A custom property rather than `transform` itself. The hover below also
+    // has something to say about this element's transform, and an inline
+    // `transform` beats every rule in the stylesheet -- which is why the
+    // first version of the hover did nothing at all. One owner each: the bend
+    // is this, the size is CSS, and the two compose in the rule.
+    it.el.style.setProperty('--bend', `translate(${dx.toFixed(2)}px, ${dy.toFixed(2)}px)`);
   }
 };
 
 /// Read the layout back, with the transforms off so it is the layout that is
 /// read and not the last answer this gave.
+///
+/// A class rather than clearing `transform` on each element. Two things now
+/// have a claim on it -- the bend and the hover -- and this has to ignore
+/// both: an inline `none` left behind beats the rule that composes them, and
+/// measuring a button while the pointer is on it reads it 35% too wide and
+/// tells the app to keep that many columns clear.
 const measure = () => {
   laidOut.length = 0;
-  for (const el of switches.children) {
-    el.style.transform = 'none';
-  }
+  switches.classList.add('measuring');
   for (const el of switches.children) {
     if (el.hidden) continue;
     const at = el.getBoundingClientRect();
     laidOut.push({ el, x: at.left, y: at.top, w: at.width, h: at.height });
   }
+  switches.classList.remove('measuring');
   place();
   sendGutter();
 };
@@ -803,6 +882,7 @@ try {
 ws.onopen = () => {
   if (visitorId) ws.send('i' + visitorId);
   if (reducedMotion) ws.send('m1');
+  sendGround();                     // before the first frame is drawn
   sendSize();                       // the session waits for this one
   measure();
   term.focus();
@@ -1300,8 +1380,14 @@ void main() {
   // middle and then to a point in the centre of it, so a tube coming on does
   // that backwards -- and getting the two the wrong way round reads as a
   // window opening rather than a picture arriving.
+#if ARRIVAL == 1
+  // A page does not open. It is the same size the whole way through.
+  float openX = 1.0;
+  float openY = 1.0;
+#else
   float openX = smoothstep(0.00, 0.42, warm);
   float openY = smoothstep(0.30, 1.00, warm);
+#endif
 
   // Underscan: the picture drawn a little smaller than the glass it is in.
   //
@@ -1337,6 +1423,18 @@ void main() {
   // gain control with extra steps.
   vec3 old = lin(texture2D(ghost, p).rgb) * painted;
   c += max(old - c, vec3(0.0)) * GHOST_GAIN;
+#endif
+
+#if INK
+  // Ink spreads into the paper it is sitting on, and it spreads *darker*.
+  //
+  // Which is the whole difference between this and a tube, and why it is not
+  // the bloom pass with a sign flipped. Bloom is light added to its
+  // neighbours; a fibre pulls pigment sideways and takes brightness *out* of
+  // them. So the blur is composited with a minimum -- wherever the neighbourhood
+  // is darker than this pixel, some of that darkness arrives here -- and the
+  // page can never come out brighter than the page.
+  c = mix(c, min(c, lin(texture2D(glow, p).rgb)), BLEED);
 #endif
 
 #if BLOOM
@@ -1397,18 +1495,82 @@ void main() {
   c += exp(-dot(r, r)) * SHEEN_AMT * vec3(0.9, 0.9, 1.0);
 #endif
 
+  // Contrast and brightness, per style.
+  //
+  // Every filter here changes how much of the range the picture actually uses
+  // -- a mask is a dimmer, a bleed is a smear, a halftone throws away
+  // everything between black and white -- and the amount differs enough
+  // between them that one setting for all of them is one setting wrong for
+  // most. Around 0.18 rather than around 0.5: that is mid grey in linear
+  // light, and pivoting around the arithmetic middle instead crushes the
+  // shadows of anything dark and blows the highlights of anything bright.
+  c = (c - 0.18) * CONTRAST + 0.18 + BRIGHTNESS;
+  c = max(c, vec3(0.0));
+
   // Phosphor is never entirely off, and neither is the glass: a dead-black CRT
   // is the one thing a real one never manages.
   c += vec3(GLOW_R, GLOW_G, GLOW_B);
 
+#if HALFTONE
+  // A screentone: ink laid down as a grid of dots whose size is the density,
+  // which is how a comic gets grey out of one colour of ink. Rotated, because
+  // a screen square to the page reads as a screen and one at an angle reads as
+  // tone -- the same reason every printer in the world puts it at 45 degrees.
+  float ia = radians(TONE_ANGLE);
+  vec2 tp = mat2(cos(ia), -sin(ia), sin(ia), cos(ia)) * gl_FragCoord.xy / (TONE_PITCH * dpr);
+  // Ink density, as the page sees it: how far below the paper this pixel is.
+  float dens = clamp(1.0 - dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+  float dot2 = length(fract(tp) - 0.5) * 1.4142;
+  // Radius from density, and a soft edge one pixel wide so the dots do not
+  // crawl when the page moves under them.
+  float ink = smoothstep(dot2 + 0.12, dot2 - 0.12, sqrt(dens));
+  // Screen the flats, not the line.
+  //
+  // Which is what an inker does, and here it is not a style note but the
+  // difference between a page and a mess. A screen laid over everything lands
+  // on the letterforms too, and a 13px glyph is about four dots across -- the
+  // first version of this was legible as texture and not as text.
+  //
+  // An edge is where this pixel and its neighbourhood disagree, and the blur
+  // is already in hand from the bleed. Line art disagrees; a flat does not.
+  float soft = dot(lin(texture2D(glow, p).rgb), vec3(0.2126, 0.7152, 0.0722));
+  float edge = abs((1.0 - soft) - dens);
+  float flat_ = 1.0 - smoothstep(0.02, 0.10, edge);
+  // ...and only in the middle of the range. Solid ink stays solid and paper
+  // stays paper; a screen on those turns the whole page grey.
+  float toning = smoothstep(0.03, 0.20, dens) * smoothstep(0.98, 0.78, dens);
+  c = mix(c, mix(vec3(PAPER_WHITE), vec3(PAPER_INK), ink), flat_ * toning * TONE_AMT);
+#endif
+
+#if FIBRE
+  // Paper is not flat and not one colour. Two scales of it: a coarse cloud
+  // that is the sheet, and a fine one that is the fibre in it.
+  float f = hash(floor(gl_FragCoord.xy / (3.0 * dpr))) * 0.6
+          + hash(gl_FragCoord.xy) * 0.4;
+  c *= 1.0 - (f - 0.5) * FIBRE_AMT;
+#endif
+
   c += (hash(gl_FragCoord.xy + fract(time) * 311.0) - 0.5) * GRAIN;
 
-  // Warming up, or going out. The flash is the last of the charge on the
-  // deflection plates dumping into a single line across the middle.
+  // Arriving, or leaving.
+  //
+  // Not one animation for all of them. A tube collapses to a line and flashes
+  // as the last of the charge on the deflection plates dumps into it -- which
+  // is a fact about deflection plates, and a page of print has none. So the
+  // style says how it comes and goes, and the geometry above already follows
+  // it: openX and openY collapse the raster only where there is a raster
+  // to collapse.
+#if ARRIVAL == 1
+  // Print: the ink develops onto a page that was already there. Nothing
+  // collapses and nothing flashes -- the paper does not go anywhere, the
+  // impression on it does.
+  c = mix(vec3(1.0) * PAPER_WHITE, c, smoothstep(0.0, 1.0, warm));
+#else
   c *= smoothstep(0.0, 0.55, warm);
   float shut = 1.0 - abs(warm * 2.0 - 1.0);
   float wire = exp(-pow((uv.y - 0.5) * 90.0, 2.0));
   c += vec3(0.85, 0.92, 1.0) * shut * shut * wire * 0.7;
+#endif
 
   // Outside the glass is the inside of the bezel. Not more terminal, and not
   // pure black either: some of the tube's own light lands on it.
@@ -1427,9 +1589,19 @@ void main() {
 // screen does not set gets the default below, so a new one is a short entry
 // rather than a full copy.
 const SCREEN_BASE = {
+  // Which ground the picture wants under it. A tube is a light source and
+  // everything about it -- phosphor, bloom, the glow it never quite loses --
+  // is addition to black, so all of these are dark and the ones that are not
+  // say so.
+  ground: 'dark',
   flags: {
     CURVE: 1, SCAN: 1, MASK: 1, MONO: 0, GHOSTING: 0, BLOOM: 1,
     FLICKER: 0, SHEEN: 1, BACKLIGHT: 0,
+    // The paper half. `INK` swaps the bloom for a bleed, `FIBRE` gives the
+    // sheet a surface, `HALFTONE` lays the ink down as a screen -- and
+    // `ARRIVAL` says whether this thing collapses like a tube or develops
+    // like a print.
+    INK: 0, FIBRE: 0, HALFTONE: 0, ARRIVAL: 0,
   },
   nums: {
     CURVE_X: 7.0, CURVE_Y: 5.0,
@@ -1442,6 +1614,13 @@ const SCREEN_BASE = {
     VIGNETTE: 0.34, ROUND: 0.06, SHEEN_AMT: 0.012, GRAIN: 0.010,
     FLICKER_AMT: 0.0,
     GLOW_R: 0.010, GLOW_G: 0.011, GLOW_B: 0.015,
+    // Per style, because every filter here uses a different amount of the
+    // range and one setting for all of them is one setting wrong for most.
+    CONTRAST: 1.0, BRIGHTNESS: 0.0,
+    BLEED: 0.0, FIBRE_AMT: 0.0,
+    TONE_PITCH: 3.4, TONE_ANGLE: 45.0, TONE_AMT: 0.0,
+    PAPER_WHITE: 1.0,
+    PAPER_INK: 0.0,
     WOBBLE: 0.0, CHROMA_LAG: 0.0, DOT_CRAWL: 0.0, TAPE_GRAIN: 0.0,
   },
 };
@@ -1539,6 +1718,56 @@ const SCREENS = [
       TINT_R: 0.97, TINT_G: 1.0, TINT_B: 1.03,
       VIGNETTE: 0.10, ROUND: 0.012, SHEEN_AMT: 0.020, GRAIN: 0.004,
       GLOW_R: 0.013, GLOW_G: 0.014, GLOW_B: 0.018,
+    },
+  },
+  // The two that are not tubes at all.
+  //
+  // Everything above is a light source: the picture is what the phosphor adds
+  // to a black screen, and every part of it -- bloom, halation, the glow it
+  // never quite loses -- is addition. Paper is the other way round. The sheet
+  // is already there and already bright, the ink is what is taken out of it,
+  // and the app is told to draw dark on light before any of this runs -- see
+  // `setGround`. Nothing below adds anything to the page.
+  {
+    id: 'paper',
+    hint: 'ink on paper: a bleed into the fibre and no light of its own',
+    ground: 'paper',
+    flags: {
+      CURVE: 0, SCAN: 0, MASK: 0, BLOOM: 0, SHEEN: 0,
+      INK: 1, FIBRE: 1, ARRIVAL: 1,
+    },
+    nums: {
+      // A whisper of a curve is still a curve. This is a flat sheet.
+      ROUND: 0.004, VIGNETTE: 0.06,
+      // No phosphor to keep glowing, and nothing for the glass to catch.
+      GLOW_R: 0.0, GLOW_G: 0.0, GLOW_B: 0.0,
+      BLEED: 0.34, FIBRE_AMT: 0.055, GRAIN: 0.004,
+      // Print holds less range than a screen, and what it has it pushes
+      // apart. Gently: the pivot is mid grey, so anything much above 1.1
+      // takes the bright end of a photograph straight to paper white.
+      CONTRAST: 1.10, BRIGHTNESS: -0.008,
+    },
+  },
+  {
+    id: 'comic',
+    hint: 'one colour of ink and a screen to make grey out of it',
+    ground: 'paper',
+    flags: {
+      CURVE: 0, SCAN: 0, MASK: 0, BLOOM: 0, SHEEN: 0,
+      INK: 1, FIBRE: 1, HALFTONE: 1, ARRIVAL: 1,
+    },
+    nums: {
+      ROUND: 0.004, VIGNETTE: 0.10,
+      GLOW_R: 0.0, GLOW_G: 0.0, GLOW_B: 0.0,
+      // Heavier than the plain sheet: newsprint takes more ink and holds it
+      // worse, and the screen below needs something to bite into.
+      BLEED: 0.46, FIBRE_AMT: 0.085, GRAIN: 0.006,
+      TONE_PITCH: 3.2, TONE_ANGLE: 45.0, TONE_AMT: 0.85,
+      // The screen throws away everything between paper and ink, so what is
+      // left has to be pushed apart to survive it -- but 1.34 was measured
+      // against text and bleached every photograph on the page.
+      CONTRAST: 1.14, BRIGHTNESS: -0.014,
+      PAPER_WHITE: 0.985,
     },
   },
 ];
@@ -1949,13 +2178,16 @@ const tube = {
       });
   },
 };
-const button = document.getElementById('crt');
+const button = document.getElementById('shader');
 const picker = document.getElementById('screen');
 
 const showScreen = () => {
   const s = screenById(tube.screen);
   picker.textContent = s.id;
   picker.title = s.hint;
+  // The shader decides the ground, and only while it is on: with nothing over
+  // the terminal the page is its own dark self again.
+  setGround(tube.on ? (s.ground || SCREEN_BASE.ground) : 'dark');
   // `one-piece` is six columns wider than `p22`, and the app is keeping that
   // many columns clear for it. The glass may bend differently too -- an
   // aperture grille is flatter than a television and a panel is flat.
@@ -1968,7 +2200,7 @@ const setScreen = (id) => {
   if (!tube.program(id)) return;
   tube.screen = id;
   showScreen();
-  try { localStorage.setItem('crt-screen', id); } catch (e) { /* private mode */ }
+  try { localStorage.setItem('shader-screen', id); } catch (e) { /* private mode */ }
   if (tube.on) {
     // One frame is enough to change screens. The run of them is for a phosphor
     // that has to fade the old picture out, and only a screen with one needs it.
@@ -1977,7 +2209,7 @@ const setScreen = (id) => {
   }
 };
 
-const setCrt = (on) => {
+const setShader = (on) => {
   if (on && !tube.gl && !tube.start()) {
     button.disabled = true;
     button.title = 'no webgl in this browser';
@@ -1991,9 +2223,10 @@ const setCrt = (on) => {
   // yet -- on the way out it does not move until the picture has finished
   // going.
   measure();
-  try { localStorage.setItem('crt', on ? '1' : '0'); } catch (e) { /* private mode */ }
+  try { localStorage.setItem('shader', on ? '1' : '0'); } catch (e) { /* private mode */ }
   if (on) {
     tube.on = true;
+    setGround(tube.live().ground || SCREEN_BASE.ground);
     useRenderer('canvas');
     screen.classList.add('shaded');
     switches.classList.add('shaded');
@@ -2013,6 +2246,7 @@ const setCrt = (on) => {
     tube.warmTo = 0;
     tube.after = () => {
       tube.on = false;
+      setGround('dark');
       glass.classList.remove('on');
       screen.classList.remove('shaded');
       switches.classList.remove('shaded');
@@ -2052,19 +2286,19 @@ if (window.CanvasAddon) {
   let want = null;
   let chosen = null;
   try {
-    want = localStorage.getItem('crt');
-    chosen = localStorage.getItem('crt-screen');
+    want = localStorage.getItem('shader');
+    chosen = localStorage.getItem('shader-screen');
   } catch (e) { /* private mode */ }
   if (chosen && screenById(chosen).id === chosen) tube.screen = chosen;
   showScreen();
   button.addEventListener('click', () => {
-    setCrt(button.getAttribute('aria-pressed') !== 'true');
+    setShader(button.getAttribute('aria-pressed') !== 'true');
   });
   picker.addEventListener('click', () => {
     const ids = SCREENS.map((s) => s.id);
     setScreen(ids[(ids.indexOf(tube.screen) + 1) % ids.length]);
   });
-  if (want === '1' && !reducedMotion) setCrt(true);
+  if (want === '1' && !reducedMotion) setShader(true);
 } else {
   button.disabled = true;
   picker.hidden = true;
@@ -2177,6 +2411,32 @@ mod tests {
         assert!(script.contains("ssh -p 2222"), "the fallback offers no way in");
     }
 
+    /// No shader source may contain a backtick.
+    ///
+    /// Every one of them is a JavaScript template literal, so a backtick in
+    /// the GLSL -- including in a comment, which is where it happened -- ends
+    /// the string early and the rest of the page is parsed as code. What that
+    /// produces is `Uncaught SyntaxError: Unexpected identifier` pointing at a
+    /// GLSL token several hundred lines below the quote that caused it.
+    #[test]
+    fn no_shader_source_carries_a_quote_that_would_end_it() {
+        let names = ["VERT", "FRAG_PERSIST", "FRAG_BLUR", "FRAG_NTSC", "FRAG_TUBE"];
+        for name in names {
+            let open = INDEX
+                .find(&format!("const {name} = `"))
+                .unwrap_or_else(|| panic!("no shader called {name} any more"));
+            let body = &INDEX[open + format!("const {name} = `").len()..];
+            let close = body.find('`').expect("a shader that is never closed");
+            let src = &body[..close];
+            // If a stray backtick ended it early, what is left is a fragment
+            // with no GLSL in it -- which is exactly the state the page was in.
+            assert!(
+                src.contains("gl_Position") || src.contains("gl_FragColor"),
+                "{name} has no GLSL in it: a backtick inside it closed the string early"
+            );
+        }
+    }
+
     /// The text channel carries statements about the window and nothing else.
     #[test]
     fn the_text_channel_is_a_size_or_a_gutter_and_never_input() {
@@ -2186,7 +2446,15 @@ mod tests {
         // Typed characters come in on the binary channel. Anything here that is
         // neither of the two is dropped rather than guessed at -- a `g` is a
         // gutter, and `great` is not a gutter of any width.
-        for junk in ["great", "g", "gx", "rm -rf /", "", "i-visitor", "m1"] {
+        assert!(matches!(parse_text("b#eeeae0"), Some(session::In::Ground([238, 234, 224]))));
+        assert!(matches!(parse_text("b#08090B"), Some(session::In::Ground([8, 9, 11]))));
+        // Typed characters come in on the binary channel. Anything here that is
+        // none of the three is dropped rather than guessed at -- a `g` is a
+        // gutter, and `great` is not a gutter of any width.
+        for junk in [
+            "great", "g", "gx", "rm -rf /", "", "i-visitor", "m1",
+            "b", "b#", "b#fff", "b#gggggg", "b#eeeae0f", "beeeae0",
+        ] {
             assert!(parse_text(junk).is_none(), "`{junk}` was taken as a message");
         }
     }

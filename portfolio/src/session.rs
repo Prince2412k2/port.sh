@@ -43,6 +43,15 @@ pub enum In {
     /// Only the browser ever sends one. Over ssh there is nothing on top of the
     /// terminal, so the answer is zero and stays zero.
     Gutter(u16),
+    /// The colour the client is drawing its own page on.
+    ///
+    /// The browser's answer to the question a terminal answers with OSC 11.
+    /// There is no terminal under the web client to ask -- the page *is* the
+    /// terminal -- so it states it instead, and the app's system theme follows
+    /// it exactly as it follows a real one. Which is what lets a shader pick
+    /// the ground: an ink-on-paper filter says the page is paper, and the
+    /// renderer stops drawing light on black.
+    Ground([u8; 3]),
     Hangup,
 }
 
@@ -553,6 +562,9 @@ fn absorb(
             terminal.clear()?;
         }
         In::ReducedMotion(reduced) => shell.set_reduced_motion(reduced),
+        In::Ground(rgb) => {
+            shell.set_ground(termap::canvas::Ground::of((rgb[0], rgb[1], rgb[2])));
+        }
         In::Gutter(cols) => shell.set_gutter(cols),
         In::Hangup => return Ok(false),
     }
