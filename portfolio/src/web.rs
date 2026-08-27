@@ -574,11 +574,27 @@ const INDEX: &str = r##"<!doctype html>
   #chrome button:hover { --ink: #c4c8ce; }
   #chrome button[aria-pressed="true"] { --ink: #ffb040; }
   #chrome button[disabled] { opacity: .35; cursor: default; }
-  /* Which screen, rather than whether. It carries no pressed state because it
-     is not a switch -- it is a dial with seven positions, and it is only there
-     at all while there is a tube to point it at. */
-  #chrome #screen { --ink: #606670; }
-  #chrome #screen:hover { --ink: #c4c8ce; }
+  /* Which screen, rather than whether.
+     Nine positions, and until now a button you pressed to advance one, which
+     tells you neither how many there are nor where in them you are -- so
+     reaching the panel from the first tube was eight presses and a guess. A
+     dial says both: one tick per position, the one you are on lit, and every
+     tick is a click. */
+  #chrome #dial {
+    pointer-events: auto; display: flex; align-items: baseline; gap: .5ch;
+    --ink: #606670; color: var(--ink);
+    transform-origin: left center;
+    transform: var(--bend, none);
+    transition: color .2s ease, transform .12s ease;
+  }
+  #chrome #dial:hover { --ink: #c4c8ce; transform: var(--bend, none) scale(1.35); }
+  #chrome.measuring #dial { transform: none; transition: none; }
+  #chrome #dial-ticks { letter-spacing: .12em; cursor: pointer; }
+  /* The lit one is the amber the pressed switch uses, so the two agree about
+     what "this one" looks like. */
+  #chrome #dial-ticks b { font-weight: normal; color: #ffb040; }
+  #chrome.shaded #dial { color: transparent; }
+  #chrome.shaded #dial-ticks b { color: transparent; }
   /* With the tube on, these give up their paint and keep their clicks: the
      same three words are drawn into the picture instead, so they arrive
      through the glass with everything else. The colour still resolves here --
@@ -594,7 +610,7 @@ const INDEX: &str = r##"<!doctype html>
 <div id="term"></div>
 <canvas id="glass"></canvas>
 <div id="chrome">
-  <button id="screen" type="button" title="which screen" hidden>p22</button>
+  <div id="dial" hidden><span id="dial-ticks"></span><span id="dial-name">p22</span></div>
   <button id="shader" type="button" aria-pressed="false" title="post-processing">shader</button>
   <button id="full" type="button" aria-pressed="false" title="full screen (ctrl-f)">full</button>
 </div>
@@ -859,7 +875,19 @@ const measure = () => {
   for (const el of switches.children) {
     if (el.hidden) continue;
     const at = el.getBoundingClientRect();
-    laidOut.push({ el, x: at.left, y: at.top, w: at.width, h: at.height });
+    // A switch is one word and gets drawn as one. The dial is several pieces
+    // in several colours, so its parts are laid out and painted separately --
+    // and bent separately, which at this size is under a tenth of a pixel of
+    // difference but costs nothing to get right.
+    const parts = el.children.length ? [...el.children] : [el];
+    for (const part of parts) {
+      const box = part === el ? at : part.getBoundingClientRect();
+      laidOut.push({
+        el: part,
+        x: box.left, y: box.top, w: box.width, h: box.height,
+        brackets: part.tagName === 'BUTTON',
+      });
+    }
   }
   switches.classList.remove('measuring');
   place();
@@ -1815,6 +1843,15 @@ const tube = {
   size: { w: 0, h: 0 },
   pending: 0,
   settle: 0,
+  /// Seconds of black to hold after the picture has gone, before the terminal
+  /// underneath is handed back. See the step function.
+  ///
+  /// Not `blank`: that name is taken, by the empty texture the ghosting pass
+  /// reads on its first frame, and taking it made the tube composite a float
+  /// where it wanted a texture.
+  dark: 0,
+  /// How long that hold should be, set by whoever threw the switch.
+  darkFor: 0,
   warm: 0,
   warmTo: 0,
   last: 0,
@@ -1914,7 +1951,16 @@ const tube = {
     try {
       this.progs[key] = this.link(src, preamble(screenById(id)));
     } catch (e) {
-      this.progs[key] = null;
+      // Not cached. A failure here used to be written into the cache as
+      // `null`, which made it permanent: `program` returns the cached null
+      // without retrying, `start` gives up, and the switch disables itself
+      // and says "no webgl in this browser" -- which by then is not true and
+      // stays untrue for the rest of the session. One miss while the canvas
+      // still had no size was enough to do it.
+      //
+      // A shader that genuinely cannot compile fails again next time, at the
+      // cost of one compile per attempt, and the switch reports it then.
+      return null;
     }
     return this.progs[key];
   },
@@ -2037,12 +2083,30 @@ const tube = {
     // motion-like thing on this page.
     const rate = reducedMotion ? 1e6 : (this.warmTo > this.warm ? 1.6 : 2.4);
     const step = rate * dt;
+    const was = this.warm;
     if (Math.abs(this.warmTo - this.warm) <= step) this.warm = this.warmTo;
     else this.warm += Math.sign(this.warmTo - this.warm) * step;
+    // The moment the picture finished going out.
+    if (was !== 0 && this.warm === 0 && this.darkFor > 0) {
+      this.dark = this.darkFor;
+      this.darkFor = 0;
+    }
 
     this.draw();
 
     if (this.settle > 0) this.settle--;
+    // A screen that has just gone out is a dark screen, not the desktop.
+    //
+    // The picture collapses to a line and then to a point, and then -- with
+    // nothing held here -- the plain terminal was back in the same frame, at
+    // full brightness, which undoes the whole gesture: the set never looks
+    // off, it looks like the effect stopped. So the glass stays up and black
+    // for a beat afterwards, and only then hands back.
+    if (this.dark > 0) {
+      this.dark -= dt;
+      this.wake();
+      return;
+    }
     const s = this.live();
     const moving = this.warm !== this.warmTo || (this.on && (s.animated || this.settle > 0));
     if (moving) this.wake();
@@ -2089,8 +2153,13 @@ const tube = {
     ctx.textBaseline = 'top';
     ctx.font = `${13 * scale}px "Iosevka Portfolio", "DejaVu Sans Mono", "Menlo", ui-monospace, monospace`;
     for (const it of laidOut) {
-      ctx.fillStyle = getComputedStyle(it.el).getPropertyValue('--ink').trim() || '#3a3e46';
-      ctx.fillText(`[${it.el.textContent}]`, it.x * scale, it.y * scale);
+      // Its own colour, not its parent's: the lit tick on the dial is amber
+      // and everything either side of it is not, and painting the row in one
+      // colour is what would lose that.
+      const cs = getComputedStyle(it.el);
+      ctx.fillStyle = cs.getPropertyValue('--ink').trim() || cs.color || '#3a3e46';
+      ctx.fillText(it.brackets ? `[${it.el.textContent}]` : it.el.textContent,
+                   it.x * scale, it.y * scale);
     }
   },
 
@@ -2179,12 +2248,26 @@ const tube = {
   },
 };
 const button = document.getElementById('shader');
-const picker = document.getElementById('screen');
+const dial = document.getElementById('dial');
+const dialTicks = document.getElementById('dial-ticks');
+const dialName = document.getElementById('dial-name');
 
 const showScreen = () => {
   const s = screenById(tube.screen);
-  picker.textContent = s.id;
-  picker.title = s.hint;
+  const at = SCREENS.indexOf(s);
+  // One tick per position, the one in use filled. Drawn in the terminal's own
+  // font like everything else in this corner, so it arrives through the glass
+  // with the rest of the picture rather than sitting on top of it.
+  // `\u25aa` and `\u00b7`, and the choice is width and not taste. The obvious
+  // pair for this is the diamonds at U+25C6/U+25C7, whose East Asian Width is
+  // Ambiguous -- so a terminal that honours it draws each one two columns
+  // wide, nine of them come to eighteen columns, and the gutter this asks the
+  // app to keep clear went to 27. Both of these are width N.
+  dialTicks.innerHTML = SCREENS
+    .map((_, i) => (i === at ? '<b>\u25aa</b>' : '\u00b7'))
+    .join('');
+  dialName.textContent = s.id;
+  dial.title = s.hint;
   // The shader decides the ground, and only while it is on: with nothing over
   // the terminal the page is its own dark self again.
   setGround(tube.on ? (s.ground || SCREEN_BASE.ground) : 'dark');
@@ -2216,7 +2299,7 @@ const setShader = (on) => {
     return;
   }
   button.setAttribute('aria-pressed', on ? 'true' : 'false');
-  picker.hidden = !on;
+  dial.hidden = !on;
   // The switch appears with the tube and goes with it, so the room it needs
   // does too. `place` comes after the branch below rather than here, because
   // whether these are being bent at all is `tube.on`, and that has not moved
@@ -2244,6 +2327,10 @@ const setShader = (on) => {
     // where it is until it has finished: the canvas renderer, the hidden
     // terminal underneath and the canvas on top all wait for `after`.
     tube.warmTo = 0;
+    // Long enough to read as the set being off and not as a dropped frame.
+    // Nothing to hold for a visitor who asked for less motion -- for them
+    // there was no collapse to follow.
+    tube.darkFor = reducedMotion ? 0 : 0.22;
     tube.after = () => {
       tube.on = false;
       setGround('dark');
@@ -2294,14 +2381,23 @@ if (window.CanvasAddon) {
   button.addEventListener('click', () => {
     setShader(button.getAttribute('aria-pressed') !== 'true');
   });
-  picker.addEventListener('click', () => {
+  // Anywhere on the ticks: which tick decides which screen, so the dial can
+  // be turned straight to a position instead of stepped round to it.
+  dialTicks.addEventListener('click', (e) => {
+    const box = dialTicks.getBoundingClientRect();
+    const at = Math.floor(((e.clientX - box.left) / box.width) * SCREENS.length);
+    setScreen(SCREENS[Math.min(Math.max(at, 0), SCREENS.length - 1)].id);
+  });
+  // The name is the other half of it: click it to step one on, which is what
+  // the old button did and is still the right gesture for "show me the next".
+  dialName.addEventListener('click', () => {
     const ids = SCREENS.map((s) => s.id);
     setScreen(ids[(ids.indexOf(tube.screen) + 1) % ids.length]);
   });
   if (want === '1' && !reducedMotion) setShader(true);
 } else {
   button.disabled = true;
-  picker.hidden = true;
+  dial.hidden = true;
   button.title = 'the canvas renderer this needs did not load';
 }
 
@@ -2633,8 +2729,10 @@ mod tests {
     fn the_screen_switch_opens_on_the_screen_the_tube_starts_on() {
         let first = part("const SCREENS = [\n  {\n    id: '", "'");
         assert!(
-            INDEX.contains(&format!(r#"title="which screen" hidden>{first}<"#)),
-            "the switch does not open on `{first}`"
+            INDEX.contains(&format!(r#"id="dial-name">{first}<"#)),
+            "the dial does not open on `{first}`"
         );
+        // ...and the dial is hidden until there is something to point it at.
+        assert!(INDEX.contains(r#"<div id="dial" hidden>"#), "the dial ships visible");
     }
 }
