@@ -15,6 +15,12 @@ pub struct SceneOpts<'a> {
     pub highlight: Option<u32>,
     pub show_labels: bool,
     pub road_glyph: RoadGlyph,
+    /// Elevation used to drape geometry in 3D. Without it, roads project at
+    /// sea level while the ground rises above them and nothing lines up.
+    pub terrain: Option<&'a crate::terrain::Terrain>,
+    pub exag: f64,
+    /// The elevation drawn at ground level -- see `relief::Lift`.
+    pub datum: f32,
     /// Your position, once known.
     pub home: Option<crate::home::Fix>,
     pub road_weight: f64,
@@ -46,6 +52,7 @@ pub struct Stats {
     pub features: usize,
     pub labels: usize,
     pub segments: usize,
+    pub relief: usize,
     pub buildings: usize,
 }
 
@@ -56,11 +63,14 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
     // Per-vertex camera depth, only populated when the camera is tilted.
     let mut zs: Vec<f32> = Vec::with_capacity(512);
     let tilted = !o.vp.is_flat();
+    let drape = if tilted { o.terrain } else { None };
+    // One surface for the whole frame, matching what the relief pass draws.
+    let smooth = crate::relief::drape_smoothing(o.vp);
     let bounded = o.vp.bounded();
     // The ground slab: features stop where it stops, or roads run out into the
     // black past the edge of the plate.
     let plate = o.vp.plate();
-    let _m_per_world = crate::geo::meters_per_world_unit(o.vp.center_lonlat().1);
+    let m_per_world = crate::geo::meters_per_world_unit(o.vp.center_lonlat().1);
 
     ocean_wash(tiles, canvas, o, &bounds, &mut proj, &mut stats);
 
@@ -105,7 +115,14 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             zs.clear();
             if tilted {
                 for &p in &f.pts {
-                    let h = 0.0;
+                    let h = match drape {
+                        Some(t) => {
+                            let (lon, lat) = crate::geo::world_to_lonlat(p[0], p[1]);
+                            (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
+                                / m_per_world
+                        }
+                        None => 0.0,
+                    };
                     let m = o.vp.plane_of(p);
                     let outside = bounded
                         && (m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2]);
@@ -210,7 +227,14 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                     };
                     let w0 = o.vp.world_of_plane(c0);
                     let w1 = o.vp.world_of_plane(c1);
-                    let lift = |_w: [f64; 2]| 0.0;
+                    let lift = |w: [f64; 2]| match drape {
+                        Some(t) => {
+                            let (lon, lat) = crate::geo::world_to_lonlat(w[0], w[1]);
+                            (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
+                                / m_per_world
+                        }
+                        None => 0.0,
+                    };
                     let (p0, z0) = o.vp.project3(w0, lift(w0));
                     let (p1, z1) = o.vp.project3(w1, lift(w1));
                     if !z0.is_finite() || !z1.is_finite() {

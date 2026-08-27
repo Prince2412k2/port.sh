@@ -75,6 +75,10 @@ pub struct App {
     pub hit: usize,
     pub show_panel: bool,
     pub show_labels: bool,
+    /// Whether the ground surface is drawn at all.
+    pub show_terrain: bool,
+    /// Scratch buffers for the relief pass, kept across frames.
+    pub relief: crate::relief::Relief,
     /// Force the whole map to the paper-white tint.
     pub mono: bool,
     /// Which ground the map is drawn on: light on black, or ink on paper.
@@ -146,6 +150,8 @@ impl App {
             hit: 0,
             show_panel: true,
             show_labels: true,
+            show_terrain: true,
+            relief: Default::default(),
             mono: true,
             theme: Default::default(),
             road_glyph: RoadGlyph::Dotted,
@@ -585,6 +591,11 @@ impl App {
             }
             KeyCode::Char('t') => {
                 self.show_labels = !self.show_labels;
+            }
+            KeyCode::Char('v') => {
+                self.show_terrain = !self.show_terrain;
+                self.toast =
+                    Some(if self.show_terrain { "terrain on" } else { "terrain off" }.into());
             }
             KeyCode::Char('u') => self.set_tilt(self.vp.tilt + 0.08),
             KeyCode::Char('o') => self.set_tilt(self.vp.tilt - 0.08),

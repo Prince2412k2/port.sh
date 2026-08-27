@@ -131,6 +131,36 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
 
 
 
+/// Vertical exaggeration of the terrain, by zoom.
+///
+/// Large, and unapologetically so. At a 50 km frame the Dhauladhar stands
+/// about 4 km out of its valleys, which is eight percent of the width of the
+/// view -- true to scale it is a wrinkle, and the terminal has perhaps fifty
+/// rows to spend on the whole height of the frame. The exaggeration is what
+/// turns a wrinkle into a skyline. It comes down as the view closes in,
+/// because at street scale the ground is genuinely close to flat and the same
+/// factor would throw the map off the top of the screen.
+pub fn exaggeration(zoom: f64) -> f64 {
+    match zoom {
+        z if z <= 9.0 => 14.0,
+        z if z >= 14.0 => 2.0,
+        z => 14.0 - (z - 9.0) / 5.0 * 12.0,
+    }
+}
+
+/// How firmly the ground is drawn, by zoom: 0 not at all, 1 as a solid surface.
+///
+/// Ramped rather than switched, because the pass turns opaque at full strength
+/// and a surface that appears all at once takes the roads behind it with it.
+pub fn ground_strength(zoom: f64) -> f32 {
+    /// First light. Below this a 30 arcsec heightmap has little to say that is
+    /// not already the shape of the coastline.
+    const DAWN: f64 = 6.0;
+    /// Full strength, and opaque from here up.
+    const NOON: f64 = 7.0;
+    (((zoom - DAWN) / (NOON - DAWN)) as f32).clamp(0.0, 1.0)
+}
+
 /// Ground fills are texture, and texture at region scale is just noise.
 pub fn draws_fills(mode: Mode) -> bool {
     mode != Mode::Flat

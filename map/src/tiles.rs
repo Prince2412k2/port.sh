@@ -23,11 +23,35 @@ const MAX_TILES_PER_VIEW: usize = 40;
 
 pub struct Source {
     backend: Backend,
-    /// Elevation, if a heightmap was found. Shared by every frame.
+    /// Elevation, if a heightmap was found.
+    ///
+    /// Borrowed from a process-wide slot rather than owned, because a
+    /// heightmap is immutable and identical for everyone: the mapping was
+    /// already shared through the page cache, but the mip pyramid built on top
+    /// of it is nine megabytes of heap, and one `Source` per SSH session meant
+    /// one pyramid per SSH session. Building it also costs 70 ms of scanning
+    /// the whole file, which is a hitch worth paying once for the process
+    /// rather than once for every connection.
+    pub terrain: Option<&'static crate::terrain::Terrain>,
     /// Always-resident features drawn over whatever the backend returns.
     /// Administrative boundaries live here: the basemap has none, and they are
     /// small enough that streaming them would be pure overhead.
     overlays: Vec<Rc<Tile>>,
+}
+
+/// The one heightmap this process will ever have.
+fn terrain() -> Option<&'static crate::terrain::Terrain> {
+    static SLOT: std::sync::OnceLock<Option<crate::terrain::Terrain>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| {
+        for c in ["india.tmhg", "terrain.tmhg"].iter().filter_map(|n| crate::paths::data_file(n)) {
+            match crate::terrain::Terrain::open(Path::new(&c)) {
+                Ok(t) => return Some(t),
+                Err(e) => eprintln!("termap: {}: {e}", c.display()),
+            }
+        }
+        None
+    })
+    .as_ref()
 }
 
 enum Backend {
@@ -40,9 +64,11 @@ impl Source {
     pub fn open(path: Option<&str>) -> Self {
         let mut src = Source {
             backend: Backend::open(path),
+            terrain: None,
             overlays: Vec::new(),
         };
-                for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
+        src.terrain = terrain();
+        for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
             if let Ok(text) = std::fs::read_to_string(&c) {
                 let feats = crate::data::parse_features(&text);
                 if !feats.is_empty() {

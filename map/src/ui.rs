@@ -346,6 +346,22 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     let sb = scalebar_geom(area, app);
 
     let t0 = std::time::Instant::now();
+    let ground = if app.show_terrain { crate::view::ground_strength(app.vp.zoom) } else { 0.0 };
+    // Terrain first: it is the ground everything else sits on, the depth
+    // buffer sorts out what ends up hidden behind a ridge, and the exposure it
+    // picks is what everything draped on it has to be lifted by.
+    let mut relief_pts = 0;
+    if ground > 0.0 {
+        if let Some(t) = app.source.terrain {
+            relief_pts = app.relief.draw(
+                t,
+                &mut app.canvas,
+                &app.vp,
+                crate::relief::Plot { strength: ground, theme: th },
+            );
+        }
+    }
+    let lift = app.relief.lift;
     let opts = SceneOpts {
         vp: &app.vp,
         layers: app.layers,
@@ -354,6 +370,9 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         show_labels: app.show_labels,
         road_glyph: app.road_glyph,
         mode: app.mode(),
+        terrain: if ground > 0.0 { app.source.terrain } else { None },
+        exag: lift.exag,
+        datum: lift.datum,
         home: app.home.lock().unwrap().clone(),
         road_weight: app.road_weight,
         reserved: sb.as_ref().map(|s| s.local),
@@ -361,6 +380,7 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         place_at: app.tour.at,
     };
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);
+    app.stats.relief = relief_pts;
     app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono, th);
     app.frame_us = t0.elapsed().as_micros();
 
