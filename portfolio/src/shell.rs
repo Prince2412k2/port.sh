@@ -2500,27 +2500,6 @@ mod tests {
         }
     }
 
-    /// Terrain and all-layers-on, which used to be `9` and `0`. `9` was swallowed
-    /// by the shell's digit arm and reached nothing at all.
-    #[test]
-    fn terrain_and_all_layers_have_keys_that_arrive() {
-        let mut s = shell();
-        s.go(Section::Experience);
-        let before = s.map.show_terrain;
-        s.on_key(press(termap::app::TERRAIN_KEY));
-        assert_ne!(before, s.map.show_terrain, "terrain did not toggle");
-
-        for l in s.map.layers.iter_mut() {
-            *l = false;
-        }
-        s.on_key(press(termap::app::ALL_LAYERS_KEY));
-        assert!(
-            s.map.layers.iter().all(|&on| on),
-            "layers did not all come back"
-        );
-        assert_eq!(s.section, Section::Experience, "navigated away");
-    }
-
     /// The other half of the same rule: a digit in the map section is still
     /// navigation, and never a layer.
     #[test]

@@ -10,10 +10,9 @@ use crate::data::Layer;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
-    /// Country to region. Untilted, no ground fills: a reference map. The
-    /// terrain is not the mode's to decide -- see `ground_strength`.
+    /// Country to region. Untilted, no ground fills: a reference map.
     Flat,
-    /// City scale. Ground relief and a slight lean.
+    /// City scale. A slight lean.
     Relief,
     /// Neighbourhood. Building masses begin.
     Half3D,
@@ -122,196 +121,26 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
     }
 }
 
-/// How the ground surface is drawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Ground {
-    /// Shaded stipple, displaced by elevation. The 3D reading, and the
-    /// default -- braille all the way down.
-    ///
-    /// What was wrong with it was never the glyph. It was that the stipple had
-    /// no boundary and no tonal range, so the eye read the whole frame as one
-    /// material and stopped. It has an outline now (`Canvas::rim`) and the
-    /// bottom of the ramp back.
-    #[default]
-    Ribbon,
-    /// The same stipple with no vertical displacement at all: hillshade, the
-    /// way a printed map does relief. Honest where the heightmap is coarse,
-    /// because a wash cannot be the wrong shape.
-    Shade,
-    /// Ribbon with iso-elevation lines drawn over it. Spacing *is* slope.
-    Contour,
-    /// Strokes down the line of steepest descent, and nothing else.
-    ///
-    /// The other three all paint the surface and then say something about it.
-    /// This one paints only what it has something to say about: ground with no
-    /// slope gets no marks at all, and the quiet is the point. Hachures are the
-    /// pre-contour way of drawing relief -- Lehmann's, from 1799 -- and they sit
-    /// exactly opposite contours in the same language. A contour runs across the
-    /// slope and you read steepness from how close the lines are. A hachure runs
-    /// down it and you read steepness from how dark and how long the stroke is.
-    ///
-    /// It is also the one mode that changes glyph family with distance rather
-    /// than just fading: near strokes are laid in block, far ones in braille.
-    Hachure,
-}
 
-impl Ground {
-    pub fn label(self) -> &'static str {
-        match self {
-            Ground::Ribbon => "relief",
-            Ground::Shade => "shade",
-            Ground::Contour => "contour",
-            Ground::Hachure => "hachure",
-        }
-    }
 
-    pub fn next(self) -> Ground {
-        match self {
-            Ground::Ribbon => Ground::Contour,
-            Ground::Contour => Ground::Hachure,
-            Ground::Hachure => Ground::Shade,
-            Ground::Shade => Ground::Ribbon,
-        }
-    }
-
-    pub fn displaces(self) -> bool {
-        self != Ground::Shade
-    }
-
-    /// Whether the surface itself gets painted, as opposed to only described.
-    ///
-    /// The depth buffer is written either way -- a ridge still hides the road
-    /// behind it. This only says whether the stipple is laid down, which is the
-    /// difference between understanding the scene and painting it.
-    pub fn paints_surface(self) -> bool {
-        self != Ground::Hachure
-    }
-}
-
-/// Vertical exaggeration for a zoom.
+/// Below this zoom the map is drawn in squares rather than braille.
 ///
-/// Terrain on a map is always exaggerated -- India's tallest ground is under
-/// 0.1% of the width of the country, so at region scale a true profile is a
-/// flat line and 14x is the usual cartographic lie. Held at 14 it becomes a
-/// different kind of lie: measured off the shipped heightmap, the ground under
-/// Ghatkopar spans 104 m, and 14x of that is 1.46 km of apparent relief in a
-/// view 11 km wide. Mumbai's low hills came out as a mountain range, and the
-/// question that produced this function was "are those mountains?".
+/// The reason is that braille's resolution buys nothing here. Its eight dots
+/// per cell are for sub-cell placement, and at two hundred kilometres to the
+/// frame there is no sub-cell detail to place -- every road is a hairline
+/// whatever glyph carries it. A square says the same thing with one shape.
 ///
-/// So it tapers. Far out the lie is doing its job; close in there is real
-/// vertical structure to read -- buildings, a lean, a street that visibly
-/// climbs -- and the ground can afford to be nearly true.
-pub fn exaggeration(zoom: f64) -> f64 {
-    match zoom {
-        z if z <= 9.0 => 14.0,
-        z if z >= 14.0 => 2.0,
-        z => 14.0 - (z - 9.0) / 5.0 * 12.0,
-    }
-}
-
-/// How firmly the ground is drawn at a zoom, 0 (not at all) to 1.
-///
-/// This used to be `Mode::terrain()`, which is to say a switch at z10, and two
-/// things were wrong with that. The frame whose scalebar reads 10 km sits just
-/// under z10 -- the scale at which a mountain range *is* the subject, and the
-/// one scale that had no ground on it at all. And a switch put a whole
-/// hillside on in one wheel notch: measured over Zanskar on a 150x40 frame,
-/// 726 marks of ink at z9.5 and 5192 at z10.
-///
-/// So it comes up over a zoom instead, and is full before the bar can read
-/// 10 km at all. "Before it can" and not "when it does": the bar is picked
-/// from the cell size and the frame width, so which zoom shows 10 km moves
-/// with the terminal and the latitude -- across 80- to 300-cell frames over
-/// India it is anywhere from z8.15 to z10.1. `NOON` sits under the whole of
-/// that range rather than in the middle of it.
-pub fn ground_strength(zoom: f64) -> f32 {
-    /// First light: below this the ground is not drawn. About a 50 km bar,
-    /// which is roughly where a 30 arcsec heightmap stops having anything to
-    /// say that is not already the shape of the coastline.
-    const DAWN: f64 = 7.0;
-    /// Full strength, under every zoom at which the bar can read 10 km.
-    const NOON: f64 = 8.0;
-    (((zoom - DAWN) / (NOON - DAWN)) as f32).clamp(0.0, 1.0)
-}
+/// What this is measurably *not* is a large saving on our side. Frame time on
+/// a 190x48 view over Gujarat went 7.9 to 7.8 ms at z4.8 and 5.8 to 5.0 at
+/// z6.0, and the bytes on the wire did not move at all -- braille and a square
+/// are both three bytes of UTF-8. The cost braille actually carries is in the
+/// *terminal*, where the glyphs are unusual enough that many emulators fall
+/// off their fast path for them, and that is not something this side can
+/// measure. Worth knowing before anyone credits this with a speed-up it did
+/// not deliver here.
+pub const SQUARE_BELOW: f64 = 7.0;
 
 /// Ground fills are texture, and texture at region scale is just noise.
 pub fn draws_fills(mode: Mode) -> bool {
     mode != Mode::Flat
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The number that made Mumbai into a mountain range.
-    ///
-    /// Measured off the shipped heightmap: the ground under Ghatkopar spans
-    /// 104 m, and the view in the report was 11 km wide. At a flat 14x that is
-    /// 1.46 km of apparent relief -- more than a tenth of the frame, at 69
-    /// degrees of tilt, for ground that barely rises.
-    #[test]
-    fn a_hundred_metre_rise_is_not_drawn_as_a_kilometre() {
-        let ghatkopar_m = 104.0;
-        assert!(
-            ghatkopar_m * exaggeration(12.6) < 700.0,
-            "104 m came out as {} m of apparent relief",
-            ghatkopar_m * exaggeration(12.6)
-        );
-        // But the lie still does its job where it has to: at country scale a
-        // true profile is a flat line.
-        assert_eq!(exaggeration(5.0), 14.0);
-    }
-
-    /// Monotonic, and bounded at both ends. A taper that overshoots would
-    /// invert the terrain, which is a worse bug than the one it replaces.
-    #[test]
-    fn the_taper_only_ever_falls() {
-        let mut last = f64::MAX;
-        let mut z = 3.0;
-        while z <= 20.0 {
-            let e = exaggeration(z);
-            assert!(e <= last + 1e-9, "exaggeration rose at z{z}");
-            assert!((2.0..=14.0).contains(&e), "z{z} gave {e}");
-            last = e;
-            z += 0.1;
-        }
-    }
-
-    /// `v` has to reach every style and come back, however many there are.
-    ///
-    /// Written against a count when there were three, which is how adding a
-    /// fourth broke it: the cycle was fine and the test was counting.
-    #[test]
-    fn the_ground_styles_cycle_through_all_of_themselves() {
-        let all = [Ground::Ribbon, Ground::Contour, Ground::Hachure, Ground::Shade];
-        let mut g = Ground::default();
-        let mut seen = Vec::new();
-        for _ in 0..all.len() {
-            assert!(!seen.contains(&g), "{g:?} came round twice before the cycle closed");
-            seen.push(g);
-            g = g.next();
-        }
-        assert_eq!(g, Ground::default(), "the cycle does not close");
-        for style in all {
-            assert!(seen.contains(&style), "{style:?} is unreachable from the key");
-        }
-    }
-
-    /// The two axes the styles vary on, and they are independent.
-    ///
-    /// `displaces` is whether elevation moves a mark up the screen; `paints`
-    /// is whether the surface gets a stipple at all. Hachure is the one that
-    /// displaces without painting -- it writes the depth buffer so a ridge
-    /// still hides what is behind it, and then says nothing more.
-    #[test]
-    fn only_shade_lies_flat_and_only_hachure_leaves_the_surface_bare() {
-        assert!(!Ground::Shade.displaces());
-        for style in [Ground::Ribbon, Ground::Contour, Ground::Hachure] {
-            assert!(style.displaces(), "{style:?} should read elevation");
-        }
-        assert!(!Ground::Hachure.paints_surface());
-        for style in [Ground::Ribbon, Ground::Contour, Ground::Shade] {
-            assert!(style.paints_surface(), "{style:?} should lay the stipple");
-        }
-    }
 }

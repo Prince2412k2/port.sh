@@ -15,17 +15,6 @@ pub struct SceneOpts<'a> {
     pub highlight: Option<u32>,
     pub show_labels: bool,
     pub road_glyph: RoadGlyph,
-    /// Elevation used to drape geometry in 3D. Without it, roads project at sea
-    /// level while the ground rises above them and nothing lines up.
-    pub terrain: Option<&'a crate::terrain::Terrain>,
-    pub exag: f64,
-    /// Elevation treated as "ground level", metres.
-    ///
-    /// Exaggerating height above *sea* level slides the whole map up the screen
-    /// wherever the land happens to sit high -- a town on a 300 m plateau lifts
-    /// by more than half the frame at 14x, emptying the near half of the view.
-    /// Only relief relative to the local ground is worth exaggerating.
-    pub datum: f32,
     /// Your position, once known.
     pub home: Option<crate::home::Fix>,
     pub road_weight: f64,
@@ -57,7 +46,6 @@ pub struct Stats {
     pub features: usize,
     pub labels: usize,
     pub segments: usize,
-    pub relief: usize,
     pub buildings: usize,
 }
 
@@ -68,11 +56,10 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
     // Per-vertex camera depth, only populated when the camera is tilted.
     let mut zs: Vec<f32> = Vec::with_capacity(512);
     let tilted = !o.vp.is_flat();
-    let drape = if tilted { o.terrain } else { None };
     // The ground slab: features stop where it stops, or roads run out into the
     // black past the edge of the plate.
     let plate = o.vp.plate();
-    let m_per_world = crate::geo::meters_per_world_unit(o.vp.center_lonlat().1);
+    let _m_per_world = crate::geo::meters_per_world_unit(o.vp.center_lonlat().1);
 
     ocean_wash(tiles, canvas, o, &bounds, &mut proj, &mut stats);
 
@@ -102,13 +89,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             zs.clear();
             if tilted {
                 for &p in &f.pts {
-                    let h = match drape {
-                        Some(t) => {
-                            let (lon, lat) = crate::geo::world_to_lonlat(p[0], p[1]);
-                            (t.sample(lon, lat) - o.datum) as f64 * o.exag / m_per_world
-                        }
-                        None => 0.0,
-                    };
+                    let h = 0.0;
                     let m = o.vp.plane_of(p);
                         let outside =
                         m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2];
@@ -159,6 +140,12 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             let mat = match (o.road_glyph, st.mat) {
                 (RoadGlyph::Dotted, MAT_SOLID) => MAT_DOT,
                 (_, m) => m,
+            };
+            // Far enough out, everything is a square. See `SQUARE_BELOW`.
+            let mat = if o.vp.zoom < crate::view::SQUARE_BELOW {
+                crate::canvas::MAT_SQUARE
+            } else {
+                mat
             };
             // Only strokes scale; a dithered fill has no width to speak of.
             let base = if st.mat == MAT_SOLID {
@@ -215,13 +202,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                     let Some((c0, c1)) = clip_to_plate(m0, m1, plate) else { continue };
                     let w0 = o.vp.world_of_plane(c0);
                     let w1 = o.vp.world_of_plane(c1);
-                    let lift = |w: [f64; 2]| match drape {
-                        Some(t) => {
-                            let (lon, lat) = crate::geo::world_to_lonlat(w[0], w[1]);
-                            (t.sample(lon, lat) - o.datum) as f64 * o.exag / m_per_world
-                        }
-                        None => 0.0,
-                    };
+                    let lift = |_w: [f64; 2]| 0.0;
                     let (p0, z0) = o.vp.project3(w0, lift(w0));
                     let (p1, z1) = o.vp.project3(w1, lift(w1));
                     if !z0.is_finite() || !z1.is_finite() {
@@ -345,11 +326,7 @@ fn draw_places(canvas: &mut Canvas, o: &SceneOpts) {
     use crate::canvas::{Overlay, TINT_HOME, TINT_SELECT};
 
     for (i, p) in o.places.iter().enumerate() {
-        let h = match o.terrain {
-            Some(t) => (t.sample(p.lonlat.0, p.lonlat.1) - o.datum) as f64 * o.exag
-                / crate::geo::meters_per_world_unit(o.vp.center_lonlat().1),
-            None => 0.0,
-        };
+        let h = 0.0;
         let (sp, depth) = o.vp.project3(p.world, h);
         if !depth.is_finite() {
             continue;
@@ -382,11 +359,7 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
     use crate::canvas::{Overlay, MAT_DOT, TINT_HOME};
 
     let Some(f) = &o.home else { return };
-    let h = match o.terrain {
-        Some(t) => (t.sample(f.lonlat.0, f.lonlat.1) - o.datum) as f64 * o.exag
-            / crate::geo::meters_per_world_unit(o.vp.center_lonlat().1),
-        None => 0.0,
-    };
+    let h = 0.0;
     let (p, depth) = o.vp.project3(f.world, h);
     if !depth.is_finite() {
         return;
@@ -540,13 +513,7 @@ fn draw_buildings(
         top.clear();
         let mut depth_sum = 0.0f32;
         for &p in &f.pts {
-            let ground = match o.terrain {
-                Some(t) => {
-                    let (lon, lat) = crate::geo::world_to_lonlat(p[0], p[1]);
-                    (t.sample(lon, lat) - o.datum) as f64 * o.exag / m_per_world
-                }
-                None => 0.0,
-            };
+            let ground = 0.0;
             // Building height is not exaggerated the way terrain is: at street
             // zoom a real tower is already tall on screen, and doubling it just
             // shears the skyline.

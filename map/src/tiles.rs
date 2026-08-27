@@ -24,7 +24,6 @@ const MAX_TILES_PER_VIEW: usize = 40;
 pub struct Source {
     backend: Backend,
     /// Elevation, if a heightmap was found. Shared by every frame.
-    pub terrain: Option<crate::terrain::Terrain>,
     /// Always-resident features drawn over whatever the backend returns.
     /// Administrative boundaries live here: the basemap has none, and they are
     /// small enough that streaming them would be pure overhead.
@@ -41,21 +40,9 @@ impl Source {
     pub fn open(path: Option<&str>) -> Self {
         let mut src = Source {
             backend: Backend::open(path),
-            terrain: None,
             overlays: Vec::new(),
         };
-        for c in ["india.tmhg", "terrain.tmhg"].iter().filter_map(|n| crate::paths::data_file(n)) {
-            {
-                match crate::terrain::Terrain::open(Path::new(&c)) {
-                    Ok(t) => {
-                        src.terrain = Some(t);
-                        break;
-                    }
-                    Err(e) => eprintln!("termap: {}: {e}", c.display()),
-                }
-            }
-        }
-        for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
+                for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
             if let Ok(text) = std::fs::read_to_string(&c) {
                 let feats = crate::data::parse_features(&text);
                 if !feats.is_empty() {

@@ -185,15 +185,6 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(" termap ", Style::default().fg(th.page()).bg(th.ink()).add_modifier(Modifier::BOLD)),
         Span::styled(" 0.1.0", Style::default().fg(th.faint())),
         Span::styled("  │  ", Style::default().fg(th.ghost())),
-        Span::styled(app.mode().label(), Style::default().fg(th.ink())),
-        // The zoom mode and the ground style are different things and both were
-        // called RELIEF here, which made comparing the three impossible: the
-        // header said the same word whichever one was on screen.
-        Span::styled(
-            format!(" {}", app.ground.label()),
-            Style::default().fg(if app.show_terrain { th.faint() } else { th.ghost() }),
-        ),
-        Span::styled("  │  ", Style::default().fg(th.ghost())),
         Span::styled(app.source.label().to_string(), Style::default().fg(th.faint())),
     ]);
 
@@ -303,7 +294,6 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
         ("u o", "tilt"),
         (", .", "rotate"),
         ("m", "auto / manual cam"),
-        ("(", "terrain"),
         ("x", "my location"),
         ("c", "colour / mono"),
         ("i", "ink / light"),
@@ -352,18 +342,6 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Ground level under the view: everything vertical is measured from here.
-    let (clon, clat) = app.vp.center_lonlat();
-    let datum = app
-        .source
-        .terrain
-        .as_ref()
-        .map_or(0.0, |t| t.sample(clon, clat));
-
-    // How firmly the ground shows at this zoom -- 0 well out, full by the time
-    // the scalebar reads 10 km. Read once: the scene drapes onto the terrain
-    // only if the relief pass is going to draw it.
-    let ground = if app.show_terrain { crate::view::ground_strength(app.vp.zoom) } else { 0.0 };
-
     // Worked out first so the label placer can treat it as occupied space.
     let sb = scalebar_geom(area, app);
 
@@ -376,50 +354,13 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         show_labels: app.show_labels,
         road_glyph: app.road_glyph,
         mode: app.mode(),
-        terrain: if ground > 0.0 { app.source.terrain.as_ref() } else { None },
-        exag: crate::view::exaggeration(app.vp.zoom),
-        datum,
         home: app.home.lock().unwrap().clone(),
         road_weight: app.road_weight,
         reserved: sb.as_ref().map(|s| s.local),
         places: if app.tour.active { &app.tour.places } else { &[] },
         place_at: app.tour.at,
     };
-    // Terrain first: it is the ground everything else sits on, and the depth
-    // buffer sorts out what ends up hidden behind a ridge.
-    let mut relief_pts = 0;
-    if ground > 0.0 {
-        if let Some(t) = app.source.terrain.as_ref() {
-            let exag = crate::view::exaggeration(app.vp.zoom);
-            relief_pts = app.relief.draw(
-                t,
-                &mut app.canvas,
-                &app.vp,
-                crate::relief::Plot {
-                    datum,
-                    exag,
-                    ground: app.ground,
-                    strength: ground,
-                },
-            );
-            // The ground's outline, straight off the depth buffer the relief
-            // pass just wrote, and before the features go down so that this
-            // outlines terrain rather than everything on the frame.
-            // Inside the ground slab, so the slab's own cut is not mistaken
-            // for the edge of a mountain.
-            let vp = app.vp;
-            let plate = vp.plate();
-            app.canvas.rim(crate::canvas::RIM_STEP, ground, |x, y| {
-                if vp.is_flat() {
-                    return true;
-                }
-                let m = vp.plane_of(vp.unproject([x as f64, y as f64]));
-                m[0].abs() <= plate[0] && m[1] >= plate[1] && m[1] <= plate[2]
-            });
-        }
-    }
     app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);
-    app.stats.relief = relief_pts;
     app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono, th);
     app.frame_us = t0.elapsed().as_micros();
 
@@ -899,8 +840,6 @@ fn help(f: &mut Frame, area: Rect, th: Theme) {
         // embeds this map owns those for moving between sections.
         row("! @ # $ % ^ & *", "toggle a layer (see the panel)"),
         row(")", "all layers on"),
-        row("(", "terrain relief"),
-        row("v", "relief / contour / hachure / shade"),
         row("x", "my location"),
         row("i", "ink on paper / light on black"),
         row("t", "toggle labels"),
@@ -928,44 +867,6 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-
-    /// The frame whose scalebar reads 10 km has ground on it.
-    ///
-    /// That scale is where a mountain range is the subject rather than the
-    /// backdrop, and it used to be the one scale with no terrain at all: the
-    /// old switch was `Mode::Relief` at z10, and the 10 km bar falls just
-    /// under. Over Zanskar on a 150x40 frame that was 726 marks of ink at
-    /// z9.5 against 5192 one notch further in.
-    ///
-    /// Swept rather than spot-checked, because the bar is chosen from the cell
-    /// size and the frame width, so the zoom it lands on moves with the
-    /// terminal and with the latitude.
-    #[test]
-    fn wherever_the_bar_reads_ten_kilometres_the_ground_is_drawn() {
-        let mut seen = 0;
-        for width in [80u16, 120, 150, 200, 300] {
-            for lat in [8.1f64, 19.08, 23.02, 33.47] {
-                for step in 0..200 {
-                    let zoom = 5.0 + step as f64 * 0.05;
-                    let m_per_cell = crate::geo::meters_per_world_unit(lat)
-                        / (256.0 * 2f64.powf(zoom))
-                        * crate::canvas::SUB_X as f64;
-                    if bar_metres(m_per_cell, width) != 10_000.0 {
-                        continue;
-                    }
-                    seen += 1;
-                    assert_eq!(
-                        crate::view::ground_strength(zoom),
-                        1.0,
-                        "a {width}-wide frame at {lat} N, z{zoom:.2}, reads 10 km \
-                         with the ground at {}",
-                        crate::view::ground_strength(zoom)
-                    );
-                }
-            }
-        }
-        assert!(seen > 20, "the sweep only found {seen} frames at 10 km");
-    }
 
     /// The exact shape of a bug that was live: the renderer emits palette
     /// indices for neutral cells, `toward_bg` only understood `Color::Rgb`, and

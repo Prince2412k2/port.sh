@@ -31,11 +31,6 @@ const DOT_ON: f32 = 0.34;
 /// terrain read as one flat texture.
 const INK_FLOOR: f32 = 0.06;
 
-/// How far the ground has to step, in normalised depth, before the near side
-/// of the step is outlined. Roughly one `VEIL_STEP`: the same distance the
-/// veil already treats as "a layer further back".
-pub const RIM_STEP: f32 = 0.03;
-
 /// Shapes coverage into tone. Below 1 it lifts faint marks, which is what
 /// makes a low floor survivable.
 const INK_GAMMA: f32 = 0.5;
@@ -678,95 +673,6 @@ impl Canvas {
         }
     }
 
-    /// Draw the edge of the ground: everywhere it stops, or steps.
-    ///
-    /// The thing that makes a braille surface read as a *surface* rather than
-    /// as texture. A field of dots has no boundary, so the eye has nothing to
-    /// segment on and reads the whole frame as one material -- which is the
-    /// entire complaint about terrain here, and it is not a complaint about
-    /// braille. Give the same dots an outline and they become a mass with an
-    /// inside and an outside.
-    ///
-    /// Two kinds of edge, and both come off the depth buffer rather than out
-    /// of the heightmap, so this needs no geometry and no detection:
-    ///
-    /// * ground next to no ground -- the outer boundary,
-    /// * ground next to ground a long way further off -- a step, which is one
-    ///   landform standing in front of another. That is the outline that makes
-    ///   a near ridge separate from the range behind it instead of merging
-    ///   into it.
-    ///
-    /// The near side is the one that gets the mark. An outline belongs to the
-    /// thing in front; drawn on the far side it reads as a shadow cast by
-    /// nothing.
-    ///
-    /// Collected before anything is drawn, because plotting writes coverage
-    /// and tint that the scan would otherwise pick up as it went and trail an
-    /// edge along behind itself.
-    pub fn rim(&mut self, jump: f32, alpha: f32, on_ground: impl Fn(usize, usize) -> bool) {
-        let mut edge: Vec<(usize, f32, u8)> = Vec::new();
-        let mark = |a: usize, b: usize, this: &Self, out: &mut Vec<(usize, f32, u8)>| {
-            let (za, zb) = (this.zbuf[a], this.zbuf[b]);
-            match (za.is_finite(), zb.is_finite()) {
-                // An outer boundary is only an outline if the empty side is
-                // genuinely empty. Where it is merely *outside the sampled
-                // slab*, the ground carries on and the edge belongs to the
-                // renderer rather than to the landform -- outlined, it drew a
-                // rectangle around the map, which is the "square frame" that
-                // kept coming back. Screen border and plate edge are the same
-                // mistake; the caller answers for both.
-                (true, false) if on_ground(b % this.sw, b / this.sw) => {
-                    out.push((a, za, this.tint[a]))
-                }
-                (false, true) if on_ground(a % this.sw, a / this.sw) => {
-                    out.push((b, zb, this.tint[b]))
-                }
-                (true, true) if (za - zb).abs() > jump => {
-                    let near = if za < zb { a } else { b };
-                    out.push((near, this.zbuf[near], this.tint[near]));
-                }
-                _ => {}
-            }
-        };
-        // The frame is not a landform. Ground running off the side of the
-        // screen has no edge there -- it carries on -- and outlining it drew a
-        // box round the map, which read as a border on the *window* rather
-        // than on anything in it.
-        for y in 1..self.sh.saturating_sub(2) {
-            for x in 1..self.sw.saturating_sub(2) {
-                let i = y * self.sw + x;
-                mark(i, i + 1, self, &mut edge);
-                mark(i, i + self.sw, self, &mut edge);
-            }
-        }
-        for (i, depth, tint) in edge {
-            let (x, y) = ((i % self.sw) as isize, (i / self.sw) as isize);
-            self.plot(
-                x,
-                y,
-                alpha,
-                &Brush {
-                    depth,
-                    tint,
-                    // Squares, not braille. A run of braille dots along an
-                    // edge is a dotted trail, and where edges crowd -- which
-                    // is wherever the ground is dissected, so exactly where an
-                    // outline is worth having -- the trails cross and the
-                    // whole thing goes back to being texture. A square closes
-                    // the gaps, so an edge stays one mark wide however many of
-                    // them there are.
-                    mat: MAT_SQUARE,
-                    pick: u32::MAX,
-                    // It is the boundary of the nearest thing in its column,
-                    // so there is nothing it could be behind, and a z-fight
-                    // with the surface it is the edge of would break the line
-                    // exactly where it has to hold.
-                    behind: Behind::Ignore,
-                },
-            );
-        }
-    }
-
     /// Claim a subpixel as solid without painting it.
     ///
     /// Terrain is drawn as a stipple but is geometrically opaque; without this
@@ -1171,82 +1077,6 @@ mod rim_tests {
             "U+25FE is East Asian Wide and will tear the row it lands on"
         );
         assert!(!SQUARES.contains(&'\u{25FD}'), "U+25FD is Wide too");
-    }
-
-    /// The ladder climbs: more of the cell covered means a heavier square.
-    #[test]
-    fn the_square_ladder_climbs_with_coverage() {
-        let mut c = Canvas::new(3, 1);
-        let ink = |c: &Canvas, cx: usize| {
-            let mut sum = 0.0;
-            for row in 0..SUB_Y {
-                for col in 0..SUB_X {
-                    sum += c.cov[row * c.sw + cx * SUB_X + col];
-                }
-            }
-            sum
-        };
-        let brush = Brush {
-            depth: 0.5,
-            tint: TINT_GREEN,
-            mat: MAT_SQUARE,
-            pick: u32::MAX,
-            behind: Behind::Ignore,
-        };
-        // Three cells, each covered a bit more than the last.
-        for (cx, n) in [(0usize, 1usize), (1, 4), (2, 8)] {
-            for k in 0..n {
-                c.plot((cx * SUB_X + k % SUB_X) as isize, (k / SUB_X) as isize, 1.0, &brush);
-            }
-        }
-        assert!(ink(&c, 0) < ink(&c, 1) && ink(&c, 1) < ink(&c, 2));
-        // And the ladder index those coverages land on must climb too.
-        let rung = |fill: f32| ((fill * 3.0) as usize).min(2);
-        assert_eq!(rung(0.1), 0);
-        assert_eq!(rung(0.5), 1);
-        assert_eq!(rung(1.0), 2);
-    }
-
-    /// Ground that stops gets an edge; ground that goes on does not.
-    #[test]
-    fn the_rim_marks_where_the_ground_ends() {
-        let mut c = Canvas::new(8, 4);
-        // A block of surface occupying the left half, at one depth.
-        for y in 0..c.sh {
-            for x in 0..c.sw / 2 {
-                c.occlude_at(x as isize, y as isize, 0.5);
-            }
-        }
-        c.rim(0.03, 1.0, |_, _| true);
-        // The last covered column is the boundary and gets marked; the middle
-        // of the slab is interior and must stay clean, or the outline is not
-        // an outline, it is a wash.
-        let at = |x: usize, y: usize| c.cov[y * c.sw + x];
-        assert!(at(c.sw / 2 - 1, 2) > 0.0, "the edge of the ground was not drawn");
-        // ...but not along the frame, which is a window and not a landform.
-        assert_eq!(at(0, 2), 0.0, "the screen edge was outlined");
-        assert_eq!(at(1, 2), 0.0, "the inside of the ground was drawn as edge");
-        assert_eq!(at(c.sw / 2, 2), 0.0, "the empty side was drawn as edge");
-    }
-
-    /// A step in the ground is outlined on the near side of the step.
-    ///
-    /// An outline belongs to the thing in front. Put it on the far side and it
-    /// reads as a shadow cast by nothing.
-    #[test]
-    fn a_step_in_the_ground_is_outlined_on_the_near_side() {
-        let mut c = Canvas::new(8, 4);
-        for y in 0..c.sh {
-            for x in 0..c.sw {
-                // Near ground on the left, far ground on the right.
-                let z = if x < c.sw / 2 { 0.2 } else { 0.8 };
-                c.occlude_at(x as isize, y as isize, z);
-            }
-        }
-        c.rim(0.03, 1.0, |_, _| true);
-        let at = |x: usize, y: usize| c.cov[y * c.sw + x];
-        assert!(at(c.sw / 2 - 1, 2) > 0.0, "the near side of the step is bare");
-        assert_eq!(at(c.sw / 2, 2), 0.0, "the far side of the step was outlined");
     }
 
 }

@@ -12,7 +12,7 @@ use ratatui::Terminal;
 
 use termap::app::App;
 use termap::tiles::Source;
-use termap::{canvas, snapshot, style, ui, view};
+use termap::{canvas, snapshot, style, ui};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -35,7 +35,6 @@ fn main() -> io::Result<()> {
                 println!("  --cursor X,Y     place the focus cursor (snapshot only)");
                 println!("  --focus MODE     depth focus: off | subtle | strong");
                 println!("  --roads MODE     road glyphs: braille | blocks | lines");
-                println!("  --ground MODE    terrain: relief | contour | hachure | shade");
                 println!("  --weight W       stroke width multiplier (0.4 - 2.5)");
                 println!("  --center LON,LAT centre the view");
                 println!("  --tilt DEG       camera pitch (0 = flat 2D)");
@@ -62,7 +61,6 @@ fn main() -> io::Result<()> {
                     cursor: None,
                     focus: None,
                     roads: None,
-                    ground: None,
                     weight: None,
                     center: None,
                     tilt: None,
@@ -113,18 +111,6 @@ fn main() -> io::Result<()> {
                 };
                 if let Some(s) = shot.as_mut() {
                     s.roads = g;
-                }
-            }
-            "--ground" => {
-                let g = match args.next().as_deref() {
-                    Some("relief") => Some(view::Ground::Ribbon),
-                    Some("contour") => Some(view::Ground::Contour),
-                    Some("shade") => Some(view::Ground::Shade),
-                    Some("hachure") => Some(view::Ground::Hachure),
-                    _ => None,
-                };
-                if let Some(s) = shot.as_mut() {
-                    s.ground = g;
                 }
             }
             "--weight" => {
