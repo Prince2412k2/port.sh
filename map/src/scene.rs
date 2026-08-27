@@ -72,7 +72,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             continue;
         }
         let floor = crate::view::rank_floor(layer, o.vp.zoom);
-        let min_extent = crate::view::min_extent(layer, o.vp.zoom);
+        let min_world = crate::view::min_extent(layer, o.vp.zoom) / o.vp.scale();
         // Ground fills are texture; at region scale texture reads as static.
         if st.density > 0 && !crate::view::draws_fills(o.mode) {
             continue;
@@ -82,6 +82,21 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
         for &idx in &tile.by_layer[layer.index()] {
             let f = &tile.features[idx as usize];
             if f.rank < floor || !f.visible_in(&bounds) {
+                continue;
+            }
+            // Too small on screen to be a line rather than a speck.
+            //
+            // Off the *world* bbox, before anything is projected. The first
+            // version measured the projected points, which meant every one of
+            // ninety thousand candidates was transformed before being thrown
+            // away -- at country zoom that cost more than the rank test it
+            // replaced, 2.1 ms to 6.1 ms on a frame that drew fewer features.
+            // A world extent times the scale is the screen extent to within
+            // the tilt, and the tilt does not decide whether a speck is a
+            // speck.
+            if min_world > 0.0
+                && (f.bbox[2] - f.bbox[0]).max(f.bbox[3] - f.bbox[1]) < min_world
+            {
                 continue;
             }
 
@@ -116,17 +131,6 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             // are further apart than the plate is wide.
             let is_area = (st.density > 0 && f.closed) || st.dash.is_some();
             if tilted && is_area && zs.iter().any(|z| !z.is_finite()) {
-                continue;
-            }
-            // Too small on screen to be a line rather than a speck.
-            let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-            for p in &proj {
-                if p[0].is_finite() && p[1].is_finite() {
-                    (x0, x1) = (x0.min(p[0]), x1.max(p[0]));
-                    (y0, y1) = (y0.min(p[1]), y1.max(p[1]));
-                }
-            }
-            if (x1 - x0).max(y1 - y0) < min_extent {
                 continue;
             }
             stats.features += 1;

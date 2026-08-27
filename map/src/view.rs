@@ -75,10 +75,18 @@ pub fn auto_persp(zoom: f64) -> f64 {
 /// legible, and detail should arrive as you approach it.
 pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
     match layer {
+        // No step across 215 anywhere in here, and that is the whole point.
+        // The ranks in this basemap fall into three tiers with nothing between
+        // them -- measured at z4.8 on a 190x48 frame, a floor of 215 admits
+        // 2072 features, 216 admits 135, and 222 admits four. A ladder that
+        // steps over 215/216 therefore multiplies the frame by fifteen in one
+        // wheel notch, which is what this did at z4.5: 67 features became
+        // 1498 and the frame went from 2.1 ms to 7.9.
+        //
+        // So rank stops trying to control density down here and `min_extent`
+        // does it instead, because screen extent is continuous and rank is not.
         Layer::RoadMajor => match zoom {
-            z if z < 4.5 => 219,
-            z if z < 6.5 => 214,
-            z if z < 8.5 => 200,
+            z if z < 8.5 => 214,
             _ => 0,
         },
         Layer::RoadMedium => match zoom {
@@ -113,12 +121,11 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
     if !matches!(layer, Layer::RoadMajor | Layer::RoadMedium | Layer::RoadMinor | Layer::Rail) {
         return 0.0;
     }
-    match zoom {
-        z if z < 6.0 => 1.5,
-        z if z < 8.0 => 1.0,
-        z if z < 10.0 => 0.5,
-        _ => 0.0,
-    }
+    // Continuous, because this is now the only thing holding density down at
+    // region zoom and a step here is a cliff on screen. Five subpixels at z4
+    // easing to nothing by z10: features arrive as the frame grows enough to
+    // hold them, a few at a time, instead of fifteen hundred at once.
+    ((10.0 - zoom) * 0.85).clamp(0.0, 5.0)
 }
 
 
@@ -127,4 +134,47 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
 /// Ground fills are texture, and texture at region scale is just noise.
 pub fn draws_fills(mode: Mode) -> bool {
     mode != Mode::Flat
+}
+
+/// Density has to change smoothly with zoom, and rank cannot make it.
+#[cfg(test)]
+mod density_tests {
+    use super::*;
+
+    /// No wheel notch may more than double the work.
+    ///
+    /// The rank tiers below are measured, not invented: at z4.8 on a 190x48
+    /// frame a floor of 215 admits 2072 features, 216 admits 135, 222 admits
+    /// four. Rank alone cannot step between those without a cliff, so this
+    /// checks the rank floor and the extent ramp *together* -- which is the
+    /// only level at which the question has an answer.
+    #[test]
+    fn no_wheel_notch_doubles_the_map() {
+        let admitted = |zoom: f64| -> f64 {
+            let floor = rank_floor(Layer::RoadMajor, zoom);
+            let tier = if floor <= 215 {
+                2072.0
+            } else if floor <= 221 {
+                135.0
+            } else {
+                4.0
+            };
+            // Longer features are rarer, roughly as the square of the length
+            // once they are fragments of a network. Good enough to catch a
+            // cliff, which is all this is for.
+            let e = min_extent(Layer::RoadMajor, zoom).max(0.2);
+            tier / (e * e)
+        };
+        let mut prev = admitted(4.0);
+        let mut z = 4.1;
+        while z <= 12.0 {
+            let now = admitted(z);
+            assert!(
+                now <= prev * 2.0,
+                "z{z:.1} admits {now:.0} against {prev:.0} one notch earlier"
+            );
+            prev = now;
+            z += 0.1;
+        }
+    }
 }
