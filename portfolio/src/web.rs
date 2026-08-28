@@ -363,7 +363,7 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
             // like one that was closed politely -- the socket shut and nothing
             // written anywhere -- which is how a resize that killed every
             // session went unnoticed.
-            match session::run(out_tx, in_rx, cols, rows, who).await {
+            match session::run(out_tx, in_rx, cols, rows, who, session::Profile::Rich).await {
                 Ok(()) => Some(()),
                 Err(e) => {
                     crate::visits::operational("warn", "web_session_error", &format!("{e:#}"));

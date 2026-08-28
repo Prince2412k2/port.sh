@@ -33,6 +33,14 @@ use crate::wire::{Decoder, DISABLE_KEYS, DISABLE_MOUSE, ENABLE_KEYS, ENABLE_MOUS
 const TERMINAL_PROBE_WINDOW: Duration = Duration::from_secs(2);
 
 /// What a transport sends *to* a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// Rich local/browser rendering, where a GPU consumes the ANSI stream.
+    Rich,
+    /// Network terminal rendering: fewer frames and an indexed colour stream.
+    Ssh,
+}
+
 pub enum In {
     Bytes(Vec<u8>),
     Resize(u16, u16),
@@ -93,6 +101,7 @@ pub struct FrameSink {
     tx: Sender<Vec<u8>>,
     buf: Vec<u8>,
     ascii: Option<Arc<AtomicBool>>,
+    indexed: bool,
 }
 
 impl FrameSink {
@@ -101,14 +110,53 @@ impl FrameSink {
             tx,
             buf: Vec::new(),
             ascii: None,
+            indexed: false,
         }
     }
 
-    fn negotiating(tx: Sender<Vec<u8>>, ascii: Arc<AtomicBool>) -> Self {
+    fn negotiating(tx: Sender<Vec<u8>>, ascii: Arc<AtomicBool>, indexed: bool) -> Self {
         let mut sink = Self::new(tx);
         sink.ascii = Some(ascii);
+        sink.indexed = indexed;
         sink
     }
+}
+
+/// Replace true-colour SGR parameters with the nearest xterm-256 cube entry.
+/// SSH terminals pay to parse every decimal digit as well as receive it; this
+/// cuts coloured style changes roughly in half while preserving their hue.
+fn indexed_frame(bytes: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(&bytes) else { return bytes };
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("\x1b[") {
+        out.push_str(&rest[..at]);
+        let sgr = &rest[at + 2..];
+        let Some(end) = sgr.find('m') else { out.push_str(&rest[at..]); return out.into_bytes() };
+        let params = &sgr[..end];
+        let parts: Vec<&str> = params.split(';').collect();
+        let mut i = 0;
+        out.push_str("\x1b[");
+        let mut emitted = Vec::new();
+        while i < parts.len() {
+            if i + 4 < parts.len() && matches!(parts[i], "38" | "48") && parts[i + 1] == "2" {
+                let rgb = (parts[i + 2].parse::<u8>(), parts[i + 3].parse::<u8>(), parts[i + 4].parse::<u8>());
+                if let (Ok(r), Ok(g), Ok(b)) = rgb {
+                    let q = |v: u8| ((v as u16 * 5 + 127) / 255) as u8;
+                    emitted.push(format!("{};5;{}", parts[i], 16 + 36 * q(r) + 6 * q(g) + q(b)));
+                    i += 5;
+                    continue;
+                }
+            }
+            emitted.push(parts[i].to_string());
+            i += 1;
+        }
+        out.push_str(&emitted.join(";"));
+        out.push('m');
+        rest = &sgr[end + 1..];
+    }
+    out.push_str(rest);
+    out.into_bytes()
 }
 
 fn ascii_frame(bytes: Vec<u8>) -> Vec<u8> {
@@ -145,6 +193,9 @@ impl std::io::Write for FrameSink {
             return Ok(());
         }
         let mut payload = std::mem::take(&mut self.buf);
+        if self.indexed {
+            payload = indexed_frame(payload);
+        }
         if self.ascii.as_ref().is_some_and(|ascii| ascii.load(Ordering::Relaxed)) {
             payload = ascii_frame(payload);
         }
@@ -310,6 +361,7 @@ pub async fn run(
     cols: u16,
     rows: u16,
     who: crate::visits::Who,
+    profile: Profile,
 ) -> anyhow::Result<()> {
     let options = TerminalOptions {
         viewport: Viewport::Fixed(Rect::new(0, 0, cols.max(20), rows.max(6))),
@@ -317,7 +369,7 @@ pub async fn run(
     let ascii = Arc::new(AtomicBool::new(true));
     let mut terminal: Term = Terminal::with_options(
         SessionBackend::new(
-            FrameSink::negotiating(out, Arc::clone(&ascii)),
+            FrameSink::negotiating(out, Arc::clone(&ascii), profile == Profile::Ssh),
             cols.max(20),
             rows.max(6),
         ),
@@ -346,8 +398,14 @@ pub async fn run(
     // by the time it arrives.
     let mut visit = crate::visits::Visit::open(who);
     let mut shell = Shell::new();
+    // A remote terminal is a serial painter rather than a GPU. Static boot and
+    // immediate transitions avoid repainting nearly every cell merely to show
+    // the cells between two useful states.
+    if profile == Profile::Ssh {
+        shell.set_reduced_motion(true);
+    }
     shell.ask.restore(visit.take_saved());
-    let outcome = pump(&mut terminal, &mut shell, &mut input, &mut visit, &ascii).await;
+    let outcome = pump(&mut terminal, &mut shell, &mut input, &mut visit, &ascii, profile).await;
     visit.close();
 
     // Whatever happened up there, the visitor's terminal gets put back. This
@@ -409,6 +467,7 @@ async fn pump(
     input: &mut UnboundedReceiver<In>,
     visit: &mut crate::visits::Visit,
     ascii: &Arc<AtomicBool>,
+    profile: Profile,
 ) -> anyhow::Result<()> {
     let mut decoder = Decoder::default();
     let probe_until = Instant::now() + TERMINAL_PROBE_WINDOW;
@@ -420,10 +479,13 @@ async fn pump(
     settle(terminal).await;
     terminal.draw(|f| shell.render(f))?;
 
+    let mut pressure_ms = 0u64;
     loop {
-        // The frame interval is whatever the current section asks for, so a
-        // still page costs nothing and a camera flight gets smooth frames.
-        let wait = Duration::from_millis(shell.frame_ms());
+        // SSH is capped at 12.5 fps. If its one-frame channel remains occupied,
+        // back off further instead of repeatedly waking to discover the same
+        // slow client; recover gradually as soon as writes keep up.
+        let base_ms = if profile == Profile::Ssh { shell.frame_ms().max(80) } else { shell.frame_ms() };
+        let wait = Duration::from_millis(base_ms + pressure_ms);
         let mut ticker = interval(wait);
         ticker.tick().await; // the first tick fires immediately; skip it
 
@@ -494,6 +556,9 @@ async fn pump(
         std::io::Write::flush(terminal.backend_mut())?;
         if terminal.backend().ready() {
             terminal.draw(|f| shell.render(f))?;
+            pressure_ms = pressure_ms.saturating_sub(10);
+        } else if profile == Profile::Ssh {
+            pressure_ms = (pressure_ms + 40).min(320);
         }
     }
     Ok(())
@@ -626,6 +691,7 @@ mod tests {
                 cols,
                 rows,
                 crate::visits::Who::default(),
+                Profile::Rich,
             ));
             // `run` has dropped its sender by now, so this ends on its own.
             let _ = rt.block_on(draining);
@@ -644,6 +710,21 @@ mod tests {
     #[test]
     fn an_unidentified_terminal_gets_ascii_art() {
         assert_eq!(String::from_utf8(ascii_frame("╭─◆→⣿".as_bytes().to_vec())).unwrap(), "+-*>.");
+    }
+
+    #[test]
+    fn ssh_truecolour_is_compacted_to_the_xterm_cube() {
+        let input = b"before\x1b[1;38;2;255;0;128;48;2;0;255;0mcolour\x1b[0mafter".to_vec();
+        assert_eq!(
+            String::from_utf8(indexed_frame(input)).unwrap(),
+            "before\x1b[1;38;5;199;48;5;46mcolour\x1b[0mafter"
+        );
+    }
+
+    #[test]
+    fn incomplete_sgr_is_left_untouched() {
+        let input = b"text\x1b[38;2;1".to_vec();
+        assert_eq!(indexed_frame(input.clone()), input);
     }
 
     /// The regression this file earned the hard way.

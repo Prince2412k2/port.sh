@@ -912,7 +912,7 @@ async fn run_session(
         }
     });
 
-    let outcome = session::run(out_tx, in_rx, cols, rows, who).await;
+    let outcome = session::run(out_tx, in_rx, cols, rows, who, session::Profile::Ssh).await;
 
     // The last frame a session writes is the one that puts the terminal back --
     // mouse reporting off, cursor shown. `run` has only queued it: the sender
