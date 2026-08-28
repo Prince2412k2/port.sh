@@ -164,11 +164,11 @@ macro_rules! vendor_asset {
     };
 }
 
-vendor_asset!(xterm_css, "text/css; charset=utf-8", "../data/vendor/v1/xterm.css");
-vendor_asset!(xterm_js, "text/javascript; charset=utf-8", "../data/vendor/v1/xterm.js");
-vendor_asset!(addon_fit_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-fit.js");
-vendor_asset!(addon_webgl_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-webgl.js");
-vendor_asset!(addon_canvas_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-canvas.js");
+vendor_asset!(xterm_css, "text/css; charset=utf-8", "../data/vendor/xterm.css");
+vendor_asset!(xterm_js, "text/javascript; charset=utf-8", "../data/vendor/xterm.js");
+vendor_asset!(addon_fit_js, "text/javascript; charset=utf-8", "../data/vendor/addon-fit.js");
+vendor_asset!(addon_webgl_js, "text/javascript; charset=utf-8", "../data/vendor/addon-webgl.js");
+vendor_asset!(addon_canvas_js, "text/javascript; charset=utf-8", "../data/vendor/addon-canvas.js");
 
 async fn page(
     State(state): State<Web>,
