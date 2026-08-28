@@ -268,25 +268,13 @@ BuildKit caches on the box, which is what keeps a one-line change from
 recompiling four hundred crates. They grow. `docker builder prune` when the
 disk starts to matter; the next deploy is slow once and then fast again.
 
-### One thing still outside
+### Browser assets
 
-The browser fetches xterm from `cdn.jsdelivr.net`, which is the only thing on
-the page that comes from anywhere but this box. If it does not arrive the page
-says so and points at the ssh line rather than showing a black rectangle, but
-that is a fallback and not a fix. Two ways to close it, whenever it is worth
-doing: pin what is fetched, which is a one-time job per version --
-
-```bash
-for f in xterm@5.3.0/lib/xterm.js xterm-addon-fit@0.8.0/lib/addon-fit.js; do
-  curl -sL "https://cdn.jsdelivr.net/npm/$f" |
-    openssl dgst -sha384 -binary | openssl base64 -A | sed "s|^|$f sha384-|"
-done
-```
-
--- and put each hash in an `integrity=` on its tag, so a compromised CDN is a
-page that does not load rather than a page that runs somebody else's code. Or
-vendor the four files into the image and serve them from here, which ends the
-question but means tracking their releases by hand.
+The pinned xterm runtime and its addons live in `portfolio/data/vendor/` and
+are served by the portfolio itself with immutable one-year caching. The page,
+font and terminal runtime therefore have no third-party network dependency.
+Updating xterm means replacing those five files together and deploying a new
+image.
 
 ## The web terminal
 

@@ -81,6 +81,11 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
         .route("/", get(page))
         .route("/ws", get(upgrade))
         .route(FONT_URL, get(font))
+        .route("/vendor/v1/xterm.css", get(xterm_css))
+        .route("/vendor/v1/xterm.js", get(xterm_js))
+        .route("/vendor/v1/addon-fit.js", get(addon_fit_js))
+        .route("/vendor/v1/addon-webgl.js", get(addon_webgl_js))
+        .route("/vendor/v1/addon-canvas.js", get(addon_canvas_js))
         .with_state(state);
 
     let bind: SocketAddr = format!("{addr}:{port}").parse()?;
@@ -131,25 +136,39 @@ pub async fn serve(addr: &str, port: u16) -> anyhow::Result<()> {
 /// the layout had to move.
 ///
 /// Subset to the 943 glyphs this app can emit, it is 22 KB, which is small
-/// enough to carry rather than fetch. Served from here rather than from the
-/// CDN the terminal comes from: the page already degrades honestly when
-/// jsdelivr is unreachable, and there is no reason to add a second thing that
-/// can be blocked for a file this size.
+/// enough to carry. The terminal runtime is vendored here too: startup has no
+/// third-party network dependency and every immutable asset shares one origin.
 const FONT_URL: &str = "/iosevka.woff2";
 const FONT: &[u8] = include_bytes!("../data/iosevka-portfolio.woff2");
 
 async fn font() -> Response {
+    immutable("font/woff2", FONT)
+}
+
+fn immutable(content_type: &'static str, body: &'static [u8]) -> Response {
     (
         [
-            ("content-type", "font/woff2"),
-            // Immutable: the name changes when the file does, because the file
-            // is part of the binary that serves it.
+            ("content-type", content_type),
             ("cache-control", "public, max-age=31536000, immutable"),
         ],
-        FONT,
+        body,
     )
         .into_response()
 }
+
+macro_rules! vendor_asset {
+    ($handler:ident, $mime:literal, $path:literal) => {
+        async fn $handler() -> Response {
+            immutable($mime, include_bytes!($path))
+        }
+    };
+}
+
+vendor_asset!(xterm_css, "text/css; charset=utf-8", "../data/vendor/v1/xterm.css");
+vendor_asset!(xterm_js, "text/javascript; charset=utf-8", "../data/vendor/v1/xterm.js");
+vendor_asset!(addon_fit_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-fit.js");
+vendor_asset!(addon_webgl_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-webgl.js");
+vendor_asset!(addon_canvas_js, "text/javascript; charset=utf-8", "../data/vendor/v1/addon-canvas.js");
 
 async fn page(
     State(state): State<Web>,
@@ -161,7 +180,11 @@ async fn page(
             crate::visits::operational("warn", "web_page_refused", &key);
             too_many()
         }
-        _ => Html(INDEX).into_response(),
+        _ => (
+            [("cache-control", "public, max-age=300, stale-while-revalidate=86400")],
+            Html(INDEX),
+        )
+            .into_response(),
     }
 }
 
@@ -277,13 +300,28 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
     // One frame deep, matching ssh. See `session::FrameSink`.
     let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
     let (in_tx, in_rx) = unbounded_channel::<session::In>();
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
 
-    // Frames out. Binary, not text: these are ANSI bytes and some of them are
-    // not valid UTF-8 on their own when a frame splits a multi-byte glyph.
+    // A socket accepting bytes is not a browser painting them. Prefix each
+    // frame with an id and retain the output slot until xterm has parsed it and
+    // the browser has crossed a paint boundary. This puts backpressure at the
+    // real bottleneck instead of allowing a hidden queue inside xterm.
     let writer = tokio::spawn(async move {
+        let mut id = 0u32;
         while let Some(frame) = out_rx.recv().await {
-            if sink.send(Message::Binary(frame.into())).await.is_err() {
+            id = id.wrapping_add(1);
+            let mut message = Vec::with_capacity(frame.len() + 4);
+            message.extend_from_slice(&id.to_be_bytes());
+            message.extend_from_slice(&frame);
+            if sink.send(Message::Binary(message.into())).await.is_err() {
                 break;
+            }
+            loop {
+                match ack_rx.recv().await {
+                    Some(acked) if acked == id => break,
+                    Some(_) => continue,
+                    None => return,
+                }
             }
         }
     });
@@ -336,10 +374,17 @@ async fn drive(socket: WebSocket, who: crate::visits::Who) {
                 // Text is only ever a resize. Anything else is ignored rather
                 // than fed to the decoder: the input path takes bytes from one
                 // place only, and that is the binary channel.
-                Message::Text(t) => match parse_text(&t) {
-                    Some(message) => reader_tx.send(message),
-                    None => Ok(()),
-                },
+                Message::Text(t) => {
+                    if let Some(id) = t.strip_prefix('a').and_then(|v| v.parse::<u32>().ok()) {
+                        let _ = ack_tx.send(id);
+                        Ok(())
+                    } else {
+                        match parse_text(&t) {
+                            Some(message) => reader_tx.send(message),
+                            None => Ok(()),
+                        }
+                    }
+                }
                 Message::Close(_) => break,
                 _ => Ok(()),
             };
@@ -436,10 +481,8 @@ fn parse_text(s: &str) -> Option<session::In> {
     Some(session::In::Gutter(cols))
 }
 
-/// The whole client. One file, no build step, no npm.
-///
-/// xterm.js comes from a CDN rather than being vendored, which is the one
-/// outside dependency on this page -- swap it for a local copy if that matters.
+/// The whole client. One HTML file, no build step and no runtime npm. The
+/// pinned xterm distributions beside it are served as immutable local assets.
 ///
 /// The shader switch in the corner is a real post-processing chain, not a stack
 /// of CSS overlays: the terminal is rendered to a canvas, that canvas is
@@ -477,7 +520,8 @@ const INDEX: &str = r##"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prince Patel</title>
 <link rel="preload" href="/iosevka.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<link rel="preload" href="/vendor/v1/xterm.js" as="script">
+<link rel="stylesheet" href="/vendor/v1/xterm.css">
 <style>
   /* Everything the terminal draws comes out of this one file -- letters, box
      drawing, braille and the sextants every portrait is built from. One family
@@ -611,18 +655,14 @@ const INDEX: &str = r##"<!doctype html>
   </div>
 </div>
 <div id="hint">click to focus &middot; ctrl-f for full screen &middot; this is the same program you get over ssh</div>
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-canvas@0.5.0/lib/xterm-addon-canvas.js"></script>
+<script src="/vendor/v1/xterm.js"></script>
+<script src="/vendor/v1/addon-fit.js"></script>
+<script src="/vendor/v1/addon-webgl.js"></script>
+<script src="/vendor/v1/addon-canvas.js"></script>
 <script>
-// The one thing on this page that comes from somewhere else.
-//
-// If it did not arrive there is no terminal, and every line below this throws
-// on the first one -- which leaves a black rectangle and no explanation, and
-// the failure is not the visitor's to debug. jsdelivr is blocked outright in
-// some countries and merely down in the rest, so this is a state the page
-// reaches in production and not a theoretical one.
+// If the local terminal runtime did not arrive, every line below this throws
+// on the first one. Replace the resulting black rectangle with an actionable
+// failure instead; a broken or incomplete cached response is still possible.
 //
 // The ssh line is the point: the same program is a connection away, and unlike
 // this one it depends on nothing but a socket.
@@ -636,7 +676,7 @@ if (typeof Terminal === 'undefined') {
     'font:13px "Iosevka Portfolio","DejaVu Sans Mono",ui-monospace,monospace;line-height:1.6';
   said.textContent =
     'the terminal emulator this page needs did not load.\n\n' +
-    'it comes from cdn.jsdelivr.net, which is either blocked here or down.\n\n' +
+    'its local terminal assets did not load. reload once to try again.\n\n' +
     'the same program, without the browser in the way:\n\n' +
     '    ssh -p 2222 ' + location.hostname;
   document.body.appendChild(said);
@@ -677,6 +717,15 @@ const fit = new FitAddon.FitAddon();
 term.open(screen);
 term.loadAddon(fit);
 
+// Keep the server-side framebuffer bounded on very large displays. Past this
+// point more viewport becomes breathing room rather than more ANSI cells to
+// diff, transmit, parse and paint on every full redraw.
+const fitBounded = () => {
+  const proposed = fit.proposeDimensions();
+  if (!proposed) return;
+  term.resize(Math.max(20, Math.min(180, proposed.cols)), Math.max(6, Math.min(60, proposed.rows)));
+};
+
 // Which renderer is loaded is the shader's business, so it is swappable rather
 // than set once. WebGL is the fast path and the default; the shader needs the
 // canvas one, for the reason in this module's doc comment. If neither addon is
@@ -697,7 +746,7 @@ const useRenderer = (kind) => {
   }
 };
 useRenderer('webgl');
-fit.fit();
+fitBounded();
 
 // Measure the cell again once the real font is actually here.
 //
@@ -717,7 +766,7 @@ if (document.fonts && document.fonts.load) {
       term.options.fontSize = 12;
       term.options.fontSize = 13;
     }
-    fit.fit();
+    fitBounded();
     sendSize();
     measure();
   }).catch(() => { /* the fallback is already drawing; nothing to undo */ });
@@ -909,7 +958,36 @@ ws.onopen = () => {
   measure();
   term.focus();
 };
-ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+// Four-byte frame id followed by ANSI. Acknowledge only after xterm has parsed
+// it and the browser reaches a paint boundary. The server keeps one frame in
+// flight and coalesces all state changes that happen behind it.
+let paintedFrames = 0;
+let paintedBytes = 0;
+let paintMs = 0;
+ws.onmessage = (e) => {
+  const packet = new Uint8Array(e.data);
+  if (packet.byteLength < 4) return;
+  const id = new DataView(packet.buffer, packet.byteOffset, 4).getUint32(0, false);
+  const started = performance.now();
+  term.write(packet.subarray(4), () => {
+    requestAnimationFrame(() => {
+      paintedFrames++;
+      paintedBytes += packet.byteLength - 4;
+      paintMs += performance.now() - started;
+      if (ws.readyState === WebSocket.OPEN) ws.send('a' + id);
+    });
+  });
+};
+// Available without network logging or visitor data: `portfolioPerf()` in the
+// console tells us whether xterm painting, rather than transport, is expensive.
+window.portfolioPerf = () => ({
+  frames: paintedFrames,
+  ansiBytes: paintedBytes,
+  averagePaintMs: paintedFrames ? paintMs / paintedFrames : 0,
+  cols: term.cols,
+  rows: term.rows,
+  renderer: renderer ? renderer.constructor.name : 'dom',
+});
 ws.onclose = () => {
   term.write('\r\n\x1b[38;2;120;126;136m  disconnected. reload to start again.\x1b[0m\r\n');
 };
@@ -969,7 +1047,7 @@ addEventListener('resize', () => {
   // Debounced: dragging a window edge fires this continuously, and each one
   // costs a full redraw of a full-screen TUI.
   resizeTimer = setTimeout(() => {
-    fit.fit();
+    fitBounded();
     sendSize();
     tube.resize();
     measure();
@@ -1023,7 +1101,7 @@ const toggleFull = () => {
 // one is debounced for window dragging, and this is a single discrete jump the
 // visitor is watching for.
 const refit = () => {
-  fit.fit();
+  fitBounded();
   sendSize();
   tube.resize();
   measure();
@@ -2601,14 +2679,9 @@ mod tests {
         }
     }
 
-    /// The page says something when the one thing it fetches does not arrive.
-    ///
-    /// xterm comes off a CDN, and a CDN is a thing that is blocked in some
-    /// countries and down in the rest. Every line of the client is written
-    /// against `Terminal` existing, so without it the first one throws and the
-    /// visitor gets a black rectangle and no reason for it -- and the reason is
-    /// not theirs to go and find. The check has to come before that first line,
-    /// which is what this pins.
+    /// The page says something when its terminal runtime does not arrive.
+    /// Every line of the client is written against `Terminal` existing, so the
+    /// check has to come before the first use.
     #[test]
     fn a_page_whose_terminal_did_not_arrive_says_so() {
         let script = part("<script>\n// The one thing on this page", "</script>");
