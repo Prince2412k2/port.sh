@@ -284,6 +284,7 @@ impl russh::server::Server for Listener {
         SessionHandler {
             admitted: below_global && below_address,
             rate_checked: false,
+            daily_refused: false,
             _connection: connection,
             sessions: Arc::clone(&self.sessions),
             crowd: Arc::clone(&self.crowd),
@@ -310,6 +311,10 @@ impl russh::server::Server for Listener {
 struct SessionHandler {
     admitted: bool,
     rate_checked: bool,
+    /// Authentication is still accepted when the visit allowance is spent so
+    /// the channel can return a useful sentence instead of OpenSSH translating
+    /// the refusal into the misleading `Permission denied (publickey)`.
+    daily_refused: bool,
     _connection: Connection,
     sessions: Arc<AtomicUsize>,
     crowd: Arc<Crowd>,
@@ -396,6 +401,13 @@ impl SessionHandler {
         if self.rate_checked {
             return true;
         }
+        let unlimited = std::env::var("PORTFOLIO_UNLIMITED_IPS")
+            .ok()
+            .is_some_and(|list| {
+                self.ip.is_some_and(|ip| {
+                    list.split(',').any(|entry| entry.trim().parse::<IpAddr>().ok() == Some(ip))
+                })
+            });
         let mut keys = Vec::new();
         match self.ip {
             Some(ip) => {
@@ -408,8 +420,12 @@ impl SessionHandler {
         if !self.who.id.is_empty() {
             keys.push(format!("ssh-key:{}", self.who.id));
         }
-        self.rate_checked = crate::budget::admit_visit(&keys);
-        self.rate_checked
+        self.daily_refused = !unlimited && !crate::budget::admit_visit(&keys);
+        self.rate_checked = true;
+        // A spent allowance is explained after the channel opens. Transport
+        // admission failures remain authentication failures because no channel
+        // should be allocated for them.
+        true
     }
 }
 
@@ -580,6 +596,17 @@ impl Handler for SessionHandler {
             session.channel_failure(channel)?;
             return Ok(());
         }
+        if self.daily_refused {
+            self.started = true;
+            session.channel_success(channel)?;
+            turn_away(
+                &session.handle(),
+                channel,
+                b"daily visit limit reached for this address. try again tomorrow.\r\n",
+            )
+            .await;
+            return Ok(());
+        }
         let Some((cols, rows)) = self.pty else {
             let handle = session.handle();
             let _ = handle
@@ -694,6 +721,23 @@ impl Handler for SessionHandler {
             return Ok(());
         }
         let command = std::str::from_utf8(data).unwrap_or_default().trim();
+        if self.daily_refused {
+            self.started = true;
+            session.channel_success(channel)?;
+            let handle = session.handle();
+            let _ = handle
+                .data(
+                    channel,
+                    bytes::Bytes::from_static(
+                        b"daily visit limit reached for this address. try again tomorrow.\r\n",
+                    ),
+                )
+                .await;
+            let _ = handle.exit_status_request(channel, 1).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+            return Ok(());
+        }
         // mosh's bootstrap, and the only command here that runs a program.
         //
         // A mosh client opens an ordinary ssh connection, runs one command,
@@ -968,6 +1012,7 @@ mod tests {
         SessionHandler {
             admitted: true,
             rate_checked: true,
+            daily_refused: false,
             _connection: Connection {
                 total: Arc::new(AtomicUsize::new(1)),
                 crowd: Arc::new(Crowd::default()),
