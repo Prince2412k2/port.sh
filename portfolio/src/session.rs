@@ -35,10 +35,13 @@ const TERMINAL_PROBE_WINDOW: Duration = Duration::from_secs(2);
 /// What a transport sends *to* a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
-    /// Rich local/browser rendering, where a GPU consumes the ANSI stream.
+    /// Rich browser rendering, where a GPU consumes the ANSI stream.
     Rich,
-    /// Network terminal rendering: fewer frames and an indexed colour stream.
+    /// Ordered TCP terminal rendering: static transitions and indexed colour.
     Ssh,
+    /// Mosh already handles loss and supersedes stale screen state, so motion
+    /// is useful again; retain indexed colour and use a moderate frame cap.
+    Mosh,
 }
 
 pub enum In {
@@ -369,7 +372,11 @@ pub async fn run(
     let ascii = Arc::new(AtomicBool::new(true));
     let mut terminal: Term = Terminal::with_options(
         SessionBackend::new(
-            FrameSink::negotiating(out, Arc::clone(&ascii), profile == Profile::Ssh),
+            FrameSink::negotiating(
+                out,
+                Arc::clone(&ascii),
+                matches!(profile, Profile::Ssh | Profile::Mosh),
+            ),
             cols.max(20),
             rows.max(6),
         ),
@@ -484,7 +491,11 @@ async fn pump(
         // SSH is capped at 12.5 fps. If its one-frame channel remains occupied,
         // back off further instead of repeatedly waking to discover the same
         // slow client; recover gradually as soon as writes keep up.
-        let base_ms = if profile == Profile::Ssh { shell.frame_ms().max(80) } else { shell.frame_ms() };
+        let base_ms = match profile {
+            Profile::Ssh => shell.frame_ms().max(80),
+            Profile::Mosh => shell.frame_ms().max(40),
+            Profile::Rich => shell.frame_ms(),
+        };
         let wait = Duration::from_millis(base_ms + pressure_ms);
         let mut ticker = interval(wait);
         ticker.tick().await; // the first tick fires immediately; skip it
@@ -557,7 +568,7 @@ async fn pump(
         if terminal.backend().ready() {
             terminal.draw(|f| shell.render(f))?;
             pressure_ms = pressure_ms.saturating_sub(10);
-        } else if profile == Profile::Ssh {
+        } else if matches!(profile, Profile::Ssh | Profile::Mosh) {
             pressure_ms = (pressure_ms + 40).min(320);
         }
     }

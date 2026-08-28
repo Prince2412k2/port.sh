@@ -112,7 +112,7 @@ fn pump(cols: u16, rows: u16) -> anyhow::Result<()> {
             }
         });
 
-        let outcome = session::run(out_tx, in_rx, cols, rows, who(), session::Profile::Ssh).await;
+        let outcome = session::run(out_tx, in_rx, cols, rows, who(), session::Profile::Mosh).await;
         // The last frame a session writes is the one that puts the terminal
         // back. Waiting for the writer is what gets it out, exactly as on ssh.
         let _ = writer.await;
