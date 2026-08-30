@@ -1,12 +1,38 @@
 //! Turns map data + viewport into a drawn canvas.
 
-use crate::canvas::{Canvas, Overlay, RoadGlyph, MAT_DOT, MAT_SOLID, TINT_SELECT, SUB_X, SUB_Y};
+use crate::canvas::{
+    Canvas, CellDetail, Overlay, RoadGlyph, DETAIL_MAP_LABEL, DETAIL_MAP_MARKER, MAT_DOT,
+    MAT_SOLID, SUB_X, SUB_Y, TINT_SELECT,
+};
 use crate::data::{Feature, Layer, Tile, DRAW_ORDER};
-use std::rc::Rc;
+use crate::geo::Viewport;
 use crate::labels::{self, Candidate, Occupancy};
 use crate::raster::{self, Pen};
 use crate::style::{self, DepthField, FocusMode};
-use crate::geo::Viewport;
+use std::rc::Rc;
+
+pub trait Elevation {
+    fn sample_smooth(&self, lon: f64, lat: f64, radius_m: f64) -> f32;
+}
+
+#[cfg(any(feature = "native", feature = "browser-core"))]
+impl Elevation for crate::terrain::Terrain {
+    fn sample_smooth(&self, lon: f64, lat: f64, radius_m: f64) -> f32 {
+        crate::terrain::Terrain::sample_smooth(self, lon, lat, radius_m)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct HomeMarker {
+    pub world: [f64; 2],
+    pub accuracy_km: f64,
+}
+
+#[derive(Clone, Copy)]
+pub struct PlaceMarker {
+    pub world: [f64; 2],
+    pub detail: u64,
+}
 
 pub struct SceneOpts<'a> {
     pub vp: &'a Viewport,
@@ -17,18 +43,18 @@ pub struct SceneOpts<'a> {
     pub road_glyph: RoadGlyph,
     /// Elevation used to drape geometry in 3D. Without it, roads project at
     /// sea level while the ground rises above them and nothing lines up.
-    pub terrain: Option<&'a crate::terrain::Terrain>,
+    pub terrain: Option<&'a dyn Elevation>,
     pub exag: f64,
     /// The elevation drawn at ground level -- see `relief::Lift`.
     pub datum: f32,
     /// Your position, once known.
-    pub home: Option<crate::home::Fix>,
+    pub home: Option<HomeMarker>,
     pub road_weight: f64,
     pub mode: crate::view::Mode,
     /// Map-local cell rect that labels must keep clear (the scalebar).
     pub reserved: Option<ratatui::layout::Rect>,
     /// Tour stops, drawn as markers when the experience tour is running.
-    pub places: &'a [crate::place::Place],
+    pub places: &'a [PlaceMarker],
     /// Which of them the camera is on.
     pub place_at: usize,
 }
@@ -56,7 +82,7 @@ pub struct Stats {
     pub buildings: usize,
 }
 
-pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
+pub fn draw(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
     let mut stats = Stats::default();
     let bounds = o.vp.world_bounds(64.0);
     let mut proj: Vec<[f64; 2]> = Vec::with_capacity(512);
@@ -65,7 +91,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
     let tilted = !o.vp.is_flat();
     let drape = if tilted { o.terrain } else { None };
     // One surface for the whole frame, matching what the relief pass draws.
-    let smooth = crate::relief::drape_smoothing(o.vp);
+    let smooth = crate::view::drape_smoothing(o.vp);
     let bounded = o.vp.bounded();
     // The ground slab: features stop where it stops, or roads run out into the
     // black past the edge of the plate.
@@ -79,7 +105,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
             continue;
         }
         let st = style::style(layer);
-        if o.vp.zoom < st.min_zoom {
+        if o.vp.zoom < crate::view::min_zoom(layer) {
             continue;
         }
         let floor = crate::view::rank_floor(layer, o.vp.zoom);
@@ -90,180 +116,222 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
         }
 
         for (slot, tile) in tiles.iter().enumerate() {
-        for &idx in &tile.by_layer[layer.index()] {
-            let f = &tile.features[idx as usize];
-            if f.rank < floor || !f.visible_in(&bounds) {
-                continue;
-            }
-            // Too small on screen to be a line rather than a speck.
-            //
-            // Off the *world* bbox, before anything is projected. The first
-            // version measured the projected points, which meant every one of
-            // ninety thousand candidates was transformed before being thrown
-            // away -- at country zoom that cost more than the rank test it
-            // replaced, 2.1 ms to 6.1 ms on a frame that drew fewer features.
-            // A world extent times the scale is the screen extent to within
-            // the tilt, and the tilt does not decide whether a speck is a
-            // speck.
-            if min_world > 0.0
-                && (f.bbox[2] - f.bbox[0]).max(f.bbox[3] - f.bbox[1]) < min_world
-            {
-                continue;
-            }
-
-            proj.clear();
-            zs.clear();
-            if tilted {
-                for &p in &f.pts {
-                    let h = match drape {
-                        Some(t) => {
-                            let (lon, lat) = crate::geo::world_to_lonlat(p[0], p[1]);
-                            (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
-                                / m_per_world
-                        }
-                        None => 0.0,
-                    };
-                    let m = o.vp.plane_of(p);
-                    let outside = bounded
-                        && (m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2]);
-                    let (sp, z) = o.vp.project3(p, h);
-                    proj.push(sp);
-                    zs.push(if outside { f32::INFINITY } else { z });
+            for &idx in &tile.by_layer[layer.index()] {
+                let f = &tile.features[idx as usize];
+                if f.rank < floor || !f.visible_in(&bounds) {
+                    continue;
                 }
-            } else {
-                proj.extend(f.pts.iter().map(|&p| o.vp.project(p)));
-            }
-            if proj.len() < 2 {
-                continue;
-            }
-            // Fills and dashes draw from `proj` wholesale rather than segment
-            // by segment, so a ring with even one vertex outside the slab gets
-            // scan-filled across everything between them. Lines are clipped per
-            // segment and only need *some* vertex to survive; areas need all of
-            // them.
-            // Areas are scan-filled from the whole ring, so one stray vertex
-            // drags the fill across everything between them -- they must lie
-            // entirely inside the slab. Lines are clipped segment by segment
-            // further down and need no gate at all; gating them here is what
-            // made roads vanish at street zoom, where the basemap's vertices
-            // are further apart than the plate is wide.
-            let is_area = (st.density > 0 && f.closed) || st.dash.is_some();
-            if bounded && is_area && zs.iter().any(|z| !z.is_finite()) {
-                continue;
-            }
-            stats.features += 1;
-            stats.segments += proj.len() - 1;
+                // Too small on screen to be a line rather than a speck.
+                //
+                // Off the *world* bbox, before anything is projected. The first
+                // version measured the projected points, which meant every one of
+                // ninety thousand candidates was transformed before being thrown
+                // away -- at country zoom that cost more than the rank test it
+                // replaced, 2.1 ms to 6.1 ms on a frame that drew fewer features.
+                // A world extent times the scale is the screen extent to within
+                // the tilt, and the tilt does not decide whether a speck is a
+                // speck.
+                if min_world > 0.0 && (f.bbox[2] - f.bbox[0]).max(f.bbox[3] - f.bbox[1]) < min_world
+                {
+                    continue;
+                }
 
-            let pick = pack_pick(slot, idx);
-            let hot = o.highlight == Some(pick);
-            let w = style::rank_weight(f.rank);
-            // In line mode the road classes drop their block material; only the
-            // ground layers keep drawing into the subpixel buffer.
-            let mat = match (o.road_glyph, st.mat) {
-                (RoadGlyph::Dotted, MAT_SOLID) => MAT_DOT,
-                (_, m) => m,
-            };
-            // Only strokes scale; a dithered fill has no width to speak of.
-            let base = if st.mat == MAT_SOLID {
-                st.width * o.road_weight
-            } else {
-                st.width
-            };
-            let mut pen = Pen {
-                width: if hot { base + 1.0 } else { base },
-                alpha: if hot { 1.0 } else { st.alpha * w },
-                depth: st.depth,
-                tint: if hot { TINT_SELECT } else { st.tint },
-                mat,
-                pick,
-                behind: if tilted { crate::canvas::Behind::Hide } else { crate::canvas::Behind::Ignore },
-            };
-
-            if o.road_glyph == RoadGlyph::Line && st.mat == MAT_SOLID {
-                pen.depth = o.depth.at(st.depth, centroid(&proj));
-                raster::cell_polyline(canvas, &proj, &pen, layer == Layer::RoadMajor);
-                continue;
-            }
-
-            if st.density > 0 && f.closed {
+                proj.clear();
+                zs.clear();
                 if tilted {
-                    if let Some(i) = zs.iter().position(|z| z.is_finite()) {
-                        pen.depth = zs[i];
+                    for &p in &f.pts {
+                        let h = match drape {
+                            Some(t) => {
+                                let (lon, lat) = crate::geo::world_to_lonlat(p[0], p[1]);
+                                (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
+                                    / m_per_world
+                            }
+                            None => 0.0,
+                        };
+                        let m = o.vp.plane_of(p);
+                        let outside = bounded
+                            && (m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2]);
+                        let (sp, z) = o.vp.project3(p, h);
+                        proj.push(sp);
+                        zs.push(if outside { f32::INFINITY } else { z });
                     }
                 } else {
-                    pen.depth = o.depth.at(st.depth, centroid(&proj));
+                    proj.extend(f.pts.iter().map(|&p| o.vp.project(p)));
                 }
-                raster::fill(canvas, &proj, st.density, &pen);
-                continue;
-            }
+                if proj.len() < 2 {
+                    continue;
+                }
+                // Areas are scan-filled from the whole ring, so one stray vertex
+                // drags the fill across everything between them -- they must lie
+                // entirely inside the slab. Lines are clipped segment by segment
+                // further down and need no gate at all; gating them here is what
+                // made roads vanish at street zoom, where the basemap's vertices
+                // are further apart than the plate is wide.
+                let is_area = st.density > 0 && f.closed;
+                if bounded && is_area && zs.iter().any(|z| !z.is_finite()) {
+                    continue;
+                }
+                stats.features += 1;
+                stats.segments += proj.len() - 1;
 
-            if let Some((on, off)) = st.dash {
-                if tilted {
-                    if let Some(i) = zs.iter().position(|z| z.is_finite()) {
-                        pen.depth = zs[i];
-                    }
+                let pick = pack_pick(slot, idx);
+                let hot = o.highlight == Some(pick);
+                let w = style::rank_weight(f.rank);
+                // In line mode the road classes drop their block material; only the
+                // ground layers keep drawing into the subpixel buffer.
+                let mat = match (o.road_glyph, st.mat) {
+                    (RoadGlyph::Dotted, MAT_SOLID) => MAT_DOT,
+                    (_, m) => m,
+                };
+                // Only strokes scale; a dithered fill has no width to speak of.
+                let base = if st.mat == MAT_SOLID {
+                    st.width * o.road_weight
                 } else {
-                    pen.depth = o.depth.at(st.depth, centroid(&proj));
-                }
-                raster::dashed_polyline(canvas, &proj, &pen, on, off);
-                continue;
-            }
+                    st.width
+                };
+                let mut pen = Pen {
+                    width: if hot { base + 1.0 } else { base },
+                    alpha: if hot { 1.0 } else { st.alpha * w },
+                    depth: st.depth,
+                    tint: if hot { TINT_SELECT } else { st.tint },
+                    mat,
+                    pick,
+                    behind: if tilted {
+                        crate::canvas::Behind::Hide
+                    } else {
+                        crate::canvas::Behind::Ignore
+                    },
+                };
 
-            if tilted {
-                // Real camera depth: the buffer that carried stylistic depth in
-                // 2D becomes an actual z-buffer, so occlusion falls out for free.
-                for seg in f.pts.windows(2) {
-                    let m0 = o.vp.plane_of(seg[0]);
-                    let m1 = o.vp.plane_of(seg[1]);
-                    // Only a tilted view has a slab to clip against; a rotated
-                    // flat one is still flat.
-                    let (c0, c1) = if bounded {
-                        match clip_to_plate(m0, m1, plate) {
-                            Some(pair) => pair,
-                            None => continue,
-                        }
-                    } else {
-                        (m0, m1)
-                    };
-                    let w0 = o.vp.world_of_plane(c0);
-                    let w1 = o.vp.world_of_plane(c1);
-                    let lift = |w: [f64; 2]| match drape {
-                        Some(t) => {
-                            let (lon, lat) = crate::geo::world_to_lonlat(w[0], w[1]);
-                            (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
-                                / m_per_world
-                        }
-                        None => 0.0,
-                    };
-                    let (p0, z0) = o.vp.project3(w0, lift(w0));
-                    let (p1, z1) = o.vp.project3(w1, lift(w1));
-                    if !z0.is_finite() || !z1.is_finite() {
-                        continue;
-                    }
-                    let fade = if bounded {
-                        plate_fade(c0, plate).min(plate_fade(c1, plate))
-                    } else {
-                        1.0
-                    };
-                    if fade <= 0.02 {
-                        continue;
-                    }
-                    pen.depth = (z0 + z1) * 0.5;
-                    let faded = Pen { alpha: pen.alpha * fade, ..pen };
-                    raster::line(canvas, p0, p1, &faded);
+                if o.road_glyph == RoadGlyph::Line && st.mat == MAT_SOLID {
+                    pen.depth = o.depth.at(st.depth, centroid(&proj));
+                    raster::cell_polyline(canvas, &proj, &pen, layer == Layer::RoadMajor);
+                    continue;
                 }
-            } else if o.depth.mode == FocusMode::Off {
-                raster::polyline(canvas, &proj, &pen);
-            } else {
-                // Per-segment depth: a long road can be near at one end and far
-                // at the other, and that gradient is most of the effect.
-                for w in proj.windows(2) {
-                    let mid = [(w[0][0] + w[1][0]) * 0.5, (w[0][1] + w[1][1]) * 0.5];
-                    pen.depth = o.depth.at(st.depth, mid);
-                    raster::line(canvas, w[0], w[1], &pen);
+
+                if st.density > 0 && f.closed {
+                    if tilted {
+                        if let Some(i) = zs.iter().position(|z| z.is_finite()) {
+                            pen.depth = zs[i];
+                        }
+                    } else {
+                        pen.depth = o.depth.at(st.depth, centroid(&proj));
+                    }
+                    raster::fill(canvas, &proj, st.density, &pen);
+                    continue;
+                }
+
+                if let Some((on, off)) = st.dash {
+                    if tilted && bounded {
+                        let mut phase = 0.0;
+                        for segment in f.pts.windows(2) {
+                            let Some((a, b)) = clip_to_plate(
+                                o.vp.plane_of(segment[0]),
+                                o.vp.plane_of(segment[1]),
+                                plate,
+                            ) else {
+                                continue;
+                            };
+                            let w0 = o.vp.world_of_plane(a);
+                            let w1 = o.vp.world_of_plane(b);
+                            let lift = |world: [f64; 2]| match drape {
+                                Some(terrain) => {
+                                    let (lon, lat) =
+                                        crate::geo::world_to_lonlat(world[0], world[1]);
+                                    (terrain.sample_smooth(lon, lat, smooth) - o.datum) as f64
+                                        * o.exag
+                                        / m_per_world
+                                }
+                                None => 0.0,
+                            };
+                            let (p0, z0) = o.vp.project3(w0, lift(w0));
+                            let (p1, z1) = o.vp.project3(w1, lift(w1));
+                            if !z0.is_finite() || !z1.is_finite() {
+                                continue;
+                            }
+                            pen.depth = (z0 + z1) * 0.5;
+                            let fade = plate_fade(a, plate).min(plate_fade(b, plate));
+                            if fade > 0.02 {
+                                let clipped = Pen {
+                                    alpha: pen.alpha * fade,
+                                    ..pen
+                                };
+                                raster::dashed_segment(
+                                    canvas, p0, p1, &clipped, on, off, &mut phase,
+                                );
+                            }
+                        }
+                    } else {
+                        if tilted {
+                            if let Some(i) = zs.iter().position(|z| z.is_finite()) {
+                                pen.depth = zs[i];
+                            }
+                        } else {
+                            pen.depth = o.depth.at(st.depth, centroid(&proj));
+                        }
+                        raster::dashed_polyline(canvas, &proj, &pen, on, off);
+                    }
+                    continue;
+                }
+
+                if tilted {
+                    // Real camera depth: the buffer that carried stylistic depth in
+                    // 2D becomes an actual z-buffer, so occlusion falls out for free.
+                    for seg in f.pts.windows(2) {
+                        let m0 = o.vp.plane_of(seg[0]);
+                        let m1 = o.vp.plane_of(seg[1]);
+                        // Only a tilted view has a slab to clip against; a rotated
+                        // flat one is still flat.
+                        let (c0, c1) = if bounded {
+                            match clip_to_plate(m0, m1, plate) {
+                                Some(pair) => pair,
+                                None => continue,
+                            }
+                        } else {
+                            (m0, m1)
+                        };
+                        let w0 = o.vp.world_of_plane(c0);
+                        let w1 = o.vp.world_of_plane(c1);
+                        let lift = |w: [f64; 2]| match drape {
+                            Some(t) => {
+                                let (lon, lat) = crate::geo::world_to_lonlat(w[0], w[1]);
+                                (t.sample_smooth(lon, lat, smooth) - o.datum) as f64 * o.exag
+                                    / m_per_world
+                            }
+                            None => 0.0,
+                        };
+                        let (p0, z0) = o.vp.project3(w0, lift(w0));
+                        let (p1, z1) = o.vp.project3(w1, lift(w1));
+                        if !z0.is_finite() || !z1.is_finite() {
+                            continue;
+                        }
+                        let fade = if bounded {
+                            plate_fade(c0, plate).min(plate_fade(c1, plate))
+                        } else {
+                            1.0
+                        };
+                        if fade <= 0.02 {
+                            continue;
+                        }
+                        pen.depth = (z0 + z1) * 0.5;
+                        let faded = Pen {
+                            alpha: pen.alpha * fade,
+                            ..pen
+                        };
+                        raster::line(canvas, p0, p1, &faded);
+                    }
+                } else if o.depth.mode == FocusMode::Off {
+                    raster::polyline(canvas, &proj, &pen);
+                } else {
+                    // Per-segment depth: a long road can be near at one end and far
+                    // at the other, and that gradient is most of the effect.
+                    for w in proj.windows(2) {
+                        let mid = [(w[0][0] + w[1][0]) * 0.5, (w[0][1] + w[1][1]) * 0.5];
+                        pen.depth = o.depth.at(st.depth, mid);
+                        raster::line(canvas, w[0], w[1], &pen);
+                    }
                 }
             }
-        }
         }
     }
 
@@ -288,7 +356,7 @@ pub fn draw(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
 /// close. Datasets with explicit sea polygons (the embedded sample) carry no
 /// land rings, so they skip this entirely and fill normally.
 fn ocean_wash(
-    tiles: &[Rc<Tile>],
+    tiles: &[&Tile],
     canvas: &mut Canvas,
     o: &SceneOpts,
     bounds: &[f64; 4],
@@ -297,7 +365,9 @@ fn ocean_wash(
 ) {
     // Only the hand-built .tmap datasets carry land rings; a real basemap has
     // genuine ocean polygons in its water layer and needs no mask at all.
-    let has_land = tiles.iter().any(|t| !t.by_layer[Layer::Land.index()].is_empty());
+    let has_land = tiles
+        .iter()
+        .any(|t| !t.by_layer[Layer::Land.index()].is_empty());
     if !has_land || !o.layers[Layer::Water.index()] {
         return;
     }
@@ -390,6 +460,10 @@ fn draw_places(canvas: &mut Canvas, o: &SceneOpts) {
                 // disappearing: the trail is context, not competition.
                 lum: if here { 1.0 } else { 0.42 },
                 bold: here,
+                detail: CellDetail {
+                    kind: DETAIL_MAP_MARKER,
+                    value: p.detail,
+                },
             },
         );
     }
@@ -430,7 +504,8 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
             // Circular on the ground, so it foreshortens with the camera the
             // way the ground it describes does.
             let m = o.vp.plane_of(f.world);
-            let w = o.vp.world_of_plane([m[0] + r * a.cos(), m[1] + r * a.sin()]);
+            let w =
+                o.vp.world_of_plane([m[0] + r * a.cos(), m[1] + r * a.sin()]);
             let (q, z) = o.vp.project3(w, h);
             if !z.is_finite() {
                 prev = None;
@@ -450,7 +525,16 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
     canvas.set_overlay(
         cx,
         cy,
-        Overlay { ch: '◉', tint: TINT_HOME, lum: 1.0, bold: true },
+        Overlay {
+            ch: '◉',
+            tint: TINT_HOME,
+            lum: 1.0,
+            bold: true,
+            detail: CellDetail {
+                kind: DETAIL_MAP_MARKER,
+                value: crate::data::stable_detail_id("marker", "home"),
+            },
+        },
     );
 }
 
@@ -460,7 +544,11 @@ fn draw_home(canvas: &mut Canvas, o: &SceneOpts) {
 /// geometry is coarse relative to the view: at street zoom the basemap's
 /// vertices are hundreds of metres apart, so both ends of a road sit outside a
 /// small plate while the middle crosses it, and the road disappears entirely.
-fn clip_to_plate(mut a: [f64; 2], mut b: [f64; 2], plate: [f64; 4]) -> Option<([f64; 2], [f64; 2])> {
+fn clip_to_plate(
+    mut a: [f64; 2],
+    mut b: [f64; 2],
+    plate: [f64; 4],
+) -> Option<([f64; 2], [f64; 2])> {
     let (hw, far, near) = (plate[0], plate[1], plate[2]);
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
@@ -511,12 +599,7 @@ fn clip_to_plate(mut a: [f64; 2], mut b: [f64; 2], plate: [f64; 4]) -> Option<([
 /// Back faces are not culled. They do not need to be: the z-buffer already
 /// rejects anything a nearer wall has claimed, so the far side of a building is
 /// hidden by its own near side for free.
-fn draw_buildings(
-    tiles: &[Rc<Tile>],
-    canvas: &mut Canvas,
-    o: &SceneOpts,
-    bounds: &[f64; 4],
-) -> usize {
+fn draw_buildings(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts, bounds: &[f64; 4]) -> usize {
     use crate::canvas::{MAT_DOT, TINT_MONO};
 
     let m_per_world = crate::geo::meters_per_world_unit(o.vp.center_lonlat().1);
@@ -579,10 +662,10 @@ fn draw_buildings(
         }
         let depth = depth_sum / base.len() as f32;
 
-        let fade = plate_fade(o.vp.plane_of([
-            (f.bbox[0] + f.bbox[2]) * 0.5,
-            (f.bbox[1] + f.bbox[3]) * 0.5,
-        ]), plate);
+        let fade = plate_fade(
+            o.vp.plane_of([(f.bbox[0] + f.bbox[2]) * 0.5, (f.bbox[1] + f.bbox[3]) * 0.5]),
+            plate,
+        );
         if fade <= 0.02 {
             continue;
         }
@@ -593,7 +676,11 @@ fn draw_buildings(
             tint: TINT_MONO,
             mat: MAT_DOT,
             pick: pack_pick(slot, idx),
-            behind: if tilted { crate::canvas::Behind::Hide } else { crate::canvas::Behind::Ignore },
+            behind: if tilted {
+                crate::canvas::Behind::Hide
+            } else {
+                crate::canvas::Behind::Ignore
+            },
         };
         // Walls are stippled rather than solid: a terminal has no fill shades to
         // spare, and a dithered face reads as a surface while still letting the
@@ -609,11 +696,18 @@ fn draw_buildings(
 
         // Vertical corner posts and the roof outline: the edges are what give
         // the mass its shape once the faces are only half-toned.
-        let edge = Pen { alpha: 0.85 * fade, ..wall };
+        let edge = Pen {
+            alpha: 0.85 * fade,
+            ..wall
+        };
         for i in 0..base.len() {
             raster::line(canvas, base[i], top[i], &edge);
         }
-        let roof = Pen { alpha: fade, width: 1.2, ..wall };
+        let roof = Pen {
+            alpha: fade,
+            width: 1.2,
+            ..wall
+        };
         raster::polyline(canvas, &top, &roof);
 
         drawn += 1;
@@ -623,7 +717,9 @@ fn draw_buildings(
 
 fn centroid(pts: &[[f64; 2]]) -> [f64; 2] {
     let n = pts.len() as f64;
-    let (sx, sy) = pts.iter().fold((0.0, 0.0), |(x, y), p| (x + p[0], y + p[1]));
+    let (sx, sy) = pts
+        .iter()
+        .fold((0.0, 0.0), |(x, y), p| (x + p[0], y + p[1]));
     [sx / n, sy / n]
 }
 
@@ -633,6 +729,8 @@ fn centroid(pts: &[[f64; 2]]) -> [f64; 2] {
 /// word cloud: the names crowd out the geometry they are supposed to annotate.
 fn rank_floor(zoom: f64) -> u16 {
     match zoom {
+        z if z < 6.0 => 230,
+        z if z < 8.0 => 200,
         z if z < 10.0 => 168,
         z if z < 11.5 => 155,
         z if z < 13.0 => 140,
@@ -645,7 +743,14 @@ fn rank_floor(zoom: f64) -> u16 {
 /// budgets so a dense cluster of amber cannot crowd the geography off the map --
 /// with one shared budget, an OSM extract's landmark ranks simply win every
 /// slot.
-const MAX_PLACE_LABELS: usize = 20;
+fn max_place_labels(zoom: f64) -> usize {
+    match zoom {
+        z if z < 6.0 => 6,
+        z if z < 8.0 => 10,
+        z if z < 10.0 => 14,
+        _ => 20,
+    }
+}
 
 /// Landmark labels at a full screen, by zoom.
 ///
@@ -705,7 +810,7 @@ fn shorten(s: &str) -> String {
     s.chars().take(MAX_LABEL_CHARS - 1).collect::<String>() + "…"
 }
 
-fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &[f64; 4]) -> usize {
+fn draw_labels(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts, bounds: &[f64; 4]) -> usize {
     let mut cands: Vec<Candidate> = Vec::new();
     // Tiles are generated with a buffer, so a place near an edge is present in
     // every tile that overlaps it. Without this the map reads "Kurla East Kurla
@@ -726,12 +831,16 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
         // which is a rule about skyscrapers pretending to be a rule about
         // names. The budget below keeps the tallest few instead, which is the
         // same intent said in the units this layer actually has.
-        let floor = if layer == Layer::Building { 0 } else { rank_floor(o.vp.zoom) };
+        let floor = if layer == Layer::Building {
+            0
+        } else {
+            rank_floor(o.vp.zoom)
+        };
         let budget = label_budget(
             match layer {
                 Layer::Landmark => max_landmark_labels(o.vp.zoom),
                 Layer::Building => MAX_BUILDING_LABELS,
-                _ => MAX_PLACE_LABELS,
+                _ => max_place_labels(o.vp.zoom),
             },
             canvas.cw,
             canvas.ch,
@@ -743,56 +852,58 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
         }
 
         for (slot, tile) in tiles.iter().enumerate() {
-        for &idx in &tile.by_layer[layer.index()] {
-            let f = &tile.features[idx as usize];
-            if !f.visible_in(bounds) {
-                continue;
-            }
-            let Some(name) = &f.name else { continue };
-            let pick = pack_pick(slot, idx);
-            let hot_feature = o.highlight == Some(pick);
-            if f.rank < floor && !hot_feature {
-                continue;
-            }
-            // `project3` and not `project`, for the depth. A point behind the
-            // eye has no screen position and `project3` says so by handing back
-            // NaN with an infinite depth -- but `project` drops the depth on the
-            // floor, and every comparison against a NaN is false, so the bounds
-            // check below waved it straight through. The anchor then became a
-            // leader line, and a line drawn to nowhere splats NaN coverage into
-            // the buffer, where it sat until the resolve pass tried to sort the
-            // tints and found two weights that would not compare.
-            let (p, z) = o.vp.project3(f.pts[0], 0.0);
-            if !z.is_finite() {
-                continue;
-            }
-            if p[0] < 0.0 || p[1] < 0.0 || p[0] >= canvas.sw as f64 || p[1] >= canvas.sh as f64 {
-                continue;
-            }
-            let key = (
-                (f.pts[0][0] * 4.0e6) as u64,
-                (f.pts[0][1] * 4.0e6) as u64,
-                name.as_ref(),
-            );
-            if !seen.insert(key) {
-                continue;
-            }
+            for &idx in &tile.by_layer[layer.index()] {
+                let f = &tile.features[idx as usize];
+                if !f.visible_in(bounds) {
+                    continue;
+                }
+                let Some(name) = &f.name else { continue };
+                let pick = pack_pick(slot, idx);
+                let hot_feature = o.highlight == Some(pick);
+                if f.rank < floor && !hot_feature {
+                    continue;
+                }
+                // `project3` and not `project`, for the depth. A point behind the
+                // eye has no screen position and `project3` says so by handing back
+                // NaN with an infinite depth -- but `project` drops the depth on the
+                // floor, and every comparison against a NaN is false, so the bounds
+                // check below waved it straight through. The anchor then became a
+                // leader line, and a line drawn to nowhere splats NaN coverage into
+                // the buffer, where it sat until the resolve pass tried to sort the
+                // tints and found two weights that would not compare.
+                let (p, z) = o.vp.project3(f.pts[0], 0.0);
+                if !z.is_finite() {
+                    continue;
+                }
+                if p[0] < 0.0 || p[1] < 0.0 || p[0] >= canvas.sw as f64 || p[1] >= canvas.sh as f64
+                {
+                    continue;
+                }
+                let key = (
+                    (f.pts[0][0] * 4.0e6) as u64,
+                    (f.pts[0][1] * 4.0e6) as u64,
+                    name.as_ref(),
+                );
+                if !seen.insert(key) {
+                    continue;
+                }
 
-            cands.push(Candidate {
-                anchor: p,
-                text: shorten(name),
-                // A hovered label always wins its slot.
-                rank: match () {
-                    _ if hot_feature => u16::MAX,
-                    _ if layer == Layer::Building => building_priority(f.rank),
-                    _ => f.rank,
-                },
-                tint: if hot_feature { TINT_SELECT } else { st.tint },
-                depth: o.depth.at(st.depth, p),
-                marker: (layer == Layer::Landmark).then_some('◦'),
-                feature: pick,
-            });
-        }
+                cands.push(Candidate {
+                    anchor: p,
+                    text: shorten(name),
+                    // A hovered label always wins its slot.
+                    rank: match () {
+                        _ if hot_feature => u16::MAX,
+                        _ if layer == Layer::Building => building_priority(f.rank),
+                        _ => f.rank,
+                    },
+                    tint: if hot_feature { TINT_SELECT } else { st.tint },
+                    depth: o.depth.at(st.depth, p),
+                    marker: (layer == Layer::Landmark).then_some('◦'),
+                    feature: pick,
+                    detail: f.stable_id,
+                });
+            }
         }
         // Keep only this layer's best few before they compete for space.
         cands[start..].sort_by(|a, b| b.rank.cmp(&a.rank));
@@ -801,7 +912,12 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
 
     let mut occ = Occupancy::new(canvas.cw, canvas.ch);
     if let Some(r) = o.reserved {
-        occ.block(r.x as usize, r.y as usize, r.width as usize, r.height as usize);
+        occ.block(
+            r.x as usize,
+            r.y as usize,
+            r.width as usize,
+            r.height as usize,
+        );
     }
     let placed = labels::place(cands, &mut occ, SUB_X, SUB_Y);
     let n = placed.len();
@@ -829,17 +945,43 @@ fn draw_labels(tiles: &[Rc<Tile>], canvas: &mut Canvas, o: &SceneOpts, bounds: &
     for p in &placed {
         // Plain place names sit back a little; the amber landmarks are the ones
         // meant to catch the eye.
-        let ceiling = if p.tint == crate::canvas::TINT_MONO { 0.78 } else { 1.0 };
+        let ceiling = if p.tint == crate::canvas::TINT_MONO {
+            0.78
+        } else {
+            1.0
+        };
         let lum = (0.40 + 0.60 * (1.0 - p.depth).clamp(0.0, 1.0)) * ceiling;
 
         if let Some((mx, my, ch)) = p.marker {
-            canvas.set_overlay(mx, my, Overlay { ch, tint: p.tint, lum, bold: false });
+            canvas.set_overlay(
+                mx,
+                my,
+                Overlay {
+                    ch,
+                    tint: p.tint,
+                    lum,
+                    bold: false,
+                    detail: CellDetail {
+                        kind: DETAIL_MAP_LABEL,
+                        value: p.detail,
+                    },
+                },
+            );
         }
         for (i, ch) in p.text.chars().enumerate() {
             canvas.set_overlay(
                 p.cell.0 + i,
                 p.cell.1,
-                Overlay { ch, tint: p.tint, lum, bold: p.bold },
+                Overlay {
+                    ch,
+                    tint: p.tint,
+                    lum,
+                    bold: p.bold,
+                    detail: CellDetail {
+                        kind: DETAIL_MAP_LABEL,
+                        value: p.detail,
+                    },
+                },
             );
         }
     }
@@ -865,7 +1007,10 @@ mod tests {
         vp.sh = 200.0;
         vp.tilt = 69f64.to_radians();
         let plate = vp.plate();
-        assert!(plate[2] > plate[3] * 1.5, "the slab was not extended at all");
+        assert!(
+            plate[2] > plate[3] * 1.5,
+            "the slab was not extended at all"
+        );
 
         // Deep in the extension, on the centre line.
         let deep = [0.0, (plate[3] + plate[2]) * 0.5];
@@ -917,5 +1062,56 @@ mod tests {
         assert!(max_landmark_labels(16.0) > max_landmark_labels(11.0));
         // And the per-screen scaling still applies on top, never below two.
         assert_eq!(label_budget(max_landmark_labels(16.0), 46, 12), 2);
+    }
+
+    #[test]
+    fn a_dashed_line_crossing_the_plate_is_not_dropped_wholesale() {
+        let mut vp = crate::geo::Viewport::new([0.5, 0.5], 14.0);
+        vp.sw = 160.0;
+        vp.sh = 96.0;
+        vp.tilt = 62f64.to_radians();
+        vp.bearing = 57f64.to_radians();
+        vp.persp = 0.7;
+        let plate = vp.plate();
+        let points = [
+            vp.world_of_plane([-plate[0] * 2.0, 0.0]),
+            vp.world_of_plane([0.0, 0.0]),
+            vp.world_of_plane([plate[0] * 2.0, 0.0]),
+        ];
+        let tile = Tile::new(vec![Feature::new(
+            Layer::Boundary,
+            255,
+            false,
+            None,
+            points.to_vec(),
+        )]);
+        let mut canvas = Canvas::new(80, 24);
+        let depth = DepthField {
+            mode: FocusMode::Off,
+            focus: [80.0, 48.0],
+            radius: 80.0,
+        };
+        let stats = draw(
+            &[&tile],
+            &mut canvas,
+            &SceneOpts {
+                vp: &vp,
+                layers: [true; crate::data::LAYER_COUNT],
+                depth: &depth,
+                highlight: None,
+                show_labels: false,
+                road_glyph: RoadGlyph::Dotted,
+                terrain: None,
+                exag: 1.0,
+                datum: 0.0,
+                home: None,
+                road_weight: 1.0,
+                mode: crate::view::Mode::of(vp.zoom),
+                reserved: None,
+                places: &[],
+                place_at: 0,
+            },
+        );
+        assert_eq!(stats.features, 1);
     }
 }

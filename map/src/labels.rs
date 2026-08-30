@@ -14,6 +14,7 @@ pub struct Candidate {
     pub depth: f32,
     pub marker: Option<char>,
     pub feature: u32,
+    pub detail: u64,
 }
 
 pub struct Placed {
@@ -27,6 +28,7 @@ pub struct Placed {
     /// Subpixel endpoints of the leader, when the label had to move away.
     pub leader: Option<([f64; 2], [f64; 2])>,
     pub feature: u32,
+    pub detail: u64,
 }
 
 pub struct Occupancy {
@@ -37,7 +39,11 @@ pub struct Occupancy {
 
 impl Occupancy {
     pub fn new(w: usize, h: usize) -> Self {
-        Occupancy { w, h, used: vec![false; w * h] }
+        Occupancy {
+            w,
+            h,
+            used: vec![false; w * h],
+        }
     }
 
     fn free(&self, x: isize, y: isize, len: usize) -> bool {
@@ -158,6 +164,7 @@ pub fn place(
             marker,
             leader,
             feature: c.feature,
+            detail: c.detail,
         });
     }
 

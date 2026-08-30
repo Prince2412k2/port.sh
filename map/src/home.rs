@@ -61,7 +61,11 @@ pub fn spawn() -> Slot {
     let slot: Slot = Arc::new(Mutex::new(None));
 
     // An explicit position needs no thread and no network.
-    if let Some((lat, lon)) = std::env::var("TERMAP_HOME").ok().as_deref().and_then(parse_pair) {
+    if let Some((lat, lon)) = std::env::var("TERMAP_HOME")
+        .ok()
+        .as_deref()
+        .and_then(parse_pair)
+    {
         *slot.lock().unwrap() = Some(fix_from(lat, lon, "home".into(), 0.0, "TERMAP_HOME"));
         return slot;
     }
@@ -128,12 +132,16 @@ pub struct Where {
 impl Where {
     /// "Kapadwanj, Gujarat, India", skipping whatever came back empty.
     pub fn label(&self) -> String {
-        [self.city.as_str(), self.region.as_str(), self.country.as_str()]
-            .iter()
-            .filter(|s| !s.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
+        [
+            self.city.as_str(),
+            self.region.as_str(),
+            self.country.as_str(),
+        ]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ")
     }
 }
 
@@ -151,7 +159,9 @@ pub fn locate(ip: &str) -> Option<Where> {
 
     let mut stream = TcpStream::connect((HOST, 80)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(6))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_secs(6))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(6)))
+        .ok()?;
     stream.write_all(req.as_bytes()).ok()?;
 
     let mut buf = String::new();
@@ -190,7 +200,11 @@ fn lookup_by_ip() -> Option<Fix> {
     }
     // IP databases resolve to a city centroid, sometimes to a whole region.
     // Ten kilometres is generous rather than pessimistic.
-    let source = if ssh_client_ip().is_some() { "your address" } else { "IP" };
+    let source = if ssh_client_ip().is_some() {
+        "your address"
+    } else {
+        "IP"
+    };
     Some(fix_from(lat, lon, label, 10.0, source))
 }
 

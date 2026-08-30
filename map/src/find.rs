@@ -96,7 +96,9 @@ pub fn search(
 
     for tile in tiles {
         for f in &tile.features {
-            let Some(name) = f.name.as_deref() else { continue };
+            let Some(name) = f.name.as_deref() else {
+                continue;
+            };
             let Some(r) = score(name, q) else { continue };
             let key = name.to_lowercase();
             if seen.contains(&key) {
@@ -111,7 +113,13 @@ pub fn search(
             };
             let (at, zoom) = frame(&f.pts, sw);
             seen.push(key);
-            out.push(Hit { name: name.to_string(), what, at, zoom, rank: r + 4 });
+            out.push(Hit {
+                name: name.to_string(),
+                what,
+                at,
+                zoom,
+                rank: r + 4,
+            });
         }
     }
 
@@ -153,7 +161,18 @@ mod probe {
                 names.len(),
                 names.iter().take(14).collect::<Vec<_>>()
             );
-            for want in ["Jaipur", "Bengaluru", "Bangalore", "Chennai", "Kolkata", "Surat", "Kapadvanj", "Ahmedabad", "Mumbai", "Delhi"] {
+            for want in [
+                "Jaipur",
+                "Bengaluru",
+                "Bangalore",
+                "Chennai",
+                "Kolkata",
+                "Surat",
+                "Kapadvanj",
+                "Ahmedabad",
+                "Mumbai",
+                "Delhi",
+            ] {
                 if names.iter().any(|n| n.eq_ignore_ascii_case(want)) {
                     print!("  has {want};");
                 }
@@ -187,7 +206,10 @@ mod tests {
 
     #[test]
     fn a_prefix_beats_a_substring() {
-        let t = tile(&[("Gujarat", Layer::Boundary), ("New Gujarat Road", Layer::Place)]);
+        let t = tile(&[
+            ("Gujarat", Layer::Boundary),
+            ("New Gujarat Road", Layer::Place),
+        ]);
         let hits = search("guj", &[], &[t], 360.0, 10);
         assert_eq!(hits[0].name, "Gujarat");
         assert_eq!(hits.len(), 2);

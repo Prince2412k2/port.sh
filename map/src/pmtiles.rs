@@ -7,9 +7,13 @@
 //!
 //! Directories are cached, so steady-state tile lookup is one seek and one read.
 
+#[cfg(feature = "native")]
 use std::collections::HashMap;
+#[cfg(feature = "native")]
 use std::fs::File;
+#[cfg(feature = "native")]
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(feature = "native")]
 use std::path::Path;
 
 const COMPRESSION_GZIP: u8 = 2;
@@ -29,16 +33,17 @@ pub fn hilbert_id(z: u8, x: u32, y: u32) -> u64 {
         acc += 1u64 << (2 * t as u64);
     }
     let (mut x, mut y) = (x as u64, y as u64);
+    let n = 1u64 << z as u64;
     let mut d: u64 = 0;
-    let mut s: u64 = 1u64 << (z as u64) >> 1;
+    let mut s: u64 = n >> 1;
     while s > 0 {
         let rx = u64::from(x & s > 0);
         let ry = u64::from(y & s > 0);
         d += s * s * ((3 * rx) ^ ry);
         if ry == 0 {
             if rx == 1 {
-                x = s.wrapping_sub(1).wrapping_sub(x);
-                y = s.wrapping_sub(1).wrapping_sub(y);
+                x = n - 1 - x;
+                y = n - 1 - y;
             }
             std::mem::swap(&mut x, &mut y);
         }
@@ -55,6 +60,7 @@ struct Entry {
     off: u64,
 }
 
+#[cfg(feature = "native")]
 pub struct Archive {
     file: File,
     root: (u64, u64),
@@ -69,6 +75,7 @@ pub struct Archive {
     dirs: HashMap<(u64, u64), Vec<Entry>>,
 }
 
+#[cfg(feature = "native")]
 impl Archive {
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let mut file = File::open(path)?;
@@ -130,7 +137,9 @@ impl Archive {
         // Root directory, then at most a few levels of leaf directories.
         for _ in 0..4 {
             let entries = self.directory(off, len)?;
-            let Some(e) = find(entries, want) else { return Ok(None) };
+            let Some(e) = find(entries, want) else {
+                return Ok(None);
+            };
             let (run, elen, eoff) = (e.run, e.len, e.off);
             if run == 0 {
                 // A run length of zero means the entry points at a leaf directory.
@@ -147,6 +156,7 @@ impl Archive {
 }
 
 /// Largest entry whose id is <= want, respecting run length.
+#[cfg(feature = "native")]
 fn find(entries: &[Entry], want: u64) -> Option<&Entry> {
     let idx = match entries.binary_search_by(|e| e.id.cmp(&want)) {
         Ok(i) => i,
@@ -182,7 +192,15 @@ fn varint(b: &[u8], p: &mut usize) -> u64 {
 fn deserialize_dir(b: &[u8]) -> Vec<Entry> {
     let mut p = 0usize;
     let n = varint(b, &mut p) as usize;
-    let mut out = vec![Entry { id: 0, run: 0, len: 0, off: 0 }; n];
+    let mut out = vec![
+        Entry {
+            id: 0,
+            run: 0,
+            len: 0,
+            off: 0
+        };
+        n
+    ];
 
     let mut last = 0u64;
     for e in out.iter_mut() {
@@ -204,4 +222,17 @@ fn deserialize_dir(b: &[u8]) -> Vec<Entry> {
         };
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hilbert_order_matches_pmtiles_at_zoom_one() {
+        assert_eq!(hilbert_id(1, 0, 0), 1);
+        assert_eq!(hilbert_id(1, 0, 1), 2);
+        assert_eq!(hilbert_id(1, 1, 1), 3);
+        assert_eq!(hilbert_id(1, 1, 0), 4);
+    }
 }

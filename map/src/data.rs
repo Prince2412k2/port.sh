@@ -96,7 +96,10 @@ impl Layer {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
 pub struct Feature {
+    /// Stable source identity used by renderers that track a feature across frames.
+    pub stable_id: u64,
     pub layer: Layer,
     pub rank: u16,
     pub closed: bool,
@@ -115,7 +118,28 @@ impl Feature {
         name: Option<Box<str>>,
         pts: Vec<[f64; 2]>,
     ) -> Self {
-        Feature { layer, rank, closed, name, bbox: Self::compute_bbox(&pts), pts }
+        let stable_id = fallback_feature_id(layer, rank, closed, name.as_deref(), &pts);
+        Feature {
+            stable_id,
+            layer,
+            rank,
+            closed,
+            name,
+            bbox: Self::compute_bbox(&pts),
+            pts,
+        }
+    }
+
+    /// Prefer a source-provided feature id. The source and source-layer scopes
+    /// prevent unrelated datasets from aliasing while preserving identity across
+    /// tiles and zooms when the source does.
+    pub fn with_source_id(mut self, source: &str, source_layer: &str, id: u64) -> Self {
+        let mut hash = StableHash::new();
+        hash.bytes(source.as_bytes());
+        hash.bytes(source_layer.as_bytes());
+        hash.bytes(&id.to_le_bytes());
+        self.stable_id = hash.finish();
+        self
     }
 
     fn compute_bbox(pts: &[[f64; 2]]) -> [f64; 4] {
@@ -143,6 +167,7 @@ impl Feature {
 /// Both sources produce these: a `.tmap` file becomes one big tile covering
 /// everything, a PMTiles archive produces one per z/x/y. Everything downstream
 /// works the same way for either.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tile {
     pub features: Vec<Feature>,
     /// Feature indices bucketed by layer, so a frame walks only what it needs.
@@ -162,7 +187,6 @@ impl Tile {
         }
         Tile { features, by_layer }
     }
-
 }
 
 pub struct MapData {
@@ -172,6 +196,7 @@ pub struct MapData {
 
 impl MapData {
     /// Load `path` if it exists, otherwise fall back to the embedded sample.
+    #[cfg(feature = "native")]
     pub fn load(path: Option<&str>) -> Self {
         if let Some(p) = path {
             match std::fs::read_to_string(p) {
@@ -198,45 +223,107 @@ impl MapData {
     }
 
     pub fn parse(text: &str) -> Self {
-        MapData { tile: Tile::new(parse_features(text)), source: String::new() }
+        MapData {
+            tile: Tile::new(parse_features(text)),
+            source: String::new(),
+        }
     }
 }
 
 pub fn parse_features(text: &str) -> Vec<Feature> {
-        let mut features = Vec::new();
-        let mut lines = text.lines();
+    let mut features = Vec::new();
+    let mut lines = text.lines();
 
-        while let Some(line) = lines.next() {
-            let line = line.trim_end();
-            if !line.starts_with("F ") {
+    while let Some(line) = lines.next() {
+        let line = line.trim_end();
+        if !line.starts_with("F ") {
+            continue;
+        }
+        let Some(header) = parse_header(line) else {
+            continue;
+        };
+        let Some(coords) = lines.next() else { break };
+
+        let mut pts = Vec::with_capacity(header.npts);
+        let mut nums = coords.split_ascii_whitespace();
+        while let (Some(a), Some(b)) = (nums.next(), nums.next()) {
+            let (Ok(lon), Ok(lat)) = (a.parse::<f64>(), b.parse::<f64>()) else {
                 continue;
-            }
-            let Some(header) = parse_header(line) else { continue };
-            let Some(coords) = lines.next() else { break };
-
-            let mut pts = Vec::with_capacity(header.npts);
-            let mut nums = coords.split_ascii_whitespace();
-            while let (Some(a), Some(b)) = (nums.next(), nums.next()) {
-                let (Ok(lon), Ok(lat)) = (a.parse::<f64>(), b.parse::<f64>()) else {
-                    continue;
-                };
-                pts.push(lonlat_to_world(lon, lat));
-            }
-            if pts.is_empty() {
-                continue;
-            }
-
-            features.push(Feature {
-                layer: header.layer,
-                rank: header.rank,
-                closed: header.closed,
-                name: header.name,
-                bbox: Feature::compute_bbox(&pts),
-                pts,
-            });
+            };
+            pts.push(lonlat_to_world(lon, lat));
+        }
+        if pts.is_empty() {
+            continue;
         }
 
+        features.push(Feature {
+            stable_id: fallback_feature_id(
+                header.layer,
+                header.rank,
+                header.closed,
+                header.name.as_deref(),
+                &pts,
+            ),
+            layer: header.layer,
+            rank: header.rank,
+            closed: header.closed,
+            name: header.name,
+            bbox: Feature::compute_bbox(&pts),
+            pts,
+        });
+    }
+
     features
+}
+
+/// A small deterministic hash for stable renderer identities. This is not used
+/// for security; it keeps ids compact while producing identical values on every
+/// target Rust supports.
+pub fn stable_detail_id(namespace: &str, value: &str) -> u64 {
+    let mut hash = StableHash::new();
+    hash.bytes(namespace.as_bytes());
+    hash.bytes(value.as_bytes());
+    hash.finish()
+}
+
+fn fallback_feature_id(
+    layer: Layer,
+    rank: u16,
+    closed: bool,
+    name: Option<&str>,
+    pts: &[[f64; 2]],
+) -> u64 {
+    let mut hash = StableHash::new();
+    hash.bytes(b"derived-feature");
+    hash.bytes(&[layer as u8, closed as u8]);
+    hash.bytes(&rank.to_le_bytes());
+    hash.bytes(name.unwrap_or("").as_bytes());
+    for point in pts {
+        hash.bytes(&point[0].to_bits().to_le_bytes());
+        hash.bytes(&point[1].to_bits().to_le_bytes());
+    }
+    hash.finish()
+}
+
+struct StableHash(u64);
+
+impl StableHash {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100_0000_01b3);
+        }
+        self.0 ^= 0xff;
+        self.0 = self.0.wrapping_mul(0x100_0000_01b3);
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
 }
 
 impl MapData {
@@ -270,7 +357,6 @@ impl MapData {
             pick(&ys, 0.90),
         ]
     }
-
 }
 
 struct Header {

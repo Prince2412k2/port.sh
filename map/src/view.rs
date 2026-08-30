@@ -98,6 +98,21 @@ pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
     }
 }
 
+/// First zoom at which a layer carries useful information.
+///
+/// This is renderer policy rather than drawing style: every client must stage
+/// the same detail, even when its final materials differ.
+pub fn min_zoom(layer: Layer) -> f64 {
+    match layer {
+        Layer::Landuse => 8.0,
+        Layer::Rail | Layer::Landmark => 10.5,
+        Layer::RoadMedium => 11.5,
+        Layer::RoadMinor => 13.5,
+        Layer::Building => 14.0,
+        _ => 0.0,
+    }
+}
+
 /// The smallest a feature may be on screen and still be drawn, in subpixels.
 ///
 /// Rank alone cannot carry level of detail here, and the shipped basemap shows
@@ -118,7 +133,10 @@ pub fn rank_floor(layer: Layer, zoom: f64) -> u16 {
 /// Roads only. A short *water* feature at country zoom is a lake, which is a
 /// thing in itself; a short road is a fragment of a thing.
 pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
-    if !matches!(layer, Layer::RoadMajor | Layer::RoadMedium | Layer::RoadMinor | Layer::Rail) {
+    if !matches!(
+        layer,
+        Layer::RoadMajor | Layer::RoadMedium | Layer::RoadMinor | Layer::Rail
+    ) {
         return 0.0;
     }
     // Continuous, because this is now the only thing holding density down at
@@ -127,9 +145,6 @@ pub fn min_extent(layer: Layer, zoom: f64) -> f64 {
     // hold them, a few at a time, instead of fifteen hundred at once.
     ((10.0 - zoom) * 0.85).clamp(0.0, 5.0)
 }
-
-
-
 
 /// Vertical exaggeration of the terrain, by zoom.
 ///
@@ -159,6 +174,11 @@ pub fn ground_strength(zoom: f64) -> f32 {
     /// Full strength, and opaque from here up.
     const NOON: f64 = 7.0;
     (((zoom - DAWN) / (NOON - DAWN)) as f32).clamp(0.0, 1.0)
+}
+
+/// Terrain smoothing radius used by both the relief surface and draped features.
+pub fn drape_smoothing(vp: &crate::geo::Viewport) -> f64 {
+    crate::geo::meters_per_world_unit(vp.center_lonlat().1) / vp.scale() * 2.0 * 3.5
 }
 
 /// Ground fills are texture, and texture at region scale is just noise.
@@ -206,5 +226,13 @@ mod density_tests {
             prev = now;
             z += 0.1;
         }
+    }
+
+    #[test]
+    fn local_detail_arrives_only_at_local_zooms() {
+        assert_eq!(min_zoom(Layer::RoadMedium), 11.5);
+        assert_eq!(min_zoom(Layer::RoadMinor), 13.5);
+        assert_eq!(min_zoom(Layer::Rail), 10.5);
+        assert_eq!(min_zoom(Layer::Coast), 0.0);
     }
 }

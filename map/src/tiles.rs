@@ -43,7 +43,10 @@ pub struct Source {
 fn terrain() -> Option<&'static crate::terrain::Terrain> {
     static SLOT: std::sync::OnceLock<Option<crate::terrain::Terrain>> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| {
-        for c in ["india.tmhg", "terrain.tmhg"].iter().filter_map(|n| crate::paths::data_file(n)) {
+        for c in ["india.tmhg", "terrain.tmhg"]
+            .iter()
+            .filter_map(|n| crate::paths::data_file(n))
+        {
             match crate::terrain::Terrain::open(Path::new(&c)) {
                 Ok(t) => return Some(t),
                 Err(e) => eprintln!("termap: {}: {e}", c.display()),
@@ -56,7 +59,11 @@ fn terrain() -> Option<&'static crate::terrain::Terrain> {
 
 enum Backend {
     /// Everything resident, as one tile.
-    Static { tile: Rc<Tile>, label: String, bounds: [f64; 4] },
+    Static {
+        tile: Rc<Tile>,
+        label: String,
+        bounds: [f64; 4],
+    },
     Tiled(Tiled),
 }
 
@@ -68,7 +75,10 @@ impl Source {
             overlays: Vec::new(),
         };
         src.terrain = terrain();
-        for c in ["states.tmap", "buildings.tmap"].iter().filter_map(|n| crate::paths::data_file(n)) {
+        for c in ["states.tmap", "buildings.tmap"]
+            .iter()
+            .filter_map(|n| crate::paths::data_file(n))
+        {
             if let Ok(text) = std::fs::read_to_string(&c) {
                 let feats = crate::data::parse_features(&text);
                 if !feats.is_empty() {
@@ -117,7 +127,9 @@ impl Source {
     /// and would evict the ninety-six tiles somebody is currently looking at,
     /// to index names that are then thrown away with the geometry.
     pub fn read_uncached(&mut self, id: crate::pmtiles::TileId) -> Option<Tile> {
-        let Backend::Tiled(t) = &mut self.backend else { return None };
+        let Backend::Tiled(t) = &mut self.backend else {
+            return None;
+        };
         match t.archive.tile(id) {
             Ok(Some(bytes)) => Some(Tile::new(mvt::decode(&bytes, id))),
             _ => None,
@@ -140,7 +152,11 @@ impl Source {
             Backend::Static { tile, .. } => tile.features.len(),
             Backend::Tiled(t) => t.cache.values().map(|t| t.features.len()).sum(),
         };
-        base + self.overlays.iter().map(|t| t.features.len()).sum::<usize>()
+        base + self
+            .overlays
+            .iter()
+            .map(|t| t.features.len())
+            .sum::<usize>()
     }
 }
 

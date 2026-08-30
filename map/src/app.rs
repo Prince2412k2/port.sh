@@ -7,12 +7,12 @@ use ratatui::layout::Rect;
 
 use crate::canvas::{Canvas, Fog, RoadGlyph, SUB_X, SUB_Y};
 use crate::data::{Layer, Tile, LAYER_COUNT};
-use crate::tiles::Source;
-use std::rc::Rc;
 use crate::geo::Viewport;
 use crate::scene::Stats;
 use crate::style::{DepthField, FocusMode};
+use crate::tiles::Source;
 use crate::tour::Tour;
+use std::rc::Rc;
 
 /// Layers exposed to the number keys, in panel order.
 pub const TOGGLES: [Layer; 8] = [
@@ -234,7 +234,9 @@ impl App {
     /// Put the camera on the whole basemap and start the descent. Called once
     /// the canvas has a real size, for the reason `tour_pending` exists.
     pub fn open_tour_if_pending(&mut self) {
-        let Some(i) = self.tour_pending.take() else { return };
+        let Some(i) = self.tour_pending.take() else {
+            return;
+        };
         // Start from as far out as the data goes: the tour is about where in
         // the world these places are, and it cannot say that from street level.
         self.vp.fit(self.source.bounds());
@@ -276,13 +278,7 @@ impl App {
     /// picture, and the caller ramps it during the arrival -- travel flat,
     /// arrival tilted, which is the tour's rule and the reason a small map does
     /// not turn to mush while the ground is still moving.
-    pub fn park_camera(
-        &mut self,
-        lonlat: (f64, f64),
-        zoom: f64,
-        tilt: f64,
-        persp: f64,
-    ) -> Parked {
+    pub fn park_camera(&mut self, lonlat: (f64, f64), zoom: f64, tilt: f64, persp: f64) -> Parked {
         let was = Parked {
             vp: self.vp,
             map_area: self.map_area,
@@ -341,7 +337,11 @@ impl App {
         // Canvas size belongs to whoever is drawing, not to the caller: it is
         // set from the rect on the next frame anyway, and taking it from a
         // stored viewport would scale the world to a stale screen.
-        self.vp = Viewport { sw: self.vp.sw, sh: self.vp.sh, ..vp };
+        self.vp = Viewport {
+            sw: self.vp.sw,
+            sh: self.vp.sh,
+            ..vp
+        };
         self.auto_view = false;
         self.fit_pending = false;
         self.tour_pending = None;
@@ -364,8 +364,12 @@ impl App {
     pub fn sync_camera(&mut self) {
         if self.auto_view {
             self.vp.tilt = crate::view::auto_tilt(self.vp.zoom);
-            self.vp.persp = crate::view::auto_persp(self.vp.zoom);
         }
+        self.vp.persp = if self.vp.tilt > 0.01 {
+            crate::view::auto_persp(self.vp.zoom)
+        } else {
+            0.0
+        };
     }
 
     /// Called once the canvas has a real size.
@@ -386,10 +390,7 @@ impl App {
         // With no cursor the focus sits at the middle of the map, which still
         // gives a centre-weighted falloff rather than snapping to flat.
         let focus = match self.cursor {
-            Some((x, y)) => [
-                (x as usize * SUB_X) as f64,
-                (y as usize * SUB_Y) as f64,
-            ],
+            Some((x, y)) => [(x as usize * SUB_X) as f64, (y as usize * SUB_Y) as f64],
             None => [self.canvas.sw as f64 * 0.5, self.canvas.sh as f64 * 0.5],
         };
         DepthField {
@@ -472,7 +473,16 @@ impl App {
 
     fn zoom_centered(&mut self, dz: f64) {
         let anchor = [self.vp.sw * 0.5, self.vp.sh * 0.5];
+        self.zoom_at(dz, anchor);
+    }
+
+    fn zoom_at(&mut self, dz: f64, anchor: [f64; 2]) {
+        let before = self.vp.unproject(anchor);
         self.vp.zoom_at(dz, anchor);
+        self.sync_camera();
+        let after = self.vp.unproject(anchor);
+        self.vp.center[0] = (self.vp.center[0] + before[0] - after[0]).clamp(0.0, 1.0);
+        self.vp.center[1] = (self.vp.center[1] + before[1] - after[1]).clamp(0.0, 1.0);
     }
 
     /// Re-run the search against whatever is loaded now.
@@ -484,7 +494,9 @@ impl App {
 
     /// Fly to the highlighted hit and close the search.
     fn go_to_hit(&mut self) {
-        let Some(h) = self.hits.get(self.hit) else { return };
+        let Some(h) = self.hits.get(self.hit) else {
+            return;
+        };
         let (name, at, zoom) = (h.name.clone(), h.at, h.zoom);
         self.query = None;
         self.hits.clear();
@@ -598,8 +610,14 @@ impl App {
             }
             KeyCode::Char('v') => {
                 self.show_terrain = !self.show_terrain;
-                self.toast =
-                    Some(if self.show_terrain { "terrain on" } else { "terrain off" }.into());
+                self.toast = Some(
+                    if self.show_terrain {
+                        "terrain on"
+                    } else {
+                        "terrain off"
+                    }
+                    .into(),
+                );
             }
             KeyCode::Char('u') => self.set_tilt(self.vp.tilt + 0.08),
             KeyCode::Char('o') => self.set_tilt(self.vp.tilt - 0.08),
@@ -613,31 +631,30 @@ impl App {
                 // guard would still be alive across them.
                 let fix = self.home.lock().unwrap().clone();
                 match fix {
-                Some(f) => {
-                    self.vp.center = f.world;
-                    // Zoom to the uncertainty, not past it. Flying to street
-                    // level on a fix that is only good to ten kilometres shows
-                    // a confident dot on the wrong street.
-                    let z = if f.accuracy_km <= 0.05 {
-                        15.0
-                    } else {
-                        let m = crate::geo::meters_per_world_unit(f.lonlat.1);
-                        // Sized so the accuracy circle spans about a third of
-                        // the frame: visibly an area, not a point.
-                        (m * self.vp.sw / (256.0 * 6.0 * f.accuracy_km * 1000.0))
-                            .log2()
-                            .clamp(crate::geo::MIN_ZOOM, 15.0)
-                    };
-                    self.set_zoom(z);
-                    self.toast = Some(format!(
-                        "{}  ({:.4}, {:.4})  ±{:.0} km via {}",
-                        f.label, f.lonlat.1, f.lonlat.0, f.accuracy_km, f.source
-                    ));
-                }
-                None => {
-                    self.toast =
-                        Some("locating… set TERMAP_HOME=lat,lon to pin it".into());
-                }
+                    Some(f) => {
+                        self.vp.center = f.world;
+                        // Zoom to the uncertainty, not past it. Flying to street
+                        // level on a fix that is only good to ten kilometres shows
+                        // a confident dot on the wrong street.
+                        let z = if f.accuracy_km <= 0.05 {
+                            15.0
+                        } else {
+                            let m = crate::geo::meters_per_world_unit(f.lonlat.1);
+                            // Sized so the accuracy circle spans about a third of
+                            // the frame: visibly an area, not a point.
+                            (m * self.vp.sw / (256.0 * 6.0 * f.accuracy_km * 1000.0))
+                                .log2()
+                                .clamp(crate::geo::MIN_ZOOM, 15.0)
+                        };
+                        self.set_zoom(z);
+                        self.toast = Some(format!(
+                            "{}  ({:.4}, {:.4})  ±{:.0} km via {}",
+                            f.label, f.lonlat.1, f.lonlat.0, f.accuracy_km, f.source
+                        ));
+                    }
+                    None => {
+                        self.toast = Some("locating… set TERMAP_HOME=lat,lon to pin it".into());
+                    }
                 }
             }
             KeyCode::Char('m') => {
@@ -648,8 +665,12 @@ impl App {
                     self.vp.persp = 0.0;
                 }
                 self.toast = Some(
-                    if self.auto_view { "camera: auto by zoom" } else { "camera: manual, flat" }
-                        .into(),
+                    if self.auto_view {
+                        "camera: auto by zoom"
+                    } else {
+                        "camera: manual, flat"
+                    }
+                    .into(),
                 );
             }
             KeyCode::Char('[') => {
@@ -667,7 +688,12 @@ impl App {
             KeyCode::Char('c') => {
                 self.mono = !self.mono;
                 self.toast = Some(
-                    if self.mono { "colour: mono" } else { "colour: by kind" }.into(),
+                    if self.mono {
+                        "colour: mono"
+                    } else {
+                        "colour: by kind"
+                    }
+                    .into(),
                 );
             }
             KeyCode::Char('i') => {
@@ -725,7 +751,10 @@ impl App {
                 self.toast = Some("all layers on".into());
             }
             KeyCode::Char(c) if LAYER_KEYS.contains(&c) => {
-                let i = LAYER_KEYS.iter().position(|&k| k == c).expect("just matched");
+                let i = LAYER_KEYS
+                    .iter()
+                    .position(|&k| k == c)
+                    .expect("just matched");
                 let layer = TOGGLES[i];
                 let on = &mut self.layers[layer.index()];
                 *on = !*on;
@@ -778,12 +807,12 @@ impl App {
             MouseEventKind::ScrollUp if inside => {
                 self.touched = true;
                 let anchor = Self::to_sub(local);
-                self.vp.zoom_at(0.30, anchor);
+                self.zoom_at(0.30, anchor);
             }
             MouseEventKind::ScrollDown if inside => {
                 self.touched = true;
                 let anchor = Self::to_sub(local);
-                self.vp.zoom_at(-0.30, anchor);
+                self.zoom_at(-0.30, anchor);
             }
             _ => {}
         }

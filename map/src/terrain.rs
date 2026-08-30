@@ -60,10 +60,13 @@
 //! 1520 m at level 0 to 1449 m at level 3, a 5% loss across a 16x change of
 //! scale. Smoothing removes *features*, not the mountain.
 
+#[cfg(feature = "native")]
 use std::io::Read;
+#[cfg(feature = "native")]
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[cfg(feature = "native")]
 use memmap2::{Mmap, MmapOptions};
 
 const NODATA: i16 = -32768;
@@ -114,7 +117,11 @@ impl LevelRef<'_> {
             Cells::Mapped(b) => i16::from_le_bytes([b[i * 2], b[i * 2 + 1]]),
             Cells::Owned(v) => v[i],
         };
-        if v == NODATA { 0.0 } else { v as f32 }
+        if v == NODATA {
+            0.0
+        } else {
+            v as f32
+        }
     }
 
     /// Bilinear sample at a position in this level's own grid coordinates.
@@ -158,51 +165,147 @@ pub struct Terrain {
     /// Ground metres per level-0 sample, north-south.
     m_per_px: f64,
     /// Row 0 is the north edge.
-    base: Mmap,
+    base: Base,
     /// Levels 1 and up, built on first use rather than on open: a session that
     /// never asks for a smoothed height never pays for it, and the cost is a
     /// scan of the whole file.
     higher: OnceLock<Vec<Owned>>,
 }
 
+enum Base {
+    #[cfg(feature = "native")]
+    Mapped(Mmap),
+    Bytes(Vec<u8>),
+}
+
+impl Base {
+    fn payload(&self) -> &[u8] {
+        match self {
+            #[cfg(feature = "native")]
+            Self::Mapped(bytes) => bytes,
+            Self::Bytes(bytes) => &bytes[HEADER_LEN as usize..],
+        }
+    }
+}
+
+struct Header {
+    west: f64,
+    south: f64,
+    east: f64,
+    north: f64,
+    width: usize,
+    height: usize,
+}
+
+fn invalid(kind: std::io::ErrorKind, message: &'static str) -> std::io::Error {
+    std::io::Error::new(kind, message)
+}
+
+fn validate(head: &[u8], payload_len: usize) -> std::io::Result<Header> {
+    if head.len() < HEADER_LEN as usize {
+        return Err(invalid(
+            std::io::ErrorKind::UnexpectedEof,
+            "heightmap header truncated",
+        ));
+    }
+    if &head[0..4] != b"TMHG" || head[4] != 1 {
+        return Err(invalid(
+            std::io::ErrorKind::InvalidData,
+            "not a v1 .tmhg heightmap",
+        ));
+    }
+    let d = |o: usize| f64::from_le_bytes(head[o..o + 8].try_into().unwrap());
+    let u = |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().unwrap()) as usize;
+    let (west, south, east, north) = (d(8), d(16), d(24), d(32));
+    let (width, height) = (u(40), u(44));
+    if width == 0 || height == 0 {
+        return Err(invalid(
+            std::io::ErrorKind::InvalidData,
+            "heightmap dimensions are zero",
+        ));
+    }
+    let needed = width
+        .checked_mul(height)
+        .and_then(|cells| cells.checked_mul(2))
+        .ok_or_else(|| {
+            invalid(
+                std::io::ErrorKind::InvalidData,
+                "heightmap dimensions overflow",
+            )
+        })?;
+    if payload_len < needed {
+        return Err(invalid(
+            std::io::ErrorKind::UnexpectedEof,
+            "heightmap truncated",
+        ));
+    }
+    if ![west, south, east, north].iter().all(|v| v.is_finite()) || west >= east || south >= north {
+        return Err(invalid(
+            std::io::ErrorKind::InvalidData,
+            "heightmap bounds are invalid",
+        ));
+    }
+    Ok(Header {
+        west,
+        south,
+        east,
+        north,
+        width,
+        height,
+    })
+}
+
 impl Terrain {
+    #[cfg(feature = "native")]
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let mut f = std::fs::File::open(path)?;
         let mut head = [0u8; HEADER_LEN as usize];
         f.read_exact(&mut head)?;
-        if &head[0..4] != b"TMHG" || head[4] != 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "not a v1 .tmhg heightmap",
-            ));
-        }
-        let d = |o: usize| f64::from_le_bytes(head[o..o + 8].try_into().unwrap());
-        let u = |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().unwrap()) as usize;
-        let (west, south, east, north) = (d(8), d(16), d(24), d(32));
-        let (width, height) = (u(40), u(44));
+        let payload_len = f.metadata()?.len().checked_sub(HEADER_LEN).ok_or_else(|| {
+            invalid(
+                std::io::ErrorKind::UnexpectedEof,
+                "heightmap header truncated",
+            )
+        })?;
+        let payload_len = usize::try_from(payload_len)
+            .map_err(|_| invalid(std::io::ErrorKind::InvalidData, "heightmap is too large"))?;
+        let header = validate(&head, payload_len)?;
 
         // SAFETY: the file is baked once by `scripts/dem2hgt.py` and never
         // rewritten while the map is running, so nothing can shorten or edit
         // the bytes underneath the mapping.
-        let base = unsafe { MmapOptions::new().offset(HEADER_LEN).map(&f)? };
-        if base.len() < width * height * 2 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "heightmap truncated",
-            ));
-        }
+        let base = Base::Mapped(unsafe { MmapOptions::new().offset(HEADER_LEN).map(&f)? });
 
-        Ok(Terrain {
-            west,
-            south,
-            east,
-            north,
-            width,
-            height,
-            m_per_px: (north - south) / height as f64 * M_PER_DEG_LAT,
+        Ok(Self::new(header, base))
+    }
+
+    /// Opens a heightmap from owned bytes without copying its sample payload.
+    pub fn from_bytes(bytes: Vec<u8>) -> std::io::Result<Self> {
+        let payload_len = bytes
+            .len()
+            .checked_sub(HEADER_LEN as usize)
+            .ok_or_else(|| {
+                invalid(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "heightmap header truncated",
+                )
+            })?;
+        let header = validate(&bytes, payload_len)?;
+        Ok(Self::new(header, Base::Bytes(bytes)))
+    }
+
+    fn new(header: Header, base: Base) -> Self {
+        Terrain {
+            west: header.west,
+            south: header.south,
+            east: header.east,
+            north: header.north,
+            width: header.width,
+            height: header.height,
+            m_per_px: (header.north - header.south) / header.height as f64 * M_PER_DEG_LAT,
             base,
             higher: OnceLock::new(),
-        })
+        }
     }
 
     /// Ground metres per sample at level 0: the sharpest this can ever be.
@@ -220,7 +323,11 @@ impl Terrain {
             let mut out: Vec<Owned> = Vec::new();
             while out.len() + 1 < MAX_LEVELS {
                 let prev = match out.last() {
-                    Some(l) => LevelRef { w: l.w, h: l.h, cells: Cells::Owned(&l.cells) },
+                    Some(l) => LevelRef {
+                        w: l.w,
+                        h: l.h,
+                        cells: Cells::Owned(&l.cells),
+                    },
                     None => self.level0(),
                 };
                 if prev.w.min(prev.h) <= MIN_SIDE * 2 {
@@ -234,12 +341,20 @@ impl Terrain {
 
     #[inline]
     fn level0(&self) -> LevelRef<'_> {
-        LevelRef { w: self.width, h: self.height, cells: Cells::Mapped(&self.base) }
+        LevelRef {
+            w: self.width,
+            h: self.height,
+            cells: Cells::Mapped(self.base.payload()),
+        }
     }
 
     fn level(&self, i: usize) -> LevelRef<'_> {
         match i.checked_sub(1).and_then(|j| self.built().get(j)) {
-            Some(l) => LevelRef { w: l.w, h: l.h, cells: Cells::Owned(&l.cells) },
+            Some(l) => LevelRef {
+                w: l.w,
+                h: l.h,
+                cells: Cells::Owned(&l.cells),
+            },
             None => self.level0(),
         }
     }
@@ -310,7 +425,14 @@ impl Terrain {
         let top = self.levels() - 1;
         let lod = (smooth_m / self.m_per_px).max(1.0).log2();
         let lo = (lod.floor() as usize).min(top);
-        (lo, if lo == top { 0.0 } else { (lod - lo as f64) as f32 })
+        (
+            lo,
+            if lo == top {
+                0.0
+            } else {
+                (lod - lo as f64) as f32
+            },
+        )
     }
 
     /// Bilinear sample of one level, from lon/lat.
@@ -361,7 +483,6 @@ fn halve(src: LevelRef<'_>) -> Owned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     /// Two degrees square, so the arithmetic in the tests stays legible.
     const W: f64 = 10.0;
@@ -369,9 +490,7 @@ mod tests {
     const E: f64 = 12.0;
     const N: f64 = 22.0;
 
-    fn bake(name: &str, side: usize, f: impl Fn(usize, usize) -> f32) -> Terrain {
-        let p = std::env::temp_dir()
-            .join(format!("termap-terrain-{}-{name}.tmhg", std::process::id()));
+    fn bake(_name: &str, side: usize, f: impl Fn(usize, usize) -> f32) -> Terrain {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"TMHG");
         buf.push(1);
@@ -386,8 +505,64 @@ mod tests {
                 buf.extend_from_slice(&(f(x, y).round() as i16).to_le_bytes());
             }
         }
-        std::fs::File::create(&p).unwrap().write_all(&buf).unwrap();
-        Terrain::open(&p).unwrap()
+        Terrain::from_bytes(buf).unwrap()
+    }
+
+    #[test]
+    fn owned_bytes_validate_the_format() {
+        let valid = || {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"TMHG\x01\0\0\0");
+            for v in [W, S, E, N] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&1u32.to_le_bytes());
+            bytes.extend_from_slice(&0i16.to_le_bytes());
+            bytes
+        };
+
+        let mut bad_magic = valid();
+        bad_magic[0] = b'X';
+        assert_eq!(
+            Terrain::from_bytes(bad_magic).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut bad_version = valid();
+        bad_version[4] = 2;
+        assert_eq!(
+            Terrain::from_bytes(bad_version).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut zero_width = valid();
+        zero_width[40..44].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            Terrain::from_bytes(zero_width).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut unordered = valid();
+        unordered[24..32].copy_from_slice(&W.to_le_bytes());
+        assert_eq!(
+            Terrain::from_bytes(unordered).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut nonfinite = valid();
+        nonfinite[8..16].copy_from_slice(&f64::NAN.to_le_bytes());
+        assert_eq!(
+            Terrain::from_bytes(nonfinite).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut truncated = valid();
+        truncated.pop();
+        assert_eq!(
+            Terrain::from_bytes(truncated).err().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 
     /// A broad hill with a fine ripple riding on it: the shape of the actual
@@ -418,7 +593,11 @@ mod tests {
         // 3/8 east of west and 3/8 south of north.
         let lon = W + (E - W) * 3.0 / 8.0;
         let lat = N - (N - S) * 3.0 / 8.0;
-        assert!((t.sample(lon, lat) - 500.0).abs() < 1.0, "got {}", t.sample(lon, lat));
+        assert!(
+            (t.sample(lon, lat) - 500.0).abs() < 1.0,
+            "got {}",
+            t.sample(lon, lat)
+        );
         assert_eq!(t.sample(W - 1.0, lat), 0.0, "west of the grid is sea");
     }
 
@@ -449,18 +628,27 @@ mod tests {
         // so about 177 m RMS. This is the control, and it is what the frame
         // was being asked to draw.
         let raw = rms(&row(&noisy, res, 240), &row(&clean, res, 240));
-        assert!(raw > 120.0, "the ripple is not even there to remove: {raw:.0} m");
+        assert!(
+            raw > 120.0,
+            "the ripple is not even there to remove: {raw:.0} m"
+        );
 
         // Smoothed, they are the same mountain.
         let got = rms(&row(&noisy, res * 8.0, 240), &row(&clean, res * 8.0, 240));
-        assert!(got < raw / 20.0, "ripple survived: {got:.1} m against {raw:.0} m raw");
+        assert!(
+            got < raw / 20.0,
+            "ripple survived: {got:.1} m against {raw:.0} m raw"
+        );
 
         // One level down is where the filter is actually chosen. Everything
         // annihilates a ripple given three levels; the binomial gets to a
         // quarter of the raw error in one, and a 2x2 box only gets to a half.
         // This is the assertion that holds the kernel in place.
         let one = rms(&row(&noisy, res * 2.0, 240), &row(&clean, res * 2.0, 240));
-        assert!(one < raw * 0.3, "the first level barely filters: {one:.0} m of {raw:.0}");
+        assert!(
+            one < raw * 0.3,
+            "the first level barely filters: {one:.0} m of {raw:.0}"
+        );
 
         // And it is the mountain, not a plain. Against the clean surface's
         // own climb rather than a number: the row crosses the hill from its
@@ -468,8 +656,14 @@ mod tests {
         // with, and quoting 3000 here would only be measuring where the row
         // happens to start.
         let climb = |v: &[f32]| v.iter().cloned().fold(f32::MIN, f32::max) - v[0];
-        let (want, got) = (climb(&row(&clean, res, 240)), climb(&row(&noisy, res * 8.0, 240)));
-        assert!(got > want * 0.9, "smoothed flat: {got:.0} m of climb against {want:.0}");
+        let (want, got) = (
+            climb(&row(&clean, res, 240)),
+            climb(&row(&noisy, res * 8.0, 240)),
+        );
+        assert!(
+            got > want * 0.9,
+            "smoothed flat: {got:.0} m of climb against {want:.0}"
+        );
     }
 
     /// Zooming must not pop. Without the blend between levels the surface
@@ -492,7 +686,10 @@ mod tests {
             worst = worst.max((now - prev).abs());
             prev = now;
         }
-        assert!(worst < 12.0, "a level boundary shows: {worst:.1} m in one step");
+        assert!(
+            worst < 12.0,
+            "a level boundary shows: {worst:.1} m in one step"
+        );
     }
 
     /// Slope points uphill, and is measured in rise over run.
@@ -505,8 +702,16 @@ mod tests {
 
         // A degree of longitude at 21 N is 111320*cos(21) metres.
         let want = 1000.0 / (111_320.0 * 21f64.to_radians().cos()) as f32;
-        assert!((p.dx - want).abs() < want * 0.1, "east slope {} against {want}", p.dx);
-        assert!(p.dy.abs() < want * 0.1, "a ramp with no north-south slope has none: {}", p.dy);
+        assert!(
+            (p.dx - want).abs() < want * 0.1,
+            "east slope {} against {want}",
+            p.dx
+        );
+        assert!(
+            p.dy.abs() < want * 0.1,
+            "a ramp with no north-south slope has none: {}",
+            p.dy
+        );
     }
 
     /// The pyramid stops, and stops somewhere sensible.

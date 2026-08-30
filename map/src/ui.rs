@@ -18,7 +18,6 @@ use crate::scene::{self, SceneOpts};
 // Threaded rather than kept in a global: one process serves many sessions over
 // SSH, and a global theme would be whichever visitor toggled it last.
 
-
 const PANEL_W: u16 = 26;
 /// Below this the panel is more trouble than it is worth.
 const PANEL_MIN_TOTAL_W: u16 = 96;
@@ -35,7 +34,9 @@ pub fn render(f: &mut Frame, app: &mut App) {
 /// three apps in a trench coat.
 pub fn render_map_only(f: &mut Frame, area: Rect, app: &mut App) {
     let th = app.theme;
-    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
+    Block::default()
+        .style(Style::default().bg(th.page()))
+        .render(area, f.buffer_mut());
     map_view(f, area, app);
     overlays(f, area, app);
     if app.show_help {
@@ -73,11 +74,19 @@ pub struct Camera {
 
 pub fn render_locator(f: &mut Frame, area: Rect, app: &mut App, cam: Camera, pin: Option<f32>) {
     let th = app.theme;
-    let Camera { lonlat, zoom, tilt, persp, bearing } = cam;
+    let Camera {
+        lonlat,
+        zoom,
+        tilt,
+        persp,
+        bearing,
+    } = cam;
     if area.width < 8 || area.height < 4 {
         return;
     }
-    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
+    Block::default()
+        .style(Style::default().bg(th.page()))
+        .render(area, f.buffer_mut());
     let mut vp = crate::geo::Viewport::new(crate::geo::lonlat_to_world(lonlat.0, lonlat.1), zoom);
     vp.tilt = tilt;
     vp.persp = persp;
@@ -115,7 +124,12 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
                 }
                 f.render_widget(
                     Paragraph::new(Span::styled(ch.to_string(), st)),
-                    Rect { x: cx, y, width: 1, height: 1 },
+                    Rect {
+                        x: cx,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
                 );
             }
         };
@@ -133,7 +147,12 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
             "\u{25c8}".to_string(),
             Style::default().fg(th.amber()).add_modifier(Modifier::BOLD),
         )),
-        Rect { x: cx, y: cy, width: 1, height: 1 },
+        Rect {
+            x: cx,
+            y: cy,
+            width: 1,
+            height: 1,
+        },
     );
 }
 
@@ -144,7 +163,9 @@ fn drop_pin(f: &mut Frame, area: Rect, drop: f32, th: Theme) {
 /// pointer — and belong to the view, not to the shell around it.
 pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
     let th = app.theme;
-    Block::default().style(Style::default().bg(th.page())).render(area, f.buffer_mut());
+    Block::default()
+        .style(Style::default().bg(th.page()))
+        .render(area, f.buffer_mut());
 
     let [head, body, foot] = Layout::vertical([
         Constraint::Length(1),
@@ -155,8 +176,8 @@ pub fn render_in(f: &mut Frame, area: Rect, app: &mut App) {
 
     let show_panel = app.show_panel && area.width >= PANEL_MIN_TOTAL_W;
     let (panel, map) = if show_panel {
-        let [p, m] = Layout::horizontal([Constraint::Length(PANEL_W), Constraint::Min(1)])
-            .areas(body);
+        let [p, m] =
+            Layout::horizontal([Constraint::Length(PANEL_W), Constraint::Min(1)]).areas(body);
         (Some(p), m)
     } else {
         (None, body)
@@ -182,10 +203,19 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
     let ew = if lon >= 0.0 { 'E' } else { 'W' };
 
     let left = Line::from(vec![
-        Span::styled(" termap ", Style::default().fg(th.page()).bg(th.ink()).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " termap ",
+            Style::default()
+                .fg(th.page())
+                .bg(th.ink())
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" 0.1.0", Style::default().fg(th.faint())),
         Span::styled("  │  ", Style::default().fg(th.ghost())),
-        Span::styled(app.source.label().to_string(), Style::default().fg(th.faint())),
+        Span::styled(
+            app.source.label().to_string(),
+            Style::default().fg(th.faint()),
+        ),
     ]);
 
     let right = Line::from(vec![
@@ -194,7 +224,10 @@ fn header(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(th.ink()),
         ),
         Span::styled("  │  ", Style::default().fg(th.ghost())),
-        Span::styled(format!("z{:.1}", app.vp.zoom), Style::default().fg(th.ink())),
+        Span::styled(
+            format!("z{:.1}", app.vp.zoom),
+            Style::default().fg(th.ink()),
+        ),
         Span::styled("  │  ", Style::default().fg(th.ghost())),
         Span::styled(
             if app.vp.is_flat() {
@@ -238,7 +271,11 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
     lines.push(hdr(" LAYERS"));
     for (i, layer) in TOGGLES.iter().enumerate() {
         let on = app.layers[layer.index()];
-        let n: usize = app.tiles.iter().map(|t| t.by_layer[layer.index()].len()).sum();
+        let n: usize = app
+            .tiles
+            .iter()
+            .map(|t| t.by_layer[layer.index()].len())
+            .sum();
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" {} ", if on { "▣" } else { "▢" }),
@@ -247,7 +284,10 @@ fn side_panel(f: &mut Frame, area: Rect, app: &App) {
             // The key that actually toggles it, straight from the table the key
             // handler reads. This printed `i + 1` and so advertised a digit --
             // which, embedded in the portfolio, moved you to another section.
-            Span::styled(format!("{} ", LAYER_KEYS[i]), Style::default().fg(th.ghost())),
+            Span::styled(
+                format!("{} ", LAYER_KEYS[i]),
+                Style::default().fg(th.ghost()),
+            ),
             Span::styled(
                 format!("{:<13}", layer.label()),
                 Style::default().fg(if on { th.ink() } else { th.ghost() }),
@@ -346,7 +386,11 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
     let sb = scalebar_geom(area, app);
 
     let t0 = std::time::Instant::now();
-    let ground = if app.show_terrain { crate::view::ground_strength(app.vp.zoom) } else { 0.0 };
+    let ground = if app.show_terrain {
+        crate::view::ground_strength(app.vp.zoom)
+    } else {
+        0.0
+    };
     // Terrain first: it is the ground everything else sits on, the depth
     // buffer sorts out what ends up hidden behind a ridge, and the exposure it
     // picks is what everything draped on it has to be lifted by.
@@ -357,11 +401,42 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
                 t,
                 &mut app.canvas,
                 &app.vp,
-                crate::relief::Plot { strength: ground, theme: th },
+                crate::relief::Plot {
+                    strength: ground,
+                    theme: th,
+                },
             );
         }
     }
     let lift = app.relief.lift;
+    let home = app
+        .home
+        .lock()
+        .unwrap()
+        .clone()
+        .map(|fix| crate::scene::HomeMarker {
+            world: fix.world,
+            accuracy_km: fix.accuracy_km,
+        });
+    let places: Vec<_> = if app.tour.active {
+        app.tour
+            .places
+            .iter()
+            .map(|place| crate::scene::PlaceMarker {
+                world: place.world,
+                detail: crate::data::stable_detail_id("authored-place", &place.id),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let terrain: Option<&dyn crate::scene::Elevation> = if ground > 0.0 {
+        app.source
+            .terrain
+            .map(|terrain| terrain as &dyn crate::scene::Elevation)
+    } else {
+        None
+    };
     let opts = SceneOpts {
         vp: &app.vp,
         layers: app.layers,
@@ -370,20 +445,21 @@ fn map_view(f: &mut Frame, area: Rect, app: &mut App) {
         show_labels: app.show_labels,
         road_glyph: app.road_glyph,
         mode: app.mode(),
-        terrain: if ground > 0.0 { app.source.terrain } else { None },
+        terrain,
         exag: lift.exag,
         datum: lift.datum,
-        home: app.home.lock().unwrap().clone(),
+        home,
         road_weight: app.road_weight,
         reserved: sb.as_ref().map(|s| s.local),
-        places: if app.tour.active { &app.tour.places } else { &[] },
+        places: &places,
         place_at: app.tour.at,
     };
-    app.stats = scene::draw(&app.tiles, &mut app.canvas, &opts);
+    let tile_refs: Vec<_> = app.tiles.iter().map(|tile| tile.as_ref()).collect();
+    app.stats = scene::draw(&tile_refs, &mut app.canvas, &opts);
     app.stats.relief = relief_pts;
-    app.canvas.resolve(f.buffer_mut(), area, &app.fog, app.mono, th);
+    app.canvas
+        .resolve(f.buffer_mut(), area, &app.fog, app.mono, th);
     app.frame_us = t0.elapsed().as_micros();
-
 }
 
 /// The things that sit on top of the map rather than in it: the tour's card,
@@ -435,7 +511,15 @@ fn hint(f: &mut Frame, area: Rect, app: &App) {
             )
         })
         .collect();
-    f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, y, width: w, height: 1 });
+    f.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect {
+            x,
+            y,
+            width: w,
+            height: 1,
+        },
+    );
 }
 
 /// Blend toward the page ground, for anything that fades in and out.
@@ -443,7 +527,9 @@ fn fade(c: Color, a: f32, th: Theme) -> Color {
     // `ground`, not `page`. The page comes back as a grey-ramp index -- so
     // matching on `Color::Rgb` silently returned the colour unfaded once --
     // and under system it is `Reset`, which has no components at all.
-    let Some((r, g, b)) = crate::canvas::rgb_of(c) else { return c };
+    let Some((r, g, b)) = crate::canvas::rgb_of(c) else {
+        return c;
+    };
     let (br, bg, bb) = th.ground();
     let mix = |v: u8, t: u8| (t as f32 + (v as f32 - t as f32) * a) as u8;
     crate::canvas::ink(mix(r, br), mix(g, bg), mix(b, bb))
@@ -478,10 +564,18 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("find ", Style::default().fg(th.ghost())),
-            Span::styled(q.clone(), Style::default().fg(th.ink()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                q.clone(),
+                Style::default().fg(th.ink()).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("▌", Style::default().fg(th.cyan())),
         ])),
-        Rect { x, y, width: w, height: 1 },
+        Rect {
+            x,
+            y,
+            width: w,
+            height: 1,
+        },
     );
 
     if app.hits.is_empty() {
@@ -491,8 +585,16 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
             "nothing by that name in what is loaded"
         };
         f.render_widget(
-            Paragraph::new(Span::styled(msg.to_string(), Style::default().fg(th.ghost()))),
-            Rect { x, y: y + 1, width: w, height: 1 },
+            Paragraph::new(Span::styled(
+                msg.to_string(),
+                Style::default().fg(th.ghost()),
+            )),
+            Rect {
+                x,
+                y: y + 1,
+                width: w,
+                height: 1,
+            },
         );
         return;
     }
@@ -510,7 +612,12 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(if on { th.ink() } else { th.faint() }),
                 ),
             ])),
-            Rect { x, y: y + 1 + i as u16, width: w.saturating_sub(10), height: 1 },
+            Rect {
+                x,
+                y: y + 1 + i as u16,
+                width: w.saturating_sub(10),
+                height: 1,
+            },
         );
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -518,7 +625,12 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(th.ghost()),
             ))
             .right_aligned(),
-            Rect { x, y: y + 1 + i as u16, width: w, height: 1 },
+            Rect {
+                x,
+                y: y + 1 + i as u16,
+                width: w,
+                height: 1,
+            },
         );
     }
 }
@@ -532,7 +644,9 @@ fn search_box(f: &mut Frame, area: Rect, app: &App) {
 /// is also what the far distance of a tilted map actually looks like.
 fn place_card(f: &mut Frame, area: Rect, app: &App) {
     let th = app.theme;
-    let Some((p, alpha)) = app.tour.card() else { return };
+    let Some((p, alpha)) = app.tour.card() else {
+        return;
+    };
     if alpha <= 0.004 || area.width < 34 || area.height < 12 {
         return;
     }
@@ -553,12 +667,25 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
     let x = area.x + PAD;
     let mut y = area.y + 1;
     let line = |f: &mut Frame, y: u16, spans: Vec<Span<'static>>| {
-        f.render_widget(Paragraph::new(Line::from(spans)), Rect { x, y, width: w, height: 1 });
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x,
+                y,
+                width: w,
+                height: 1,
+            },
+        );
     };
     let right = |f: &mut Frame, y: u16, spans: Vec<Span<'static>>| {
         f.render_widget(
             Paragraph::new(Line::from(spans)).right_aligned(),
-            Rect { x, y, width: w, height: 1 },
+            Rect {
+                x,
+                y,
+                width: w,
+                height: 1,
+            },
         );
     };
 
@@ -580,38 +707,64 @@ fn place_card(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     line(f, y, pips.into_iter().map(|s| s.to_owned()).collect());
-    right(f, y, vec![Span::styled(
-        p.kind.to_uppercase(),
-        Style::default().fg(dim(th.ghost(), alpha, th)),
-    )]);
+    right(
+        f,
+        y,
+        vec![Span::styled(
+            p.kind.to_uppercase(),
+            Style::default().fg(dim(th.ghost(), alpha, th)),
+        )],
+    );
 
     y += 1;
-    line(f, y, vec![Span::styled(
-        p.name.to_uppercase(),
-        Style::default().fg(dim(th.ink(), alpha, th)).add_modifier(Modifier::BOLD),
-    )]);
-    right(f, y, vec![Span::styled(
-        p.years.clone(),
-        Style::default().fg(dim(th.amber(), alpha, th)),
-    )]);
+    line(
+        f,
+        y,
+        vec![Span::styled(
+            p.name.to_uppercase(),
+            Style::default()
+                .fg(dim(th.ink(), alpha, th))
+                .add_modifier(Modifier::BOLD),
+        )],
+    );
+    right(
+        f,
+        y,
+        vec![Span::styled(
+            p.years.clone(),
+            Style::default().fg(dim(th.amber(), alpha, th)),
+        )],
+    );
 
     y += 1;
     let (lon, lat) = p.lonlat;
-    line(f, y, vec![Span::styled(
-        format!("{}  \u{00b7}  {}", p.role, p.where_),
-        Style::default().fg(dim(th.faint(), alpha, th)),
-    )]);
-    right(f, y, vec![Span::styled(
-        format!("{:.3}\u{00b0}N {:.3}\u{00b0}E", lat, lon),
-        Style::default().fg(dim(th.ghost(), alpha, th)),
-    )]);
+    line(
+        f,
+        y,
+        vec![Span::styled(
+            format!("{}  \u{00b7}  {}", p.role, p.where_),
+            Style::default().fg(dim(th.faint(), alpha, th)),
+        )],
+    );
+    right(
+        f,
+        y,
+        vec![Span::styled(
+            format!("{:.3}\u{00b0}N {:.3}\u{00b0}E", lat, lon),
+            Style::default().fg(dim(th.ghost(), alpha, th)),
+        )],
+    );
 
     y += 2;
     for l in note {
-        line(f, y, vec![Span::styled(
-            l.clone(),
-            Style::default().fg(dim(th.faint(), alpha, th)),
-        )]);
+        line(
+            f,
+            y,
+            vec![Span::styled(
+                l.clone(),
+                Style::default().fg(dim(th.faint(), alpha, th)),
+            )],
+        );
         y += 1;
     }
 }
@@ -640,7 +793,9 @@ fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32, th: T
             continue;
         }
         for dx in 0..area.width {
-            let Some(cell) = buf.cell_mut((area.x + dx, area.y + dy)) else { continue };
+            let Some(cell) = buf.cell_mut((area.x + dx, area.y + dy)) else {
+                continue;
+            };
             let (fg, bg) = (toward_bg(cell.fg, k, th), toward_bg(cell.bg, k, th));
             cell.set_style(Style::default().fg(fg).bg(bg));
         }
@@ -654,9 +809,15 @@ fn fade_band(f: &mut Frame, area: Rect, solid: u16, ramp: u16, alpha: f32, th: T
 /// understood truecolor would leave the entire monochrome map unfaded while
 /// appearing to work on everything else.
 fn toward_bg(c: Color, k: f32, th: Theme) -> Color {
-    let Some((r, g, b)) = crate::canvas::rgb_of(c) else { return c };
+    let Some((r, g, b)) = crate::canvas::rgb_of(c) else {
+        return c;
+    };
     let (br, bg_, bb) = th.ground();
-    let mix = |a: u8, b: u8| (b as f32 + (a as f32 - b as f32) * k).round().clamp(0.0, 255.0) as u8;
+    let mix = |a: u8, b: u8| {
+        (b as f32 + (a as f32 - b as f32) * k)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     crate::canvas::ink(mix(r, br), mix(g, bg_), mix(b, bb))
 }
 
@@ -705,7 +866,10 @@ fn scalebar_geom(area: Rect, app: &App) -> Option<ScaleBar> {
     }
 
     let (full, half) = if nice >= 1000.0 {
-        (format!("{:.0} km", nice / 1000.0), format!("{:.1}", nice / 2000.0))
+        (
+            format!("{:.0} km", nice / 1000.0),
+            format!("{:.1}", nice / 2000.0),
+        )
     } else {
         (format!("{nice:.0} m"), format!("{:.0}", nice / 2.0))
     };
@@ -731,7 +895,10 @@ fn scalebar_geom(area: Rect, app: &App) -> Option<ScaleBar> {
         }
     };
     put(0, "0");
-    put((cells as usize / 2).saturating_sub(half.chars().count() / 2), &half);
+    put(
+        (cells as usize / 2).saturating_sub(half.chars().count() / 2),
+        &half,
+    );
     put(cells as usize + 2, &full);
     let nums: String = nums.into_iter().collect();
 
@@ -762,17 +929,28 @@ fn draw_scalebar(f: &mut Frame, area: Rect, sb: &ScaleBar, th: Theme) {
     );
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(sb.bar.clone(), backing))),
-        Rect { y: strip.y + 1, ..strip },
+        Rect {
+            y: strip.y + 1,
+            ..strip
+        },
     );
 }
 
 fn status(f: &mut Frame, area: Rect, app: &App) {
     let th = app.theme;
     let mut left = vec![Span::styled(
-        if app.pinned.is_some() { " PINNED " } else { " NORMAL " },
+        if app.pinned.is_some() {
+            " PINNED "
+        } else {
+            " NORMAL "
+        },
         Style::default()
             .fg(th.page())
-            .bg(if app.pinned.is_some() { th.cyan() } else { th.ink() })
+            .bg(if app.pinned.is_some() {
+                th.cyan()
+            } else {
+                th.ink()
+            })
             .add_modifier(Modifier::BOLD),
     )];
     left.push(Span::styled("  ", Style::default()));
@@ -782,7 +960,11 @@ fn status(f: &mut Frame, area: Rect, app: &App) {
     } else if let Some(info) = app.highlight().and_then(|id| app.feature_info(id)) {
         left.push(Span::styled(
             info,
-            Style::default().fg(if app.pinned.is_some() { th.cyan() } else { th.ink() }),
+            Style::default().fg(if app.pinned.is_some() {
+                th.cyan()
+            } else {
+                th.ink()
+            }),
         ));
     } else {
         left.push(Span::styled(
@@ -845,7 +1027,9 @@ fn help(f: &mut Frame, area: Rect, th: Theme) {
     let lines = vec![
         Line::from(Span::styled(
             "  A map drawn in braille subpixels.",
-            Style::default().fg(th.faint()).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(th.faint())
+                .add_modifier(Modifier::ITALIC),
         )),
         Line::default(),
         row("drag", "pan the map"),

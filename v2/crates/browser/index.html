@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#08090b">
+  <title>Prince Patel / V2</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2308090b'/%3E%3Cpath d='M8 7h9a7 7 0 0 1 0 14h-4v5H8V7zm5 5v4h4a2 2 0 0 0 0-4h-4z' fill='%23e1a54a'/%3E%3C/svg%3E">
+  <link data-trunk rel="rust">
+  <link data-trunk rel="css" href="style.css">
+  <link data-trunk rel="copy-file" href="renderer.js">
+  <link data-trunk rel="copy-file" href="../../../portfolio/data/iosevka-portfolio.woff2">
+  <script src="renderer.js"></script>
+</head>
+<body>
+  <canvas id="stage" aria-hidden="true"></canvas>
+  <div id="render-controls" role="group" aria-label="Appearance controls">
+    <button id="theme-toggle" type="button" aria-label="Theme: dark; activate for light">
+      <canvas id="power-face" width="22" height="22" aria-hidden="true"></canvas>
+    </button>
+    <button id="package-toggle" type="button" aria-label="Render package: Canonical; activate for CRT">
+      <canvas id="knob-face" width="38" height="38" aria-hidden="true"></canvas>
+      <span id="package-name">CANONICAL</span>
+    </button>
+  </div>
+  <div id="status" role="status">INITIALISING V2</div>
+  <section id="semantic" class="semantic" aria-label="Portfolio content"></section>
+  <noscript>This client needs JavaScript. The original portfolio remains at <a href="/">the home page</a>.</noscript>
+  <script>
+    setTimeout(() => {
+      const status = document.getElementById("status");
+      if (!status || status.dataset.empty === "true" || status.textContent !== "INITIALISING V2") return;
+      document.documentElement.dataset.renderer = "semantic-fallback";
+      status.textContent = !isSecureContext
+        ? "This address needs HTTPS for the GPU view."
+        : "The browser client did not start.";
+      const semantic = document.getElementById("semantic");
+      semantic.classList.add("visible-fallback");
+      if (!semantic.textContent.trim()) {
+        const article = document.createElement("article");
+        const heading = document.createElement("h1");
+        heading.textContent = "Prince Patel";
+        const message = document.createElement("p");
+        message.textContent = !isSecureContext
+          ? "Open the HTTPS Tailscale Funnel URL, or use the original portfolio at the site root."
+          : "Reload once, or use the original portfolio at the site root.";
+        article.append(heading, message);
+        semantic.append(article);
+      }
+    }, isSecureContext ? 6000 : 1500);
+  </script>
+</body>
+</html>

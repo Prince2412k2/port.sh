@@ -189,7 +189,10 @@ fn decode_layer(b: &[u8], tile: TileId, out: &mut Vec<Feature>) {
     // Nothing in this layer maps onto a renderable layer -- skip the geometry
     // work entirely rather than decode and discard.
     if classify(&name, "", "").is_none()
-        && !matches!(name.as_str(), "roads" | "waterways" | "landcover" | "places")
+        && !matches!(
+            name.as_str(),
+            "roads" | "waterways" | "landcover" | "places"
+        )
     {
         return;
     }
@@ -222,6 +225,7 @@ fn decode_feature(
     tile: TileId,
     out: &mut Vec<Feature>,
 ) {
+    let mut source_id = None;
     let mut tags: Vec<u32> = Vec::new();
     let mut geom_type = 0u64;
     let mut geom: Vec<u32> = Vec::new();
@@ -231,6 +235,7 @@ fn decode_feature(
         let key = varint(b, &mut p);
         let (field, wire) = (key >> 3, key & 7);
         match (field, wire) {
+            (1, 0) => source_id = Some(varint(b, &mut p)),
             (2, 2) => {
                 let n = varint(b, &mut p) as usize;
                 let end = p + n;
@@ -272,7 +277,9 @@ fn decode_feature(
     // POIs carry the useful distinction in subcategory ("station") and a coarse
     // one in category ("transit"). Both go in: the fine one decides when it is
     // recognised, the coarse one catches everything else.
-    let Some((layer, rank)) = classify(layer_name, class, subclass) else { return };
+    let Some((layer, rank)) = classify(layer_name, class, subclass) else {
+        return;
+    };
 
     let scale = 1.0 / (extent as f64 * (1u64 << tile.z) as f64);
     let ox = tile.x as f64 / (1u64 << tile.z) as f64;
@@ -329,7 +336,11 @@ fn decode_feature(
         if closed && signed_area(&pts) <= 0.0 {
             continue;
         }
-        out.push(Feature::new(layer, rank, closed, name.clone(), pts));
+        let feature = Feature::new(layer, rank, closed, name.clone(), pts);
+        out.push(match source_id {
+            Some(id) => feature.with_source_id("planetiler", layer_name, id),
+            None => feature,
+        });
     }
 }
 
@@ -356,7 +367,9 @@ mod tests {
     /// files under `landmark` were invisible for that reason.
     #[test]
     fn a_landmark_the_subcategory_list_has_never_heard_of_still_ranks() {
-        for sub in ["monument", "memorial", "tower", "fort", "ruins", "gallery", "zoo"] {
+        for sub in [
+            "monument", "memorial", "tower", "fort", "ruins", "gallery", "zoo",
+        ] {
             let (layer, rank) = classify("pois", "landmark", sub).expect("classified");
             assert_eq!(layer, Layer::Landmark);
             assert!(rank >= 105, "{sub} scored {rank}, under every label floor");
@@ -382,7 +395,10 @@ mod tests {
             ("service", "atm"),
         ] {
             let (_, rank) = classify("pois", cat, sub).expect("classified");
-            assert!(rank < 105, "{cat}/{sub} scored {rank} and would crowd the map");
+            assert!(
+                rank < 105,
+                "{cat}/{sub} scored {rank} and would crowd the map"
+            );
         }
     }
 
@@ -392,5 +408,79 @@ mod tests {
     fn an_unknown_layer_is_declined() {
         assert!(classify("buildings", "yes", "").is_none());
         assert!(classify("aeroway", "runway", "").is_none());
+    }
+
+    fn field(field: u8, wire: u8, value: u64, out: &mut Vec<u8>) {
+        varint_bytes(((field as u64) << 3) | wire as u64, out);
+        varint_bytes(value, out);
+    }
+
+    fn varint_bytes(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn bytes(field_number: u8, value: &[u8], out: &mut Vec<u8>) {
+        field(field_number, 2, value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn point_tile(id: u64) -> Vec<u8> {
+        let mut feature = Vec::new();
+        field(1, 0, id, &mut feature);
+        field(3, 0, 1, &mut feature);
+        let mut geometry = Vec::new();
+        varint_bytes(9, &mut geometry); // MoveTo, one point.
+        varint_bytes(2, &mut geometry);
+        varint_bytes(2, &mut geometry);
+        bytes(4, &geometry, &mut feature);
+
+        let mut layer = Vec::new();
+        bytes(1, b"places", &mut layer);
+        bytes(2, &feature, &mut layer);
+        field(5, 0, 4096, &mut layer);
+        let mut tile = Vec::new();
+        bytes(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn mvt_feature_id_is_parsed_and_stable_across_tiles() {
+        let a = decode(&point_tile(42), TileId { z: 4, x: 1, y: 2 });
+        let b = decode(&point_tile(42), TileId { z: 8, x: 40, y: 70 });
+        let c = decode(&point_tile(43), TileId { z: 4, x: 1, y: 2 });
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].stable_id, b[0].stable_id);
+        assert_ne!(a[0].stable_id, c[0].stable_id);
+    }
+
+    #[test]
+    fn derived_identity_does_not_depend_on_feature_order() {
+        let a = Feature::new(
+            Layer::RoadMajor,
+            10,
+            false,
+            Some("A".into()),
+            vec![[0.1, 0.2], [0.3, 0.4]],
+        );
+        let b = Feature::new(
+            Layer::RoadMajor,
+            10,
+            false,
+            Some("A".into()),
+            vec![[0.1, 0.2], [0.3, 0.4]],
+        );
+        let other = Feature::new(
+            Layer::RoadMajor,
+            10,
+            false,
+            Some("B".into()),
+            vec![[0.1, 0.2], [0.3, 0.4]],
+        );
+        assert_eq!(a.stable_id, b.stable_id);
+        assert_ne!(a.stable_id, other.stable_id);
     }
 }

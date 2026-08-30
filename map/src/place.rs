@@ -31,9 +31,10 @@ pub struct Place {
 /// into the binary. The disk path wins so the sheet can be edited and reloaded
 /// without a rebuild; the embedded copy means a bare binary still has a tour.
 pub fn load() -> Vec<Place> {
-    let disk = crate::paths::data_file("places.txt")
-        .and_then(|p| std::fs::read_to_string(p).ok());
-    let src = disk.as_deref().unwrap_or(include_str!("../data/places.txt"));
+    let disk = crate::paths::data_file("places.txt").and_then(|p| std::fs::read_to_string(p).ok());
+    let src = disk
+        .as_deref()
+        .unwrap_or(include_str!("../data/places.txt"));
     match parse(src) {
         Ok(v) => v,
         Err(e) => {
@@ -63,7 +64,10 @@ pub fn parse(src: &str) -> Result<Vec<Place>, String> {
             if word != "place" {
                 return Err(format!("line {no}: unknown record `{word}`"));
             }
-            out.push(Place { id: id.trim().to_string(), ..Default::default() });
+            out.push(Place {
+                id: id.trim().to_string(),
+                ..Default::default()
+            });
             last_key.clear();
             continue;
         }
@@ -130,8 +134,8 @@ pub fn parse(src: &str) -> Result<Vec<Place>, String> {
                     .to_radians()
             }
             _ => {
-                let field = field_mut(p, key)
-                    .ok_or_else(|| format!("line {no}: unknown key `{key}`"))?;
+                let field =
+                    field_mut(p, key).ok_or_else(|| format!("line {no}: unknown key `{key}`"))?;
                 field.push_str(val);
             }
         }

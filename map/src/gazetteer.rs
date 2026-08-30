@@ -78,7 +78,10 @@ impl Gazetteer {
     /// overlays -- every Indian state, by name -- are held there and are not in
     /// the tile pyramid at all.
     pub fn build(src: &mut crate::tiles::Source) -> Gazetteer {
-        let mut g = Gazetteer { entries: Vec::new(), swept: SWEEP_ZOOMS };
+        let mut g = Gazetteer {
+            entries: Vec::new(),
+            swept: SWEEP_ZOOMS,
+        };
 
         // The overlays first, so a state found there wins over the same name in
         // a tile: the overlay carries the whole boundary and therefore a zoom
@@ -94,7 +97,8 @@ impl Gazetteer {
             }
         }
         g.entries.sort_by(|a, b| a.name.cmp(&b.name));
-        g.entries.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+        g.entries
+            .dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
         g
     }
 
@@ -102,7 +106,9 @@ impl Gazetteer {
         for (layer, what) in WANTED {
             for &i in &tile.by_layer[layer.index()] {
                 let f = &tile.features[i as usize];
-                let Some(name) = f.name.as_deref() else { continue };
+                let Some(name) = f.name.as_deref() else {
+                    continue;
+                };
                 if name.trim().is_empty() {
                     continue;
                 }
@@ -149,7 +155,11 @@ impl Gazetteer {
             // on a map you are driving should be forgiving. A geocoder must not
             // be: `Agra` is inside `Jagraon`, and answering with a town in
             // Punjab is worse than answering with nothing.
-            .filter_map(|e| crate::find::score(&e.name, q).filter(|r| *r <= 2).map(|r| (r, e)))
+            .filter_map(|e| {
+                crate::find::score(&e.name, q)
+                    .filter(|r| *r <= 2)
+                    .map(|r| (r, e))
+            })
             // A state beats a town of the same name at the same score: asked
             // for "Goa", the state is what anybody means.
             .min_by_key(|(r, e)| (*r, if e.what == "state" { 0 } else { 1 }, e.name.len()))
@@ -182,7 +192,10 @@ impl Gazetteer {
     /// this city". A wide box at z14 is thousands of tiles and the point of
     /// doing it on demand is that it is cheap.
     pub fn around(src: &mut crate::tiles::Source, lonlat: (f64, f64), span: f64) -> Gazetteer {
-        let mut g = Gazetteer { entries: Vec::new(), swept: [0; 5] };
+        let mut g = Gazetteer {
+            entries: Vec::new(),
+            swept: [0; 5],
+        };
         let lo = crate::geo::lonlat_to_world(lonlat.0 - span, lonlat.1 + span);
         let hi = crate::geo::lonlat_to_world(lonlat.0 + span, lonlat.1 - span);
         for z in DEEP_ZOOMS {
@@ -193,7 +206,8 @@ impl Gazetteer {
             }
         }
         g.entries.sort_by(|a, b| a.name.cmp(&b.name));
-        g.entries.dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
+        g.entries
+            .dedup_by(|a, b| a.name.eq_ignore_ascii_case(&b.name));
         g
     }
 }
@@ -256,8 +270,18 @@ mod tests {
 
         // Spread deliberately: four corners of the country and two states, so a
         // sweep that quietly covered only Gujarat would fail this.
-        for want in ["Jaipur", "Chennai", "Kolkata", "Ahmedabad", "Guwahati", "Kerala", "Punjab"] {
-            let hit = g.find(want).unwrap_or_else(|| panic!("no `{want}` in {} names", g.len()));
+        for want in [
+            "Jaipur",
+            "Chennai",
+            "Kolkata",
+            "Ahmedabad",
+            "Guwahati",
+            "Kerala",
+            "Punjab",
+        ] {
+            let hit = g
+                .find(want)
+                .unwrap_or_else(|| panic!("no `{want}` in {} names", g.len()));
             let (lon, lat) = hit.lonlat;
             assert!(
                 (60.0..100.0).contains(&lon) && (5.0..40.0).contains(&lat),
@@ -266,13 +290,25 @@ mod tests {
         }
         // Jaipur is a city in Rajasthan, and it had better not be in Gujarat.
         let j = g.find("Jaipur").unwrap();
-        assert!((75.0..77.0).contains(&j.lonlat.0), "Jaipur at lon {}", j.lonlat.0);
-        assert!((26.0..28.0).contains(&j.lonlat.1), "Jaipur at lat {}", j.lonlat.1);
+        assert!(
+            (75.0..77.0).contains(&j.lonlat.0),
+            "Jaipur at lon {}",
+            j.lonlat.0
+        );
+        assert!(
+            (26.0..28.0).contains(&j.lonlat.1),
+            "Jaipur at lat {}",
+            j.lonlat.1
+        );
 
         // A state frames wider than a town. If they came out the same the
         // framing zoom is not being taken from the feature's own extent.
         let state = g.find("Kerala").unwrap().zoom;
-        assert!(state < j.zoom, "a whole state framed no wider than a city: {state} vs {}", j.zoom);
+        assert!(
+            state < j.zoom,
+            "a whole state framed no wider than a city: {state} vs {}",
+            j.zoom
+        );
 
         // A name the archive does not have must come back empty rather than as
         // whatever sorted nearest. See the note on `SWEEP_ZOOMS`: this is not a
@@ -297,6 +333,9 @@ mod tests {
         assert!(g.find("go").is_none(), "a two-letter query matched");
         assert!(g.find("Goa").is_some());
         assert!(g.find("  goa ").is_some(), "not trimmed or not case-folded");
-        assert!(g.find("Jaipur").is_none(), "matched something it does not have");
+        assert!(
+            g.find("Jaipur").is_none(),
+            "matched something it does not have"
+        );
     }
 }

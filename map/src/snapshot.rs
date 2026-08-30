@@ -147,7 +147,9 @@ pub fn ansi(buf: &Buffer) -> String {
 
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
-            let Some(cell) = buf.cell((x, y)) else { continue };
+            let Some(cell) = buf.cell((x, y)) else {
+                continue;
+            };
             let key = (cell.fg, cell.bg, cell.modifier);
             if last != Some(key) {
                 s.push_str("\x1b[0m");

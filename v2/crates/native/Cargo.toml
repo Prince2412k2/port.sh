@@ -1,0 +1,12 @@
+[package]
+name = "portfolio-v2-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+portfolio-v2-client-core = { path = "../client-core" }
+portfolio-v2-protocol = { path = "../protocol" }
+portfolio-v2-scene = { path = "../scene" }
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }

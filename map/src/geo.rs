@@ -85,7 +85,15 @@ pub struct Viewport {
 
 impl Viewport {
     pub fn new(center: [f64; 2], zoom: f64) -> Self {
-        Self { center, zoom, sw: 1.0, sh: 1.0, bearing: 0.0, tilt: 0.0, persp: 0.0 }
+        Self {
+            center,
+            zoom,
+            sw: 1.0,
+            sh: 1.0,
+            bearing: 0.0,
+            tilt: 0.0,
+            persp: 0.0,
+        }
     }
 
     /// True when the camera is looking straight down and unrotated, in which
@@ -140,10 +148,7 @@ impl Viewport {
         let dy = (w[1] - self.center[1]) * s;
 
         if self.is_flat() {
-            return (
-                [dx + self.sw * 0.5, dy * PIXEL_ASPECT + self.sh * 0.5],
-                0.5,
-            );
+            return ([dx + self.sw * 0.5, dy * PIXEL_ASPECT + self.sh * 0.5], 0.5);
         }
 
         let (sb, cb) = self.bearing.sin_cos();
@@ -233,7 +238,11 @@ impl Viewport {
             let eye = self.sh / self.persp.max(1e-6);
             let solve = |py: f64| {
                 let denom = eye * a + py * st;
-                if denom.abs() < 1e-9 { 0.0 } else { py * eye / denom }
+                if denom.abs() < 1e-9 {
+                    0.0
+                } else {
+                    py * eye / denom
+                }
             };
             let n = solve(near_py);
             (solve(far_py), n, eye / (eye - n * st).max(NEAR_CLIP))
@@ -263,7 +272,6 @@ impl Viewport {
         [half_w, far_y, near_y + over, near_y]
     }
 
-
     /// Screen point back to a world point on the ground plane (elevation 0).
     /// Inverting the tilt is what keeps drag-pan honest once the camera moves.
     #[inline]
@@ -273,7 +281,10 @@ impl Viewport {
         let py = p[1] - self.sh * 0.5;
 
         if self.is_flat() {
-            return [px / s + self.center[0], py / (s * PIXEL_ASPECT) + self.center[1]];
+            return [
+                px / s + self.center[0],
+                py / (s * PIXEL_ASPECT) + self.center[1],
+            ];
         }
 
         let ct = self.tilt.cos();
@@ -284,7 +295,11 @@ impl Viewport {
             let eye = self.sh / self.persp.max(1e-6);
             let a = PIXEL_ASPECT * ct;
             let denom = eye * a + py * st;
-            let my = if denom.abs() < 1e-9 { 0.0 } else { py * eye / denom };
+            let my = if denom.abs() < 1e-9 {
+                0.0
+            } else {
+                py * eye / denom
+            };
             let k = eye / (eye - my * st).max(NEAR_CLIP);
             (px / k.max(1e-6), my)
         } else {
@@ -300,6 +315,20 @@ impl Viewport {
     /// World-space bounds of what is currently on screen, grown by `pad`
     /// subpixels so features crossing the edge still get drawn.
     pub fn world_bounds(&self, pad: f64) -> [f64; 4] {
+        if self.bounded() {
+            // The visible ground is the finite plate, not the infinite plane
+            // reached by rays through screen corners near the horizon.
+            let plate = self.plate();
+            let pad = pad.max(0.0) * (1.0 + self.persp.max(0.0));
+            let corners = [
+                self.world_of_plane([-plate[0] - pad, plate[1] - pad]),
+                self.world_of_plane([plate[0] + pad, plate[1] - pad]),
+                self.world_of_plane([-plate[0] - pad, plate[2] + pad]),
+                self.world_of_plane([plate[0] + pad, plate[2] + pad]),
+            ];
+            return bounds_of(corners);
+        }
+
         // All four corners, and that is the whole point of this function.
         //
         // `unproject` applies the bearing, so with the camera turned the screen
@@ -319,23 +348,7 @@ impl Viewport {
             self.unproject([-pad, self.sh + pad]),
             self.unproject([self.sw + pad, self.sh + pad]),
         ];
-        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
-        for c in corners {
-            if !c[0].is_finite() || !c[1].is_finite() {
-                continue;
-            }
-            b[0] = b[0].min(c[0]);
-            b[1] = b[1].min(c[1]);
-            b[2] = b[2].max(c[0]);
-            b[3] = b[3].max(c[1]);
-        }
-        // A tilted camera can put a corner past the horizon, where unprojecting
-        // has no answer to give. Cull nothing rather than everything: a frame
-        // that draws too much is a frame somebody can see.
-        if b[0] > b[2] || b[1] > b[3] {
-            return [f64::MIN, f64::MIN, f64::MAX, f64::MAX];
-        }
-        b
+        bounds_of(corners)
     }
 
     /// Centre and zoom so `b` (world minx,miny,maxx,maxy) fills the viewport
@@ -378,7 +391,6 @@ impl Viewport {
         self.clamp();
     }
 
-
     /// Zoom while keeping the world point under `anchor` pinned to `anchor`.
     /// This is what makes scroll-wheel zoom feel like a real map instead of a
     /// slideshow.
@@ -405,6 +417,17 @@ impl Viewport {
         let (_, lat) = self.center_lonlat();
         meters_per_world_unit(lat) / self.scale()
     }
+}
+
+fn bounds_of(corners: [[f64; 2]; 4]) -> [f64; 4] {
+    let mut bounds = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for corner in corners {
+        bounds[0] = bounds[0].min(corner[0]);
+        bounds[1] = bounds[1].min(corner[1]);
+        bounds[2] = bounds[2].max(corner[0]);
+        bounds[3] = bounds[3].max(corner[1]);
+    }
+    bounds
 }
 
 #[cfg(test)]
@@ -460,9 +483,13 @@ mod tests {
         // A row at the very top of the frame, which under this camera is at or
         // past the horizon.
         vp.pan_screen([200.0, 0.5], [200.0, 1.5]);
-        let moved = ((vp.center[0] - before[0]).powi(2) + (vp.center[1] - before[1]).powi(2)).sqrt();
+        let moved =
+            ((vp.center[0] - before[0]).powi(2) + (vp.center[1] - before[1]).powi(2)).sqrt();
         let frame = (vp.sw + vp.sh) / vp.scale();
-        assert!(moved <= frame, "the horizon threw the camera {moved} world units");
+        assert!(
+            moved <= frame,
+            "the horizon threw the camera {moved} world units"
+        );
     }
     use super::*;
 
@@ -495,10 +522,16 @@ mod tests {
 
         v.bearing = -0.059;
         assert!(!v.is_flat(), "a bearing still needs the projected path");
-        assert!(!v.bounded(), "a rotation manufactured a horizon it has none of");
+        assert!(
+            !v.bounded(),
+            "a rotation manufactured a horizon it has none of"
+        );
 
         v.tilt = 0.3;
-        assert!(!v.is_flat() && v.bounded(), "a tilt has a horizon and wants a slab");
+        assert!(
+            !v.is_flat() && v.bounded(),
+            "a tilt has a horizon and wants a slab"
+        );
 
         v.bearing = 0.0;
         assert!(v.bounded(), "a tilt with no bearing still wants one");
@@ -569,7 +602,10 @@ mod tests {
         let (flat, _) = v.project3(w, 0.0);
         let (high, _) = v.project3(w, 0.0005);
         assert!((flat[0] - high[0]).abs() < 1e-9, "elevation moved x");
-        assert!(high[1] < flat[1], "elevation did not lift: {flat:?} -> {high:?}");
+        assert!(
+            high[1] < flat[1],
+            "elevation did not lift: {flat:?} -> {high:?}"
+        );
     }
 
     /// Under perspective, something farther away must project *smaller*. The
@@ -639,7 +675,10 @@ mod tests {
         let p0 = v.project([bounds[0], bounds[1]]);
         let p1 = v.project([bounds[2], bounds[3]]);
         assert!(p0[0] >= 0.0 && p0[1] >= 0.0, "top-left off screen: {p0:?}");
-        assert!(p1[0] <= v.sw && p1[1] <= v.sh, "bottom-right off screen: {p1:?}");
+        assert!(
+            p1[0] <= v.sw && p1[1] <= v.sh,
+            "bottom-right off screen: {p1:?}"
+        );
         let fill = ((p1[0] - p0[0]) / v.sw).max((p1[1] - p0[1]) / v.sh);
         assert!(fill > 0.85, "fit left too much slack: {fill}");
     }
@@ -670,8 +709,18 @@ mod bounds_tests {
         for deg in 0..360 {
             v.bearing = (deg as f64).to_radians();
             let b = v.world_bounds(64.0);
-            assert!(b[0] <= b[2], "at {deg} degrees minx {} > maxx {}", b[0], b[2]);
-            assert!(b[1] <= b[3], "at {deg} degrees miny {} > maxy {}", b[1], b[3]);
+            assert!(
+                b[0] <= b[2],
+                "at {deg} degrees minx {} > maxx {}",
+                b[0],
+                b[2]
+            );
+            assert!(
+                b[1] <= b[3],
+                "at {deg} degrees miny {} > maxy {}",
+                b[1],
+                b[3]
+            );
             // The centre of the screen is on screen at every bearing, so the
             // box has to contain it. An inverted box passes the two checks
             // above if it is merely empty; this is what catches that.
@@ -699,6 +748,46 @@ mod bounds_tests {
                     p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3],
                     "at {deg} degrees the corner ({fx}, {fy}) falls outside the box"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn tilted_view_bounds_are_finite_and_contain_the_plate() {
+        for (width, height) in [(400.0, 200.0), (92.0, 144.0)] {
+            for tilt in [45.0f64, 62.0, 69.0] {
+                for perspective in [0.0, 0.35, 0.85] {
+                    for bearing in [0.0f64, 37.0, 91.0, 217.0, 331.0] {
+                        for pad in [0.0, 16.0, 64.0] {
+                            let mut v = viewport();
+                            v.sw = width;
+                            v.sh = height;
+                            v.tilt = tilt.to_radians();
+                            v.persp = perspective;
+                            v.bearing = bearing.to_radians();
+                            let bounds = v.world_bounds(pad);
+                            assert!(bounds.iter().all(|value| value.is_finite()));
+                            assert!(bounds[0] <= bounds[2] && bounds[1] <= bounds[3]);
+
+                            let plate = v.plate();
+                            for plane in [
+                                [-plate[0], plate[1]],
+                                [plate[0], plate[1]],
+                                [-plate[0], plate[2]],
+                                [plate[0], plate[2]],
+                            ] {
+                                let world = v.world_of_plane(plane);
+                                assert!(
+                                    world[0] >= bounds[0]
+                                        && world[0] <= bounds[2]
+                                        && world[1] >= bounds[1]
+                                        && world[1] <= bounds[3],
+                                    "{width}x{height}, tilt {tilt}, perspective {perspective}, bearing {bearing}, pad {pad}: {world:?} outside {bounds:?}"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -742,7 +831,10 @@ mod behind_the_eye_tests {
 
         // The trap: the same point through `project`, with the depth gone.
         let q = v.project(w);
-        assert!(q[0].is_nan(), "project returns the NaN with nothing to flag it");
+        assert!(
+            q[0].is_nan(),
+            "project returns the NaN with nothing to flag it"
+        );
         // And this is why a bounds check does not catch it. Written in the
         // negated form on purpose -- clippy dislikes it for exactly the reason
         // being demonstrated, that these values may not be comparable at all,

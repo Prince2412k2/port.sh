@@ -100,8 +100,7 @@ const FLAT_LIT: f32 = LIGHT[2];
 /// to sit on -- into every ridge the smoothing took off, and over every valley
 /// it filled in.
 pub fn drape_smoothing(vp: &Viewport) -> f64 {
-    let m_per_sub = meters_per_world_unit(vp.center_lonlat().1) / vp.scale();
-    m_per_sub * STEP * SMOOTH
+    crate::view::drape_smoothing(vp)
 }
 
 /// What share of the frame's height the ground in view should fill.
@@ -162,7 +161,10 @@ pub struct Lift {
 /// bearing of zero those are already east and north.
 #[inline]
 fn to_compass(across: f32, along: f32, sin_b: f32, cos_b: f32) -> (f32, f32) {
-    (across * cos_b + along * sin_b, along * cos_b - across * sin_b)
+    (
+        across * cos_b + along * sin_b,
+        along * cos_b - across * sin_b,
+    )
 }
 
 /// Grid rows nearest first. Screen y grows downwards and a tilted camera puts
@@ -218,11 +220,33 @@ pub struct Relief {
 impl Relief {
     /// Draw the terrain surface. Returns the number of samples plotted.
     pub fn draw(&mut self, t: &Terrain, canvas: &mut Canvas, vp: &Viewport, plot: Plot) -> usize {
+        self.draw_with_mode(t, canvas, vp, plot, false)
+    }
+
+    /// Draw gentler lowland forms that the mountain-focused pass suppresses.
+    pub fn draw_lowland(
+        &mut self,
+        t: &Terrain,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        plot: Plot,
+    ) -> usize {
+        self.draw_with_mode(t, canvas, vp, plot, true)
+    }
+
+    fn draw_with_mode(
+        &mut self,
+        t: &Terrain,
+        canvas: &mut Canvas,
+        vp: &Viewport,
+        plot: Plot,
+        lowland: bool,
+    ) -> usize {
         self.lay_out(canvas, vp);
         self.sample(t);
         self.measure_relief();
         self.lift = self.expose(vp, canvas.sh as f64);
-        self.paint(canvas, vp, plot)
+        self.paint(canvas, vp, plot, lowland)
     }
 
     /// Unproject the screen grid onto the ground and note how far apart the
@@ -346,7 +370,6 @@ impl Relief {
         }
     }
 
-
     /// Choose a datum and an exaggeration from the ground in view.
     ///
     /// Only ground that is actually on the slab counts. The screen grid runs
@@ -371,7 +394,11 @@ impl Relief {
             return Lift::default();
         }
         let relief = (hi - lo) as f64;
-        let flat = Lift { datum: lo, exag: EXAG_MIN, relief: relief as f32 };
+        let flat = Lift {
+            datum: lo,
+            exag: EXAG_MIN,
+            relief: relief as f32,
+        };
         // Nothing that is not a landform gets exposed for. The same threshold
         // that decides whether a sample is drawn at all, so the two cannot
         // disagree: a frame with no mountain in it must not be given the
@@ -390,10 +417,13 @@ impl Relief {
         if flat_px < 1e-6 {
             return flat;
         }
-        Lift { exag: (sh * FILL / flat_px).clamp(EXAG_MIN, EXAG_MAX), ..flat }
+        Lift {
+            exag: (sh * FILL / flat_px).clamp(EXAG_MIN, EXAG_MAX),
+            ..flat
+        }
     }
 
-    fn paint(&mut self, canvas: &mut Canvas, vp: &Viewport, plot: Plot) -> usize {
+    fn paint(&mut self, canvas: &mut Canvas, vp: &Viewport, plot: Plot, lowland: bool) -> usize {
         let bounded = vp.bounded();
         let plate = vp.plate();
         let (_, clat) = world_to_lonlat(vp.center[0], vp.center[1]);
@@ -403,17 +433,23 @@ impl Relief {
         // Ground drawn at full strength is a surface and takes what is behind
         // it away. Ground still fading in is a hint, and a hint that deletes
         // the road behind it leaves a hole with nothing to explain the hole.
-        let behind = if plot.strength >= 1.0 { Behind::Hide } else { Behind::Veil };
+        let behind = if plot.strength >= 1.0 {
+            Behind::Hide
+        } else {
+            Behind::Veil
+        };
         let (sb64, cb64) = vp.bearing.sin_cos();
         let (bearing_sin, bearing_cos) = (sb64 as f32, cb64 as f32);
         let half = (STEP * 0.5).ceil() as isize;
         let mut plotted = 0usize;
+        let minimum_relief = if lowland { 1.0 } else { MOUNTAIN };
+        let gate_slope = if lowland { 0.005 } else { GATE_SLOPE };
 
         for gx in 1..self.gw - 1 {
             for gy in near_to_far(self.gh) {
                 let i = gy * self.gw + gx;
                 // Sea level is not terrain; the water layer already owns it.
-                if self.h[i] < 1.0 || self.stands[i] < MOUNTAIN {
+                if self.h[i] < 1.0 || self.stands[i] < minimum_relief {
                     continue;
                 }
 
@@ -443,8 +479,8 @@ impl Relief {
                 // Row 0 is the top of the screen, so a step down a row is a
                 // step *towards* the camera -- away from the horizon. Hence
                 // the sign: this is the rise going away from the camera.
-                let along = (self.h[i - self.gw] - self.h[i + self.gw])
-                    / (self.down[i].max(1.0) * 2.0);
+                let along =
+                    (self.h[i - self.gw] - self.h[i + self.gw]) / (self.down[i].max(1.0) * 2.0);
 
                 let (dzdx, dzdy) = to_compass(across, along, bearing_sin, bearing_cos);
                 let (dzdx, dzdy) = (dzdx * SHADE_EXAG, dzdy * SHADE_EXAG);
@@ -480,7 +516,7 @@ impl Relief {
                 }
                 .clamp(0.0, 1.0);
                 let slope = (dzdx * dzdx + dzdy * dzdy).sqrt();
-                let gate = (slope / GATE_SLOPE).clamp(0.0, 1.0);
+                let gate = (slope / gate_slope).clamp(0.0, 1.0);
                 // Weighted towards the light end. Lambert is linear in the
                 // cosine, which spends most of its range on faces barely
                 // turned from level -- so a linear map puts almost every lit
@@ -503,7 +539,13 @@ impl Relief {
                     continue;
                 }
 
-                let brush = Brush { depth, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, behind };
+                let brush = Brush {
+                    depth,
+                    tint: TINT_GREEN,
+                    mat: MAT_DOT,
+                    pick: u32::MAX,
+                    behind,
+                };
 
                 // Between the two, in whichever order they came out. The first
                 // version spanned downwards only, and a slope rising towards
@@ -558,8 +600,8 @@ mod tests {
         // same path had one reading the file while the other was truncating
         // it -- which surfaces as "memory map offset is larger than length"
         // and not as anything that points at the cause.
-        let p = std::env::temp_dir()
-            .join(format!("termap-relief-{}-{name}.tmhg", std::process::id()));
+        let p =
+            std::env::temp_dir().join(format!("termap-relief-{}-{name}.tmhg", std::process::id()));
         let mut buf = Vec::new();
         buf.extend_from_slice(b"TMHG");
         buf.push(1);
@@ -615,7 +657,13 @@ mod tests {
     #[test]
     fn the_exposure_puts_the_mountain_in_the_frame() {
         let t = ridge("exposure", 4000.0);
-        for (zoom, tilt) in [(8.0, 45.0), (9.5, 45.0), (11.0, 45.0), (9.5, 25.0), (9.5, 65.0)] {
+        for (zoom, tilt) in [
+            (8.0, 45.0),
+            (9.5, 45.0),
+            (11.0, 45.0),
+            (9.5, 25.0),
+            (9.5, 65.0),
+        ] {
             let vp = camera(zoom, tilt);
             let lift = exposed(&t, &vp);
             // Screen rows the exposed relief actually occupies, through the
