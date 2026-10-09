@@ -1,624 +1,643 @@
 (() => {
   "use strict";
-
-  const CELL_WIDTH = 8;
-  const CELL_HEIGHT = 17;
-  const glyphStates = new Map();
-  let device;
-  let context;
-  let format;
-  let sampler;
-  let atlasSampler;
-  let scenePipeline;
-  let presentPipeline;
-  let inkPipeline;
-  let frameUniform;
-  let sceneTexture;
-  let sceneSize = [0, 0];
-  let sceneBuffer;
-  let sceneCapacity = 0;
-  let atlas;
-  let atlasTexture;
-  let atlasDpr = 0;
-  let inkTexture;
-  let freshTexture;
-  let inkSize = [0, 0];
-  let starting;
-  let latest;
-  let frameId = 0;
-  let animationTimer = 0;
-  let cachedFrame;
-  let cachedPackage = "";
-  let cachedLayout = "";
-  let cachedGeometry;
-
-  const metrics = window.portfolioV2RenderMetrics = {
+  const CW = 8,
+    CH = 17,
+    STRIDE = 32,
+    WET_SECONDS = 1.4;
+  const metrics = (window.portfolioV2RenderMetrics = {
     renderCalls: 0,
     paintedFrames: 0,
-    averagePaintMs: 0,
-    requestedPackage: "canonical",
+    uploadedBytes: 0,
     activePackage: "canonical",
-    fallbackReason: "",
-    sceneVertices: 0,
-    sceneVertexBytes: 0,
-    staleFramesDiscarded: 0,
-    activeInkDetails: 0,
+    averagePaintMs: 0,
     wetInkDetails: 0,
-  };
-  let paintTotal = 0;
+  });
+  let device,
+    context,
+    atlas,
+    atlasView,
+    instances,
+    uniform,
+    scenePipeline,
+    presentPipeline;
+  let sceneGroup,
+    presentGroup,
+    target,
+    targetView,
+    sampler,
+    initPromise,
+    latest,
+    uploaded;
+  let capacity = 0,
+    width = 0,
+    height = 0,
+    buffer,
+    floats,
+    timer = 0,
+    paintTotal = 0,
+    wetUntil = 0,
+    generation = 0;
+  const slots = new Map(),
+    identities = new Map();
+  let previous = [],
+    layoutKey = "",
+    gpuRecoveries = 0,
+    glRenderer;
+  const resourceBase = new URL(".", document.currentScript.src);
 
-  const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
-  const hash = (value) => {
-    const x = Math.sin(value * 12.9898) * 43758.5453;
-    return x - Math.floor(x);
-  };
-  const renderDpr = (packageName) => packageName === "canonical"
-    ? devicePixelRatio || 1
-    : Math.min(devicePixelRatio || 1, 1.25);
+  const sceneShader = `
+    struct Params { viewport: vec2f, grid: vec2f, time: f32, mode: u32, mono: u32, reduced: u32 };
+    struct Cell { uv: vec4f, fg: vec4f, bg: vec4f, historyUV: vec4f, historyFG: vec4f, life: vec4f, spare: vec4f, spare2: vec4f };
+    @group(0) @binding(0) var<uniform> p: Params;
+    @group(0) @binding(1) var<storage, read> cells: array<Cell>;
+    @group(0) @binding(2) var font: texture_2d<f32>;
+    @group(0) @binding(3) var fontSampler: sampler;
+    struct Out { @builtin(position) position: vec4f, @location(0) local: vec2f, @location(1) @interpolate(flat) index: u32 };
+    @vertex fn vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) index: u32) -> Out {
+      let corners = array<vec2f,6>(vec2f(0,0),vec2f(1,0),vec2f(0,1),vec2f(0,1),vec2f(1,0),vec2f(1,1));
+      let local = corners[vertex];
+      let cell = vec2f(f32(index % u32(p.grid.x)), f32(index / u32(p.grid.x)));
+      var out: Out;
+      out.position = vec4f((cell + local) / p.grid * vec2f(2,-2) + vec2f(-1,1),0,1);
+      out.local = local; out.index = index; return out;
+    }
+    fn noise(v: vec2f) -> f32 { return fract(sin(dot(v,vec2f(127.1,311.7))) * 43758.5453); }
+    fn cover(uv: vec4f, local: vec2f) -> f32 {
+      if (uv.z == 0.0 || any(local < vec2f(0)) || any(local > vec2f(1))) { return 0.0; }
+      return textureSampleLevel(font,fontSampler,uv.xy + local * uv.zw,0).a;
+    }
+    fn pigment(uv: vec4f, local: vec2f, age: f32, seed: f32) -> f32 {
+      let pixel = vec2f(1.0/8.0,1.0/17.0);
+      let fibre = noise(floor(local * vec2f(16,34)) + seed);
+      let spread = (0.16 + smoothstep(0.0,1.4,age) * 0.48) * pixel;
+      let core = cover(uv,local);
+      let edge = max(max(cover(uv,local+vec2f(spread.x,0)),cover(uv,local-vec2f(spread.x,0))),
+                     max(cover(uv,local+vec2f(0,spread.y)),cover(uv,local-vec2f(0,spread.y))));
+      let impact = smoothstep(0.0,0.045,age);
+      return clamp((core * (0.80+fibre*0.20) + max(edge-core,0.0)*(0.14+fibre*0.20)) * impact,0.0,1.0);
+    }
+    @fragment fn fs(in: Out) -> @location(0) vec4f {
+      let cell = cells[in.index];
+      var fg = cell.fg.rgb; var bg = cell.bg.rgb;
+      if (p.mono == 1u) { fg = vec3f(dot(fg,vec3f(.299,.587,.114))); bg = vec3f(dot(bg,vec3f(.299,.587,.114))); }
+      if(p.mode==1u){
+        let px=vec2f(1.0/8.0,1.0/17.0);
+        let core=cover(cell.uv,in.local);
+        let beam=max(max(cover(cell.uv,in.local+vec2f(px.x*.35,0)),cover(cell.uv,in.local-vec2f(px.x*.35,0))),max(cover(cell.uv,in.local+vec2f(0,px.y*.25)),cover(cell.uv,in.local-vec2f(0,px.y*.25))));
+        let age=max(p.time-cell.life.y,0.0);
+        let residue=select(cover(cell.historyUV,in.local)*exp(-age/.12),0.0,p.reduced==1u);
+        let emission=fg*(core*.94+max(beam-core,0.0)*.22)+cell.historyFG.rgb*residue*.28;
+        return vec4f(bg*(1.0-core)+emission,1);
+      }
+      if(p.mode==2u){
+        let lag=vec2f(.055,0);
+        let coverage=vec3f(cover(cell.uv,in.local+lag),cover(cell.uv,in.local),cover(cell.uv,in.local-lag));
+        let lineNoise=(noise(vec2f(floor(in.position.y),floor(p.time*24.0)))-.5)*.015;
+        return vec4f(mix(bg,fg,coverage)+lineNoise*coverage,1);
+      }
+      if (p.mode != 3u) {
+        let mask=cover(cell.uv,in.local);let alpha=select(1.0,max(cell.bg.a,mask),p.mode==4u);
+        return vec4f(mix(bg,fg,mask)*alpha,alpha);
+      }
+      let seed = cell.life.z;
+      let dark = dot(bg,vec3f(.299,.587,.114)) < .35;
+      let fibre = (noise(floor(in.position.xy * vec2f(.31,1.2))) - .5) * .035;
+      let grain = (noise(in.position.xy) - .5) * .018;
+      let paper = select(vec3f(.934,.915,.862),vec3f(.075,.066,.055),dark) + fibre + grain;
+      let shift = vec2f(noise(vec2f(seed,1)),noise(vec2f(seed,2))) - .5;
+      let local = in.local + shift * vec2f(.055,.028);
+      let age = select(max(p.time-cell.life.x,0.0),2.0,p.reduced == 1u);
+      let ink = pigment(cell.uv,local,age,seed);
+      let ribbon = .84 + noise(vec2f(seed,3))*.16;
+      var color = select(vec3f(.12,.095,.065),vec3f(.84,.81,.72),dark);
+      if (p.mono == 0u) { let chroma = fg - vec3f(dot(fg,vec3f(.299,.587,.114))); color = clamp(color + chroma*.55,vec3f(.025),vec3f(.95)); }
+      let ghostAge = max(p.time-cell.life.y,0.0);
+      let ghost = select(pigment(cell.historyUV,in.local,2.0,seed) * pow(max(1.0-ghostAge/1.4,0.0),2.0)*.18,0.0,p.reduced==1u);
+      return vec4f(mix(paper,color,clamp(ink*ribbon+ghost,0,1)),1);
+    }
+  `;
+  const presentShader = `
+    struct Params { viewport: vec2f, grid: vec2f, time: f32, mode: u32, mono: u32, reduced: u32 };
+    @group(0) @binding(0) var<uniform> p: Params;
+    @group(0) @binding(1) var image: texture_2d<f32>;
+    @group(0) @binding(2) var imageSampler: sampler;
+    struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f };
+    @vertex fn vs(@builtin(vertex_index) i: u32) -> Out {
+      let vertices = array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));
+      var out: Out; out.position = vec4f(vertices[i],0,1); out.uv = vertices[i]*vec2f(.5,-.5)+.5; return out;
+    }
+    fn sampleAt(uv: vec2f) -> vec3f { return textureSampleLevel(image,imageSampler,clamp(uv,vec2f(0),vec2f(1)),0).rgb; }
+    fn noise(v: vec2f) -> f32 { return fract(sin(dot(v,vec2f(12.9898,78.233)))*43758.5453); }
+    @fragment fn fs(in: Out) -> @location(0) vec4f {
+      var uv = in.uv;
+      if (p.mode == 1u) {
+        let q = uv*2-1;
+        let pixel = 1.0/p.viewport;
+        let base = sampleAt(uv);
+        let halo = (sampleAt(uv+pixel*vec2f(2,0))+sampleAt(uv-pixel*vec2f(2,0))+sampleAt(uv+pixel*vec2f(0,2))+sampleAt(uv-pixel*vec2f(0,2)))*.06;
+        let scan = .88+.12*sin(in.position.y*3.14159265);
+        let mask = select(vec3f(.91,1,.91),vec3f(1,.92,.92),u32(in.position.x)%3u==0u);
+        var color = (base+halo)*scan*mask*(1.0-dot(q,q)*.06);
+        if (p.mono==1u) { color = dot(color,vec3f(.299,.587,.114))*vec3f(1,.83,.43); }
+        return vec4f(color,1);
+      }
+      if (p.mode == 2u) {
+        let t = select(p.time,0.0,p.reduced==1u);
+        let line = floor(in.position.y);
+        let band = exp(-pow((uv.y-fract(t*.073))*40,2));
+        uv.x += sin(line*.071+t*7)*.0004+band*sin(line*.31+t*31)*.003;
+        let lag = 1.5/p.viewport.x;
+        let base = sampleAt(uv);
+        var color = vec3f(sampleAt(uv+vec2f(lag,0)).r,base.g,sampleAt(uv-vec2f(lag,0)).b);
+        color += (noise(vec2f(line,floor(t*24)))-.5)*(.012+band*.07);
+        return vec4f(clamp(color,vec3f(0),vec3f(1)),1);
+      }
+      return textureSampleLevel(image,imageSampler,uv,0);
+    }
+  `;
 
-  function showSemanticFallback(reason) {
+  async function initialize() {
+    if (initPromise) return initPromise;
+    initPromise = (async () => {
+      const adapter = await navigator.gpu?.requestAdapter().catch(() => null);
+      // Build-time coverage is identical across browser engines and devices.
+      const [manifestResponse, imageResponse] = await Promise.all([
+        fetch(new URL("glyph-atlas.json", resourceBase)),
+        fetch(new URL("glyph-atlas.png", resourceBase)),
+      ]);
+      if (!manifestResponse.ok || !imageResponse.ok)
+        throw new Error("Glyph atlas unavailable");
+      const manifest = await manifestResponse.json();
+      if (
+        manifest.abi !== 1 ||
+        manifest.width > 4096 ||
+        manifest.height > 4096 ||
+        manifest.slots.length > 16000
+      )
+        throw new Error("Invalid glyph atlas");
+      const canvas = await createImageBitmap(await imageResponse.blob(), {
+        premultiplyAlpha: "none",
+        colorSpaceConversion: "none",
+      });
+      if (canvas.width !== manifest.width || canvas.height !== manifest.height)
+        throw new Error("Glyph atlas dimensions mismatch");
+      slots.clear();
+      for (const [bold, code, ...uv] of manifest.slots)
+        slots.set(`${bold}:${String.fromCodePoint(code)}`, uv);
+      if (!adapter) {
+        glRenderer = window.createPortfolioWebGL(
+          document.getElementById("stage"),
+          canvas,
+          slots,
+        );
+        return;
+      }
+      device = await adapter.requestDevice();
+      context = document.getElementById("stage").getContext("webgpu");
+      const format = navigator.gpu.getPreferredCanvasFormat();
+      context.configure({ device, format, alphaMode: "premultiplied" });
+      atlas = device.createTexture({
+        size: [canvas.width, canvas.height],
+        format: "rgba8unorm",
+        usage:
+          GPUTextureUsage.TEXTURE_BINDING |
+          GPUTextureUsage.COPY_DST |
+          GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      device.queue.copyExternalImageToTexture(
+        { source: canvas },
+        { texture: atlas },
+        [canvas.width, canvas.height],
+      );
+      atlasView = atlas.createView();
+      sampler = device.createSampler({
+        magFilter: "nearest",
+        minFilter: "nearest",
+      });
+      uniform = device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      const scene = device.createShaderModule({ code: sceneShader }),
+        present = device.createShaderModule({ code: presentShader });
+      for (const module of [scene, present]) {
+        const info = await module.getCompilationInfo();
+        const errors = info.messages.filter((m) => m.type === "error");
+        if (errors.length)
+          throw new Error(errors.map((e) => e.message).join("; "));
+      }
+      scenePipeline = await device.createRenderPipelineAsync({
+        layout: "auto",
+        vertex: { module: scene, entryPoint: "vs" },
+        fragment: {
+          module: scene,
+          entryPoint: "fs",
+          targets: [{ format: "rgba8unorm" }],
+        },
+      });
+      presentPipeline = await device.createRenderPipelineAsync({
+        layout: "auto",
+        vertex: { module: present, entryPoint: "vs" },
+        fragment: { module: present, entryPoint: "fs", targets: [{ format }] },
+      });
+      device.addEventListener("uncapturederror", (event) =>
+        fallback(event.error.message),
+      );
+      device.lost.then(() => {
+        device = undefined;
+        initPromise = undefined;
+        capacity = 0;
+        target = undefined;
+        uploaded = undefined;
+        previous = [];
+        if (++gpuRecoveries <= 2 && latest) requestPaint();
+        else fallback("GPU device lost");
+      });
+    })();
+    return initPromise;
+  }
+
+  function resources(frame) {
+    const canvas = document.getElementById("stage");
+    const dpr = Math.min(devicePixelRatio || 1, 2),
+      w = Math.ceil(frame.fallback.cols * CW * dpr),
+      h = Math.ceil(frame.fallback.rows * CH * dpr);
+    canvas.style.width = `${frame.fallback.cols * CW}px`;
+    canvas.style.height = `${frame.fallback.rows * CH}px`;
+    if (!target || w !== width || h !== height) {
+      width = w;
+      height = h;
+      canvas.width = w;
+      canvas.height = h;
+      target?.destroy();
+      target = device.createTexture({
+        size: [w, h],
+        format: "rgba8unorm",
+        usage:
+          GPUTextureUsage.RENDER_ATTACHMENT |
+          GPUTextureUsage.TEXTURE_BINDING |
+          GPUTextureUsage.COPY_SRC,
+        // Public diagnostics can verify actual output rather than submissions.
+      });
+      targetView = target.createView();
+      presentGroup = device.createBindGroup({
+        layout: presentPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniform } },
+          { binding: 1, resource: targetView },
+          { binding: 2, resource: sampler },
+        ],
+      });
+    }
+    const count = frame.fallback.cells.length;
+    if (capacity < count) {
+      instances?.destroy();
+      capacity = Math.max(count, 10800);
+      buffer = new ArrayBuffer(capacity * STRIDE * 4);
+      floats = new Float32Array(buffer);
+      instances = device.createBuffer({
+        size: buffer.byteLength,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      sceneGroup = device.createBindGroup({
+        layout: scenePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniform } },
+          { binding: 1, resource: { buffer: instances } },
+          { binding: 2, resource: atlasView },
+          { binding: 3, resource: sampler },
+        ],
+      });
+      previous = [];
+      uploaded = undefined;
+    }
+  }
+
+  function upload(frame, now) {
+    const key = `${frame.fallback.cols}/${frame.fallback.rows}/${frame.variant.package}/${frame.variant.color}/${frame.fallback.cells[0]?.background.join()}`;
+    const reset = key !== layoutKey;
+    if (reset) {
+      floats.fill(0);
+      previous = [];
+      identities.clear();
+      layoutKey = key;
+    }
+    if (uploaded === frame && !reset) return;
+    const cells = frame.fallback.cells;
+    let first = cells.length,
+      last = 0;
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i],
+        old = previous[i],
+        offset = i * STRIDE;
+      if (old === c) continue;
+      const changed =
+        !old ||
+        old.glyph !== c.glyph ||
+        old.bold !== c.bold ||
+        old.detail !== c.detail;
+      const detail = c.detail ? frame.details[c.detail - 1] : null;
+      const identity = detail
+        ? `${detail.class}:${detail.id}:${c.glyph}`
+        : `${i}:${c.glyph}`;
+      if (changed) {
+        floats.copyWithin(offset + 12, offset, offset + 4);
+        floats.copyWithin(offset + 16, offset + 4, offset + 8);
+        const uv =
+          slots.get(`${c.bold ? 1 : 0}:${c.glyph}`) || slots.get("0:?");
+        floats.set(c.glyph === " " ? [0, 0, 0, 0] : uv, offset);
+        let birth = identities.get(identity);
+        if (birth === undefined) {
+          birth = now;
+          identities.set(identity, birth);
+        }
+        floats[offset + 20] = birth;
+        floats[offset + 21] = now;
+        floats[offset + 22] = c.glyph.codePointAt(0) + i * 0.17;
+        wetUntil = Math.max(wetUntil, now + WET_SECONDS);
+      }
+      if (
+        changed ||
+        !old ||
+        old.foreground.some((v, j) => v !== c.foreground[j]) ||
+        old.background.some((v, j) => v !== c.background[j])
+      ) {
+        floats.set(
+          c.foreground.map((v) => v / 255),
+          offset + 4,
+        );
+        floats.set(
+          c.background.map((v) => v / 255),
+          offset + 8,
+        );
+        first = Math.min(first, i);
+        last = i + 1;
+      }
+    }
+    if (first < last) {
+      const start = first * STRIDE * 4,
+        size = (last - first) * STRIDE * 4;
+      device.queue.writeBuffer(instances, start, buffer, start, size);
+      metrics.uploadedBytes += size;
+    }
+    previous = cells;
+    uploaded = frame;
+    if (identities.size > 32768) {
+      for (const [key, birth] of identities) {
+        if (now - birth > 30) identities.delete(key);
+      }
+    }
+  }
+  async function paint() {
+    timer = 0;
+    if (document.hidden || !latest) return;
+    const token = generation;
+    try {
+      await initialize();
+      if (token !== generation) return;
+      const started = performance.now(),
+        frame = latest,
+        now = started / 1000;
+      if (glRenderer) {
+        const animating = glRenderer.draw(frame, now);
+        metrics.activePackage = frame.variant.package;
+        metrics.paintedFrames++;
+        paintTotal += performance.now() - started;
+        metrics.averagePaintMs = paintTotal / metrics.paintedFrames;
+        document.documentElement.dataset.renderer = `webgl2-${frame.variant.package}`;
+        if (animating) requestPaint();
+        return;
+      }
+      resources(frame);
+      upload(frame, now);
+      const data = new ArrayBuffer(32),
+        f = new Float32Array(data),
+        u = new Uint32Array(data);
+      f[0] = width;
+      f[1] = height;
+      f[2] = frame.fallback.cols;
+      f[3] = frame.fallback.rows;
+      f[4] = now;
+      u[5] = ["canonical", "crt", "vhs", "ink", "pixel"].indexOf(
+        frame.variant.package,
+      );
+      u[6] = frame.variant.color === "monochrome" ? 1 : 0;
+      u[7] = frame.variant.reduced_motion ? 1 : 0;
+      device.queue.writeBuffer(uniform, 0, data);
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: targetView,
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          },
+        ],
+      });
+      pass.setPipeline(scenePipeline);
+      pass.setBindGroup(0, sceneGroup);
+      pass.draw(6, frame.fallback.cells.length);
+      pass.end();
+      const present = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: context.getCurrentTexture().createView(),
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          },
+        ],
+      });
+      present.setPipeline(presentPipeline);
+      present.setBindGroup(0, presentGroup);
+      present.draw(3);
+      present.end();
+      device.queue.submit([encoder.finish()]);
+      metrics.activePackage = frame.variant.package;
+      metrics.paintedFrames++;
+      paintTotal += performance.now() - started;
+      metrics.averagePaintMs = paintTotal / metrics.paintedFrames;
+      document.documentElement.dataset.renderer = `webgpu-${frame.variant.package}`;
+      metrics.wetInkDetails = now < wetUntil ? identities.size : 0;
+      if (
+        !frame.variant.reduced_motion &&
+        (frame.variant.package === "vhs" ||
+          (["ink", "crt"].includes(frame.variant.package) && now < wetUntil))
+      )
+        requestPaint();
+    } catch (error) {
+      fallback(error.message);
+    }
+  }
+  function requestPaint() {
+    if (!timer && !document.hidden) timer = requestAnimationFrame(paint);
+  }
+  function fallback(reason) {
     metrics.activePackage = "semantic";
     metrics.fallbackReason = reason;
     document.documentElement.dataset.renderer = "semantic-fallback";
-    document.getElementById("semantic")?.classList.add("visible-fallback");
+    document.getElementById("semantic").classList.add("visible-fallback");
     const status = document.getElementById("status");
-    if (status) {
-      status.textContent = !isSecureContext
-        ? "GPU view needs HTTPS; showing the readable version."
-        : "GPU view unavailable; showing the readable version.";
-      status.dataset.empty = "false";
-    }
+    status.textContent = `GPU view unavailable: ${reason}`;
+    status.dataset.empty = "false";
+    console.warn("V2 renderer:", reason);
   }
-
-  function sizeCanvas(canvas, width, height, dpr) {
-    const pixelWidth = Math.ceil(width * dpr);
-    const pixelHeight = Math.ceil(height * dpr);
-    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
-    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-  }
-
-  function makeAtlas(dpr) {
-    if (atlas && atlasDpr === dpr) return atlas;
-    const chars = [...new Set([
-      ...Array.from({ length: 95 }, (_, i) => String.fromCodePoint(0x20 + i)),
-      ...Array.from({ length: 112 }, (_, i) => String.fromCodePoint(0x2190 + i)),
-      ...Array.from({ length: 160 }, (_, i) => String.fromCodePoint(0x2500 + i)),
-      ...Array.from({ length: 96 }, (_, i) => String.fromCodePoint(0x25a0 + i)),
-      ...Array.from({ length: 256 }, (_, i) => String.fromCodePoint(0x2800 + i)),
-      ...Array.from({ length: 60 }, (_, i) => String.fromCodePoint(0x1fb00 + i)),
-      ..."◆·°—←→↑↓█▓▒░▄▀▌▐■▪▫•",
-    ])];
-    const guard = 2;
-    const cellWidth = Math.ceil(CELL_WIDTH * dpr);
-    const cellHeight = Math.ceil(CELL_HEIGHT * dpr);
-    const width = cellWidth + guard * 2;
-    const height = cellHeight + guard * 2;
-    const columns = 32;
-    const canvas = document.createElement("canvas");
-    canvas.width = columns * width;
-    canvas.height = Math.ceil(chars.length * 2 / columns) * height;
-    const ctx = canvas.getContext("2d");
-    const slots = new Map();
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "white";
-    for (let bold = 0; bold < 2; bold++) {
-      ctx.font = `${bold ? 700 : 400} ${13 * dpr}px "Iosevka Portfolio"`;
-      chars.forEach((glyph, i) => {
-        const slot = bold * chars.length + i;
-        const x = slot % columns * width;
-        const y = Math.floor(slot / columns) * height;
-        ctx.fillText(glyph, x + guard, y + guard + 13 * dpr);
-        slots.set(`${bold}:${glyph}`, [x + guard, y + guard, cellWidth, cellHeight]);
+  window.portfolioV2 = {
+    async inspect_present() {
+      if (!device || !target) return null;
+      const t = device.createTexture({
+        size: [width, height],
+        format: navigator.gpu.getPreferredCanvasFormat(),
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
       });
-    }
-    atlasDpr = dpr;
-    atlas = { canvas, slots };
-    return atlas;
-  }
-
-  function ensureAtlas(dpr) {
-    if (atlasTexture && atlasDpr === dpr) return;
-    atlasTexture?.destroy();
-    const source = makeAtlas(dpr);
-    atlasTexture = device.createTexture({
-      size: [source.canvas.width, source.canvas.height],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    device.queue.copyExternalImageToTexture({ source: source.canvas }, { texture: atlasTexture }, [source.canvas.width, source.canvas.height]);
-  }
-
-  async function startGpu() {
-    if (starting) return starting;
-    starting = (async () => {
-      if (!navigator.gpu) return false;
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-      if (!adapter) return false;
-      device = await adapter.requestDevice();
-      context = document.getElementById("stage").getContext("webgpu");
-      format = navigator.gpu.getPreferredCanvasFormat();
-      context.configure({ device, format, alphaMode: "opaque" });
-      sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-      atlasSampler = device.createSampler({ magFilter: "nearest", minFilter: "nearest" });
-      frameUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-
-      const sceneModule = device.createShaderModule({ code: `
-        @group(0) @binding(0) var atlasSampler: sampler;
-        @group(0) @binding(1) var atlasTexture: texture_2d<f32>;
-        struct Out { @builtin(position) position: vec4f, @location(0) color: vec4f, @location(1) uv: vec2f, @location(2) glyph: f32 };
-        @vertex fn vs(@location(0) position: vec2f, @location(1) color: vec4f, @location(2) uv: vec2f, @location(3) glyph: f32) -> Out {
-          var out: Out; out.position = vec4f(position, 0.0, 1.0); out.color = color; out.uv = uv; out.glyph = glyph; return out;
-        }
-        @fragment fn fs(in: Out) -> @location(0) vec4f {
-          let coverage = select(1.0, textureSample(atlasTexture, atlasSampler, in.uv).a, in.glyph > 0.5);
-          return vec4f(in.color.rgb, in.color.a * coverage);
-        }
-      ` });
-      scenePipeline = device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: sceneModule, entryPoint: "vs", buffers: [{
-          arrayStride: 36,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x2" },
-            { shaderLocation: 1, offset: 8, format: "float32x4" },
-            { shaderLocation: 2, offset: 24, format: "float32x2" },
-            { shaderLocation: 3, offset: 32, format: "float32" },
-          ],
-        }] },
-        fragment: { module: sceneModule, entryPoint: "fs", targets: [{
-          format: "rgba8unorm",
-          blend: {
-            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+      const b = device.createBuffer({
+        size: 256 * 17,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const e = device.createCommandEncoder();
+      const p = e.beginRenderPass({
+        colorAttachments: [
+          {
+            view: t.createView(),
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
           },
-        }] },
-        primitive: { topology: "triangle-list" },
+        ],
       });
-
-      const fullscreen = `
-        struct Out { @builtin(position) position: vec4f, @location(0) uv: vec2f };
-        @vertex fn vs(@builtin(vertex_index) i: u32) -> Out {
-          var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
-          var out: Out; out.position = vec4f(positions[i], 0.0, 1.0); out.uv = positions[i] * vec2f(0.5, -0.5) + vec2f(0.5); return out;
-        }
-      `;
-      const presentModule = device.createShaderModule({ code: `
-        struct Params { mode: u32, mono: u32, light: u32, reduced: u32, time: f32, width: f32, height: f32, dpr: f32 };
-        @group(0) @binding(0) var frameSampler: sampler;
-        @group(0) @binding(1) var frameTexture: texture_2d<f32>;
-        @group(0) @binding(2) var<uniform> p: Params;
-        ${fullscreen}
-        fn sampleFrame(uv: vec2f) -> vec3f { return textureSampleLevel(frameTexture, frameSampler, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).rgb; }
-        fn rand(v: vec2f) -> f32 { return fract(sin(dot(v, vec2f(12.9898, 78.233))) * 43758.5453); }
-        @fragment fn fs(in: Out) -> @location(0) vec4f {
-          var uv = in.uv;
-          if (p.mode == 0u) { return vec4f(sampleFrame(uv), 1.0); }
-          if (p.mode == 1u) {
-            var q = uv * 2.0 - 1.0;
-            q += q * abs(q.yx) * abs(q.yx) / vec2f(30.0, 24.0);
-            uv = q * 0.5 + 0.5;
-            if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return vec4f(0.003, 0.004, 0.003, 1.0); }
-            var color = sampleFrame(uv);
-            let px = vec2f(1.0 / p.width, 1.0 / p.height);
-            color += (sampleFrame(uv + px * 2.0) + sampleFrame(uv - px * 2.0)) * 0.08;
-            color *= 0.70 + 0.30 * sin(in.position.y * 3.14159265 / max(p.dpr, 1.0));
-            let lum = dot(color, vec3f(0.299, 0.587, 0.114));
-            if (p.mono == 1u) { color = vec3f(lum * 0.95, lum * 0.78, lum * 0.42) + vec3f(0.8, 0.12, 0.02) * max(lum - 0.72, 0.0); }
-            color *= 1.0 - dot(q, q) * 0.13;
-            return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
-          }
-          if (p.mode == 2u) {
-            let line = floor(uv.y * p.height / max(p.dpr, 1.0));
-            let t = select(p.time, 0.0, p.reduced == 1u);
-            uv.x += sin(line * 0.071 + t * 7.0) * 0.0015 + (rand(vec2f(line, floor(t * 18.0))) - 0.5) * 0.002;
-            uv.x += smoothstep(0.82, 0.98, uv.y) * sin(line * 0.31 + t * 31.0) * 0.012;
-            let lag = 2.6 / p.width;
-            let base = sampleFrame(uv);
-            var color = vec3f(sampleFrame(uv + vec2f(lag, 0.0)).r, base.g, sampleFrame(uv - vec2f(lag * 1.6, 0.0)).b);
-            let band = exp(-pow((uv.y - fract(t * 0.073)) * 24.0, 2.0));
-            color += (rand(in.position.xy + vec2f(t * 73.0)) - 0.5) * (0.035 + band * 0.16);
-            if (p.mono == 1u) { let lum = dot(color, vec3f(0.299, 0.587, 0.114)); color = vec3f(lum) + vec3f(0.08, 0.35, 0.46) * band * (rand(vec2f(line, t)) - 0.5); }
-            return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
-          }
-          let dried = sampleFrame(uv);
-          let density = 1.0 - dot(dried, vec3f(0.299, 0.587, 0.114));
-          let hue = dried - vec3f(dot(dried, vec3f(0.299, 0.587, 0.114)));
-          let grain = (rand(in.position.xy * 0.37) - 0.5) * 0.035;
-          let paper = select(vec3f(0.91, 0.87, 0.76), vec3f(0.13, 0.115, 0.09), p.light == 0u) + grain;
-          let darkInk = clamp(vec3f(0.11, 0.085, 0.06) + hue * 1.5, vec3f(0.01), vec3f(0.62));
-          let lightInk = clamp(vec3f(0.84, 0.80, 0.70) + hue * 4.5, vec3f(0.16), vec3f(1.0));
-          let ink = select(darkInk, lightInk, p.light == 0u);
-          return vec4f(mix(paper, ink, clamp(density * 1.45, 0.0, 1.0)), 1.0);
-        }
-      ` });
-      presentPipeline = device.createRenderPipeline({
-        layout: "auto", vertex: { module: presentModule, entryPoint: "vs" },
-        fragment: { module: presentModule, entryPoint: "fs", targets: [{ format }] }, primitive: { topology: "triangle-list" },
+      p.setPipeline(presentPipeline);
+      p.setBindGroup(0, presentGroup);
+      p.draw(3);
+      p.end();
+      e.copyTextureToBuffer(
+        { texture: t, origin: [72, 0] },
+        { buffer: b, bytesPerRow: 256 },
+        [8, 17],
+      );
+      device.queue.submit([e.finish()]);
+      await b.mapAsync(GPUMapMode.READ);
+      const bytes = new Uint8Array(b.getMappedRange());
+      const colors = new Set();
+      for (let row = 0; row < 17; row++)
+        for (let x = 0; x < 8; x++)
+          colors.add(
+            Array.from(
+              bytes.slice(row * 256 + x * 4, row * 256 + x * 4 + 4),
+            ).join(","),
+          );
+      b.unmap();
+      b.destroy();
+      t.destroy();
+      return [...colors];
+    },
+    async inspect_pixels() {
+      if (!device || !target) return null;
+      const b = device.createBuffer({
+        size: 256 * 17,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-
-      const inkModule = device.createShaderModule({ code: `
-        @group(0) @binding(0) var inkSampler: sampler;
-        @group(0) @binding(1) var currentTexture: texture_2d<f32>;
-        @group(0) @binding(2) var freshTexture: texture_2d<f32>;
-        ${fullscreen}
-        fn density(texture: texture_2d<f32>, uv: vec2f) -> f32 {
-          let c = textureSampleLevel(texture, inkSampler, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).rgb;
-          return 1.0 - dot(c, vec3f(0.299, 0.587, 0.114));
-        }
-        fn sampleInk(texture: texture_2d<f32>, uv: vec2f) -> vec3f {
-          return textureSampleLevel(texture, inkSampler, clamp(uv, vec2f(0.0), vec2f(1.0)), 0.0).rgb;
-        }
-        @fragment fn fs(in: Out) -> @location(0) vec4f {
-          let dimensions = vec2f(textureDimensions(freshTexture));
-          let px = 1.0 / dimensions;
-          let fresh = density(freshTexture, in.uv);
-          let neighbourInk = min(min(sampleInk(freshTexture, in.uv + vec2f(px.x, 0.0)), sampleInk(freshTexture, in.uv - vec2f(px.x, 0.0))), min(sampleInk(freshTexture, in.uv + vec2f(0.0, px.y)), sampleInk(freshTexture, in.uv - vec2f(0.0, px.y))));
-          let neighbours = 1.0 - dot(neighbourInk, vec3f(0.299, 0.587, 0.114));
-          let edge = max(neighbours - fresh, 0.0) * 0.34;
-          let current = min(sampleInk(currentTexture, in.uv), sampleInk(freshTexture, in.uv));
-          let spread = mix(vec3f(1.0), neighbourInk, edge);
-          return vec4f(min(current, spread), 1.0);
-        }
-      ` });
-      inkPipeline = device.createRenderPipeline({
-        layout: "auto", vertex: { module: inkModule, entryPoint: "vs" },
-        fragment: { module: inkModule, entryPoint: "fs", targets: [{ format: "rgba8unorm" }] }, primitive: { topology: "triangle-list" },
-      });
-      device.lost.then(() => {
-        device = context = sampler = atlasSampler = scenePipeline = presentPipeline = inkPipeline = starting = undefined;
-        sceneTexture = atlasTexture = inkTexture = freshTexture = undefined;
-        cachedFrame = undefined;
-        if (latest) paint(latest, ++frameId);
-      });
-      return true;
-    })();
-    return starting;
-  }
-
-  function rgba(value, alpha = value[3] / 255) {
-    return [value[0] / 255, value[1] / 255, value[2] / 255, alpha];
-  }
-
-  function pushVertex(vertices, layout, x, y, color, u = 0, v = 0, glyph = 0) {
-    vertices.push(x / layout.width * 2 - 1, 1 - y / layout.height * 2, ...color, u, v, glyph);
-  }
-
-  function pushQuad(vertices, layout, x, y, width, height, color, uv, glyph = 0) {
-    const [u0, v0, u1, v1] = uv || [0, 0, 0, 0];
-    const p = (px, py, u, v) => pushVertex(vertices, layout, px, py, color, u, v, glyph);
-    p(x, y, u0, v0); p(x + width, y, u1, v0); p(x, y + height, u0, v1);
-    p(x, y + height, u0, v1); p(x + width, y, u1, v0); p(x + width, y + height, u1, v1);
-  }
-
-  function pushGlyph(vertices, layout, glyph, x, y, width, height, color, bold) {
-    const source = makeAtlas(layout.dpr);
-    const slot = source.slots.get(`${bold ? 1 : 0}:${glyph}`);
-    if (!slot) return;
-    const uv = [slot[0] / source.canvas.width, slot[1] / source.canvas.height, (slot[0] + slot[2]) / source.canvas.width, (slot[1] + slot[3]) / source.canvas.height];
-    pushQuad(vertices, layout, x, y, width, height, color, uv, 1);
-  }
-
-  function buildGeometry(frame, layout, packageName, now) {
-    const surface = frame.fallback;
-    const ink = packageName === "ink";
-    const page = ink ? [255, 255, 255, 255] : surface.cells[0]?.background || [8, 9, 11, 255];
-    const vertices = [];
-    const freshVertices = [];
-    const active = new Map();
-    if (ink) {
-      for (const state of glyphStates.values()) state.seen = false;
-      for (const cell of surface.cells) {
-        if (!cell.detail) continue;
-        const detail = frame.details[cell.detail - 1];
-        if (detail) active.set(`${detail.class}:${detail.id}`, detail);
-      }
-      for (const key of active.keys()) {
-        let state = glyphStates.get(key);
-        if (!state) {
-          state = { first: now, present: false, seen: true, last: now };
-          glyphStates.set(key, state);
-        }
-        if (!state.present) state.first = now;
-        state.present = true;
-        state.seen = true;
-        state.last = now;
-      }
-      for (const [key, state] of glyphStates) {
-        if (!state.seen) state.present = false;
-        if (!state.present && now - state.last > 30000) glyphStates.delete(key);
-      }
-      metrics.activeInkDetails = active.size;
-      metrics.wetInkDetails = [...active.keys()].filter((key) => now - glyphStates.get(key).first < 60).length;
-    }
-    surface.cells.forEach((cell, index) => {
-      const x = index % surface.cols;
-      const y = Math.floor(index / surface.cols);
-      const left = x * layout.cellWidth;
-      const top = y * layout.cellHeight;
-      if (!ink && cell.background.some((value, i) => i < 3 && value !== page[i])) pushQuad(vertices, layout, left, top, layout.cellWidth, layout.cellHeight, rgba(cell.background));
-      if (cell.glyph === " ") return;
-      if (!ink) {
-        pushGlyph(vertices, layout, cell.glyph, left, top, layout.cellWidth, layout.cellHeight, rgba(cell.foreground), cell.bold);
-        return;
-      }
-      const detail = cell.detail ? frame.details[cell.detail - 1] : undefined;
-      const key = detail ? `${detail.class}:${detail.id}` : "";
-      const state = key ? glyphStates.get(key) : undefined;
-      const seed = index * 31 + cell.glyph.codePointAt(0);
-      const impact = detail ? 0.64 + hash(seed) * 0.32 : 1;
-      const ribbon = detail ? 0.78 + hash(x * 0.73 + y * 0.19) * 0.22 : 1;
-      const progress = !detail || frame.variant.reduced_motion ? 1 : clamp((now - state.first) / 60, 0, 1);
-      const dx = detail ? (hash(seed + 1) - 0.5) * 1.25 : 0;
-      const dy = detail ? (hash(seed + 2) - 0.5) * 1.0 : 0;
-      const chroma = Math.max(...cell.foreground.slice(0, 3)) - Math.min(...cell.foreground.slice(0, 3));
-      const source = frame.variant.color === "color" && chroma > 24
-        ? [6 + cell.foreground[0] * 0.35, 6 + cell.foreground[1] * 0.35, 6 + cell.foreground[2] * 0.35, 255]
-        : [35, 28, 21, 255];
-      const color = rgba(source, impact * ribbon * progress);
-      pushGlyph(vertices, layout, cell.glyph, left + dx, top + dy, layout.cellWidth, layout.cellHeight, color, cell.bold);
-      if (cell.bold || impact > 0.88) pushGlyph(vertices, layout, cell.glyph, left + dx + 0.35, top + dy + 0.18, layout.cellWidth, layout.cellHeight, [...color.slice(0, 3), color[3] * 0.32], cell.bold);
-      if (detail && !frame.variant.reduced_motion && progress < 1) {
-        const wet = rgba([0, 0, 0, 255], 1 - progress);
-        pushGlyph(freshVertices, layout, cell.glyph, left + dx, top + dy, layout.cellWidth, layout.cellHeight, wet, cell.bold);
-      }
-    });
-    if (!ink) {
-      glyphStates.clear();
-      metrics.activeInkDetails = 0;
-      metrics.wetInkDetails = 0;
-    }
-    const sceneVertexCount = vertices.length / 9;
-    vertices.push(...freshVertices);
-    return {
-      vertices: new Float32Array(vertices),
-      sceneVertexCount,
-      freshVertexCount: freshVertices.length / 9,
-      clear: rgba(page),
-    };
-  }
-
-  function ensureResources(width, height, bytes) {
-    if (!sceneTexture || sceneSize[0] !== width || sceneSize[1] !== height) {
-      sceneTexture?.destroy();
-      sceneTexture = device.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
-      sceneSize = [width, height];
-    }
-    if (!sceneBuffer || sceneCapacity < bytes) {
-      sceneBuffer?.destroy();
-      sceneCapacity = 36;
-      while (sceneCapacity < bytes) sceneCapacity *= 2;
-      sceneBuffer = device.createBuffer({ size: sceneCapacity, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    }
-  }
-
-  function ensureInk(width, height) {
-    if (inkTexture && freshTexture && inkSize[0] === width && inkSize[1] === height) return;
-    inkTexture?.destroy();
-    freshTexture?.destroy();
-    inkTexture = device.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
-    freshTexture = device.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
-    inkSize = [width, height];
-  }
-
-  function renderPackage(frame, layout, packageName, now) {
-    const canvas = document.getElementById("stage");
-    const dpr = renderDpr(packageName);
-    layout.dpr = dpr;
-    sizeCanvas(canvas, layout.width, layout.height, dpr);
-    ensureAtlas(dpr);
-    const layoutKey = `${canvas.width}x${canvas.height}`;
-    const ink = packageName === "ink";
-    const rebuild = cachedFrame !== frame || cachedPackage !== packageName || cachedLayout !== layoutKey || ink;
-    const geometry = rebuild ? buildGeometry(frame, layout, packageName, now) : cachedGeometry;
-    cachedFrame = frame;
-    cachedPackage = packageName;
-    cachedLayout = layoutKey;
-    cachedGeometry = geometry;
-    ensureResources(canvas.width, canvas.height, geometry.vertices.byteLength);
-    if (rebuild && geometry.vertices.byteLength) device.queue.writeBuffer(sceneBuffer, 0, geometry.vertices);
-    metrics.sceneVertices = geometry.sceneVertexCount;
-    metrics.sceneVertexBytes = geometry.vertices.byteLength;
-    const encoder = device.createCommandEncoder();
-    if (rebuild) {
-      const pass = encoder.beginRenderPass({ colorAttachments: [{ view: sceneTexture.createView(), clearValue: { r: geometry.clear[0], g: geometry.clear[1], b: geometry.clear[2], a: 1 }, loadOp: "clear", storeOp: "store" }] });
-      const group = device.createBindGroup({ layout: scenePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: atlasSampler }, { binding: 1, resource: atlasTexture.createView() }] });
-      pass.setPipeline(scenePipeline); pass.setBindGroup(0, group);
-      if (geometry.sceneVertexCount) { pass.setVertexBuffer(0, sceneBuffer); pass.draw(geometry.sceneVertexCount); }
-      pass.end();
-    }
-    let presented = sceneTexture;
-    if (ink) {
-      ensureInk(canvas.width, canvas.height);
-      const freshPass = encoder.beginRenderPass({ colorAttachments: [{ view: freshTexture.createView(), clearValue: { r: 1, g: 1, b: 1, a: 1 }, loadOp: "clear", storeOp: "store" }] });
-      const freshGroup = device.createBindGroup({ layout: scenePipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: atlasSampler }, { binding: 1, resource: atlasTexture.createView() }] });
-      freshPass.setPipeline(scenePipeline); freshPass.setBindGroup(0, freshGroup);
-      if (geometry.freshVertexCount) { freshPass.setVertexBuffer(0, sceneBuffer); freshPass.draw(geometry.freshVertexCount, 1, geometry.sceneVertexCount); }
-      freshPass.end();
-      const pass = encoder.beginRenderPass({ colorAttachments: [{ view: inkTexture.createView(), clearValue: { r: 1, g: 1, b: 1, a: 1 }, loadOp: "clear", storeOp: "store" }] });
-      const group = device.createBindGroup({ layout: inkPipeline.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: sampler }, { binding: 1, resource: sceneTexture.createView() }, { binding: 2, resource: freshTexture.createView() },
-      ] });
-      pass.setPipeline(inkPipeline); pass.setBindGroup(0, group); pass.draw(3); pass.end();
-      presented = inkTexture;
-    }
-    const modes = { canonical: 0, crt: 1, vhs: 2, ink: 3 };
-    const data = new ArrayBuffer(32);
-    const ints = new Uint32Array(data);
-    const floats = new Float32Array(data);
-    ints[0] = modes[packageName]; ints[1] = frame.variant.color === "monochrome" ? 1 : 0;
-    ints[2] = frame.fallback.cells[0]?.background[0] > 80 ? 1 : 0; ints[3] = frame.variant.reduced_motion ? 1 : 0;
-    floats[4] = now / 1000; floats[5] = canvas.width; floats[6] = canvas.height; floats[7] = dpr;
-    device.queue.writeBuffer(frameUniform, 0, data);
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
-    const group = device.createBindGroup({ layout: presentPipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: sampler }, { binding: 1, resource: presented.createView() }, { binding: 2, resource: { buffer: frameUniform } },
-    ] });
-    pass.setPipeline(presentPipeline); pass.setBindGroup(0, group); pass.draw(3); pass.end();
-    device.queue.submit([encoder.finish()]);
-  }
-
-  function animationNeeded(frame, now) {
-    if (frame.variant.reduced_motion) return false;
-    if (frame.variant.package === "vhs") return true;
-    if (frame.variant.package === "ink") {
-      for (const state of glyphStates.values()) if (state.present && now - state.first < 60) return true;
-    }
-    return false;
-  }
-
-  async function paint(frame, token) {
-    const start = performance.now();
-    const gpu = await Promise.race([
-      startGpu().catch(() => false),
-      new Promise((resolve) => setTimeout(() => resolve(false), 2500)),
-    ]);
-    await document.fonts.ready;
-    if (token !== frameId) { metrics.staleFramesDiscarded++; return; }
-    const requested = frame.variant.package;
-    metrics.requestedPackage = requested;
-    if (!gpu) {
-      showSemanticFallback(!isSecureContext ? "webgpu-requires-https" : "webgpu-unavailable");
-      return;
-    }
-    const surface = frame.fallback;
-    const layout = {
-      width: surface.cols * CELL_WIDTH,
-      height: surface.rows * CELL_HEIGHT,
-      cellWidth: CELL_WIDTH,
-      cellHeight: CELL_HEIGHT,
-    };
-    renderPackage(frame, layout, requested, performance.now());
-    metrics.activePackage = requested;
-    metrics.fallbackReason = "";
-    document.documentElement.dataset.renderer = `webgpu-${requested}`;
-    document.documentElement.dataset.renderPackage = requested;
-    paintTotal += performance.now() - start;
-    metrics.paintedFrames++;
-    metrics.averagePaintMs = paintTotal / metrics.paintedFrames;
-    const now = performance.now();
-    if (animationNeeded(frame, now) && !animationTimer) {
-      animationTimer = setTimeout(() => requestAnimationFrame(() => {
-        animationTimer = 0;
-        if (latest === frame) paint(frame, token);
-      }), requested === "vhs" ? 120 : 32);
-    }
-  }
-
-  const SWEEP_FROM = Math.PI * 0.75;
-  const SWEEP_TO = Math.PI * 2.25;
-  let controlState = { theme: "dark", packageIndex: 0 };
-  let controlsInstalled = false;
-
-  function controlContext(canvas, width, height) {
-    const dpr = devicePixelRatio || 1;
-    const pixelWidth = Math.round(width * dpr);
-    const pixelHeight = Math.round(height * dpr);
-    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-      canvas.width = pixelWidth;
-      canvas.height = pixelHeight;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-    }
-    const context = canvas.getContext("2d");
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, width, height);
-    return context;
-  }
-
-  function drawPower(context, ink) {
-    context.save();
-    context.translate(11, 11);
-    context.strokeStyle = ink;
-    context.lineWidth = 1.6;
-    context.lineCap = "round";
-    const radius = 7;
-    const gap = 0.42;
-    context.beginPath();
-    context.arc(0, 0, radius, -Math.PI / 2 + gap, -Math.PI / 2 - gap + Math.PI * 2);
-    context.stroke();
-    context.beginPath();
-    context.moveTo(0, -(radius + 2.4));
-    context.lineTo(0, -radius * 0.2);
-    context.stroke();
-    context.restore();
-  }
-
-  function drawKnob(context, at, ink) {
-    const radius = 11;
-    const angle = (index) => SWEEP_FROM + (SWEEP_TO - SWEEP_FROM) * index / 3;
-    context.save();
-    context.translate(19, 19);
-    context.lineCap = "butt";
-    for (let index = 0; index < 4; index++) {
-      const selected = index === at;
-      const a = angle(index);
-      const inner = radius + 3;
-      const outer = inner + (selected ? 4.5 : 2.5);
-      context.strokeStyle = selected ? "#ffb040" : ink;
-      context.lineWidth = selected ? 1.6 : 1;
-      context.beginPath();
-      context.moveTo(Math.cos(a) * inner, Math.sin(a) * inner);
-      context.lineTo(Math.cos(a) * outer, Math.sin(a) * outer);
-      context.stroke();
-    }
-    context.strokeStyle = ink;
-    context.lineWidth = 1.2;
-    context.beginPath();
-    context.arc(0, 0, radius, 0, Math.PI * 2);
-    context.stroke();
-    const a = angle(at);
-    context.strokeStyle = "#ffb040";
-    context.lineWidth = 1.8;
-    context.lineCap = "round";
-    context.beginPath();
-    context.moveTo(Math.cos(a) * radius * 0.18, Math.sin(a) * radius * 0.18);
-    context.lineTo(Math.cos(a) * radius * 0.82, Math.sin(a) * radius * 0.82);
-    context.stroke();
-    context.restore();
-  }
-
-  function paintControls() {
-    const power = document.getElementById("theme-toggle");
-    const dial = document.getElementById("package-toggle");
-    const powerFace = document.getElementById("power-face");
-    const knobFace = document.getElementById("knob-face");
-    if (!power || !dial || !powerFace || !knobFace) return;
-    const hot = power.matches(":hover, :focus-visible") || dial.matches(":hover, :focus-visible");
-    const ink = hot ? "#c4c8ce" : controlState.theme === "light" ? "#625e55" : "#606670";
-    drawPower(controlContext(powerFace, 22, 22), controlState.theme === "light" ? "#ffb040" : ink);
-    drawKnob(controlContext(knobFace, 38, 38), controlState.packageIndex, ink);
-    if (!controlsInstalled) {
-      controlsInstalled = true;
-      for (const control of [power, dial]) {
-        for (const event of ["pointerenter", "pointerleave", "focus", "blur"]) {
-          control.addEventListener(event, paintControls);
-        }
-      }
-      addEventListener("resize", paintControls);
-    }
-  }
-
-  window.portfolioV2Controls = {
-    paint(theme, packageIndex) {
-      controlState = { theme, packageIndex };
-      paintControls();
+      const e = device.createCommandEncoder();
+      e.copyTextureToBuffer(
+        { texture: target, origin: [72, 0] },
+        { buffer: b, bytesPerRow: 256 },
+        [8, 17],
+      );
+      device.queue.submit([e.finish()]);
+      await b.mapAsync(GPUMapMode.READ);
+      const bytes = new Uint8Array(b.getMappedRange());
+      const colors = new Set();
+      for (let row = 0; row < 17; row++)
+        for (let x = 0; x < 8; x++)
+          colors.add(
+            Array.from(
+              bytes.slice(row * 256 + x * 4, row * 256 + x * 4 + 4),
+            ).join(","),
+          );
+      b.unmap();
+      b.destroy();
+      return [...colors];
+    },
+    render(frame) {
+      latest = typeof frame === "string" ? JSON.parse(frame) : frame;
+      generation++;
+      metrics.renderCalls++;
+      requestPaint();
     },
   };
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      cancelAnimationFrame(timer);
+      timer = 0;
+    } else {
+      uploaded = undefined;
+      requestPaint();
+    }
+  });
+  document
+    .getElementById("stage")
+    .addEventListener("webglcontextlost", (event) => {
+      event.preventDefault();
+      cancelAnimationFrame(timer);
+      timer = 0;
+    });
+  document
+    .getElementById("stage")
+    .addEventListener("webglcontextrestored", () => {
+      glRenderer = undefined;
+      initPromise = undefined;
+      requestPaint();
+    });
 
-  window.portfolioV2 = {
-    render(serialized) {
-      metrics.renderCalls++;
-      if (animationTimer) {
-        clearTimeout(animationTimer);
-        animationTimer = 0;
+  let controlKey = "";
+  window.portfolioV2Controls = {
+    paint(theme, index) {
+      const key = `${theme}/${index}/${devicePixelRatio}`;
+      if (controlKey === key) return;
+      controlKey = key;
+      for (const [id, size] of [
+        ["power-face", 22],
+        ["knob-face", 38],
+      ]) {
+        const canvas = document.getElementById(id),
+          dpr = devicePixelRatio || 1;
+        canvas.width = size * dpr;
+        canvas.height = size * dpr;
+        canvas.style.width = `${size}px`;
+        canvas.style.height = `${size}px`;
+        const c = canvas.getContext("2d");
+        c.scale(dpr, dpr);
+        c.translate(size / 2, size / 2);
+        c.strokeStyle = theme === "light" ? "#625e55" : "#606670";
+        c.lineWidth = 1.4;
+        if (id === "power-face") {
+          c.beginPath();
+          c.arc(0, 0, 7, -Math.PI / 2 + 0.42, Math.PI * 1.5 - 0.42);
+          c.stroke();
+          c.beginPath();
+          c.moveTo(0, -9.4);
+          c.lineTo(0, -1.4);
+          c.stroke();
+        } else {
+          c.beginPath();
+          c.arc(0, 0, 11, 0, Math.PI * 2);
+          c.stroke();
+          for (let i = 0; i < 5; i++) {
+            const a = Math.PI * 0.75 + (Math.PI * 1.5 * i) / 4;
+            c.beginPath();
+            c.moveTo(Math.cos(a) * 14, Math.sin(a) * 14);
+            c.lineTo(Math.cos(a) * 17, Math.sin(a) * 17);
+            c.stroke();
+          }
+          const a = Math.PI * 0.75 + (Math.PI * 1.5 * index) / 4;
+          c.strokeStyle = "#ffb040";
+          c.lineWidth = 1.8;
+          c.beginPath();
+          c.moveTo(Math.cos(a) * 2, Math.sin(a) * 2);
+          c.lineTo(Math.cos(a) * 9, Math.sin(a) * 9);
+          c.stroke();
+        }
       }
-      latest = JSON.parse(serialized);
-      paint(latest, ++frameId).catch((error) => {
-        console.warn("renderer failed", error);
-        showSemanticFallback("renderer-failure");
-      });
     },
   };
 })();

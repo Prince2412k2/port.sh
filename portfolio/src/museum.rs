@@ -27,7 +27,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
+use skysheet::cards::DrawTarget;
 
 use crate::paint::{self, wrap, Theme};
 use crate::portraits::{self, Portrait};
@@ -48,6 +48,7 @@ const PAD: u16 = 2;
 /// for the exact caption height first would be circular. An allowance it is.
 const CHROME: u16 = 10;
 
+#[derive(Clone,Debug)]
 pub struct Museum {
     works: Vec<Entry>,
     /// Which work is chosen. Always a valid index.
@@ -265,7 +266,7 @@ impl Museum {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
+pub fn render(f: &mut impl DrawTarget, area: Rect, m: &Museum, th: Theme) {
     if m.works.is_empty() || area.width < 24 || area.height < 12 {
         return;
     }
@@ -291,7 +292,7 @@ pub fn render(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
 }
 
 /// One work, offset `dx` columns from centre.
-fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
+fn work<T:DrawTarget>(f: &mut T, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
     let e = &m.works[i];
 
     // Resolved once, in one place, shared with the wall behind it. Every
@@ -301,7 +302,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
     let Bed { plate, lines, measure, top, .. } = m.bed(area, i);
 
     let centre = area.x as f64 + area.width as f64 / 2.0;
-    let put = |f: &mut Frame, y: u16, w: u16, spans: Vec<Span<'static>>| {
+    let put = |f: &mut T, y: u16, w: u16, spans: Vec<Span<'static>>| {
         let x = centre + dx - w as f64 / 2.0;
         // Off the side of the screen entirely, or clipped into nothing.
         if x + w as f64 <= area.x as f64 || x >= (area.x + area.width) as f64 {
@@ -378,7 +379,7 @@ fn work(f: &mut Frame, area: Rect, m: &Museum, i: usize, dx: f64, th: Theme) {
 }
 
 /// Where you are in the collection, as a row of marks.
-fn index(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
+fn index(f: &mut impl DrawTarget, area: Rect, m: &Museum, th: Theme) {
     let n = m.works.len();
     let w = (n * 2) as u16;
     if w + 2 > area.width {
@@ -407,7 +408,7 @@ fn index(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
 ///
 /// It holds still once the plate does -- a wall that keeps raining behind a
 /// settled photograph is bandwidth spent on something nobody is looking at.
-fn field(f: &mut Frame, area: Rect, m: &Museum, th: Theme) {
+fn field(f: &mut impl DrawTarget, area: Rect, m: &Museum, th: Theme) {
     let Some(e) = m.works.get(m.sel) else { return };
     // A name nothing answers to is the plain wall, not an error: this file is
     // content, edited without a rebuild, and a typo in it should cost the

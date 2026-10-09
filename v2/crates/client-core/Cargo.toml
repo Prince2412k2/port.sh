@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde_json.workspace = true
+earcutr = "0.4"
+skysheet = { path = "../../../skills", default-features = false, features = ["browser-core"] }
 portfolio-v2-assets = { path = "../assets" }
 portfolio-v2-protocol = { path = "../protocol" }
 portfolio-v2-scene = { path = "../scene" }

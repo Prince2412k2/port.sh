@@ -34,6 +34,7 @@ fn classify(layer: &str, class: &str, subclass: &str) -> Option<(Layer, u16)> {
             _ => return None,
         },
         "landuse" => (Layer::Landuse, 45),
+        "building"|"buildings"=>(Layer::Building,12),
         "places" => match class {
             "country" => (Layer::Place, 250),
             "state" => (Layer::Place, 215),
@@ -133,6 +134,49 @@ fn zigzag(v: u64) -> i64 {
 
 /// Decode one tile's worth of features, already in world coordinates.
 pub fn decode(buf: &[u8], tile: TileId) -> Vec<Feature> {
+    decode_checked(buf,tile).unwrap_or_default()
+}
+
+/// Validate wire lengths and collection budgets before the fast decoder uses
+/// unchecked slices. Corrupt assets become recoverable errors, never WASM traps.
+pub fn decode_checked(buf:&[u8],tile:TileId)->Result<Vec<Feature>, &'static str>{
+    if buf.len()>8*1024*1024||tile.z>24||tile.x>=(1u32<<tile.z)||tile.y>=(1u32<<tile.z){return Err("MVT input exceeds bounds");}
+    validate_message(buf,0,&mut [0usize;2])?;
+    Ok(decode_validated(buf,tile))
+}
+fn checked_varint(b:&[u8],p:&mut usize)->Result<u64,&'static str>{
+    let mut result=0u64;
+    for shift in (0..70).step_by(7){let byte=*b.get(*p).ok_or("truncated MVT varint")?;*p+=1;
+        if shift==63&&byte>1{return Err("overflowing MVT varint");}
+        result|=((byte&127) as u64)<<shift;
+        if byte&128==0{return Ok(result);}
+    }Err("overflowing MVT varint")
+}
+fn validate_message(b:&[u8],kind:u8,budget:&mut [usize;2])->Result<(),&'static str>{
+    let mut p=0;let mut entries=0;
+    while p<b.len(){
+        let key=checked_varint(b,&mut p)?;if key>>3==0{return Err("invalid MVT field");}
+        match key&7{
+            0=>{let value=checked_varint(b,&mut p)?;if kind==1&&key>>3==5&&(value==0||value>65536){return Err("invalid MVT extent");}},
+            1=>p=p.checked_add(8).filter(|end|*end<=b.len()).ok_or("truncated MVT float")?,
+            5=>p=p.checked_add(4).filter(|end|*end<=b.len()).ok_or("truncated MVT float")?,
+            2=>{
+                let length=usize::try_from(checked_varint(b,&mut p)?).map_err(|_|"MVT length overflow")?;
+                let end=p.checked_add(length).filter(|end|*end<=b.len()).ok_or("truncated MVT field")?;let bytes=&b[p..end];
+                match (kind,key>>3){
+                    (0,3)=>validate_message(bytes,1,budget)?,
+                    (1,2)=>{budget[0]+=1;if budget[0]>65536{return Err("too many MVT features");}validate_message(bytes,2,budget)?;},
+                    (1,4)=>{entries+=1;if entries>4096{return Err("too many MVT dictionary values");}validate_message(bytes,3,budget)?;},
+                    (1,1|3)|(3,1)=>if length>4096{return Err("MVT string exceeds limit");},
+                    (2,2|4)=>{let mut position=0;while position<bytes.len(){let value=checked_varint(bytes,&mut position)?;if value>u32::MAX as u64{return Err("MVT geometry overflow");}budget[1]+=1;if budget[1]>1_000_000{return Err("MVT geometry budget exceeded");}}},
+                    _=>(),
+                }p=end;
+            },
+            _=>return Err("unsupported MVT wire type"),
+        }
+    }Ok(())
+}
+fn decode_validated(buf:&[u8],tile:TileId)->Vec<Feature>{
     let mut out = Vec::new();
     let mut p = 0usize;
     while p < buf.len() {
@@ -212,6 +256,8 @@ fn decode_value(b: &[u8]) -> String {
             String::from_utf8_lossy(&b[p..p + n]).into_owned()
         }
         (_, 0) => varint(b, &mut p).to_string(),
+        (2,5)=>f32::from_le_bytes(b[p..p+4].try_into().unwrap()).to_string(),
+        (3,1)=>f64::from_le_bytes(b[p..p+8].try_into().unwrap()).to_string(),
         _ => String::new(),
     }
 }
@@ -277,9 +323,10 @@ fn decode_feature(
     // POIs carry the useful distinction in subcategory ("station") and a coarse
     // one in category ("transit"). Both go in: the fine one decides when it is
     // recognised, the coarse one catches everything else.
-    let Some((layer, rank)) = classify(layer_name, class, subclass) else {
+    let Some((layer, mut rank)) = classify(layer_name, class, subclass) else {
         return;
     };
+    if layer==Layer::Building{for tag in tags.chunks_exact(2){if let (Some(key),Some(value))=(keys.get(tag[0] as usize),vals.get(tag[1] as usize)){if matches!(key.as_str(),"height"|"render_height"){if let Ok(height)=value.parse::<f64>(){if height.is_finite(){rank=height.clamp(3.0,120.0).round() as u16;}}}}}}
 
     let scale = 1.0 / (extent as f64 * (1u64 << tile.z) as f64);
     let ox = tile.x as f64 / (1u64 << tile.z) as f64;
@@ -322,7 +369,7 @@ fn decode_feature(
         parts.push(cur);
     }
 
-    let name: Option<Box<str>> = name.filter(|s| !s.is_empty()).map(Box::from);
+    let name: Option<Box<str>> = name.filter(|s| !s.is_empty()&&s.len()<=256&&!s.chars().any(char::is_control)).map(Box::from);
 
     for pts in parts {
         if pts.len() < 2 && !layer.is_point() {
@@ -357,6 +404,13 @@ fn signed_area(r: &[[f64; 2]]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn corrupt_lengths_and_overflowing_varints_are_recoverable(){
+        let tile=TileId{z:12,x:2873,y:1778};
+        for bytes in [vec![0x1a,0x7f],vec![0x1a,0x80],vec![0x80;20],vec![0x1a,3,0x0a,8,1]]{assert!(decode_checked(&bytes,tile).is_err());}
+        let mut seed=17u64;
+        for length in 0..256{let bytes=(0..length).map(|_|{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as u8}).collect::<Vec<_>>();assert!(std::panic::catch_unwind(||decode_checked(&bytes,tile)).is_ok());}
+    }
 
     /// The archive's coarse `category` is the fallback, and it has to be one.
     ///
@@ -402,11 +456,10 @@ mod tests {
         }
     }
 
-    /// A layer this does not render is skipped whole, and the archive has one:
-    /// there is no `buildings` layer in it at all.
+    /// Unknown layers are skipped; building-aware archive upgrades are supported.
     #[test]
     fn an_unknown_layer_is_declined() {
-        assert!(classify("buildings", "yes", "").is_none());
+        assert_eq!(classify("buildings", "yes", ""),Some((Layer::Building,12)));
         assert!(classify("aeroway", "runway", "").is_none());
     }
 

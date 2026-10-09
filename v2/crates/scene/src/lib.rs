@@ -41,6 +41,7 @@ pub enum RenderPackage {
     Crt,
     Vhs,
     Ink,
+    Pixel,
 }
 
 impl RenderPackage {
@@ -49,7 +50,8 @@ impl RenderPackage {
             Self::Canonical => Self::Crt,
             Self::Crt => Self::Vhs,
             Self::Vhs => Self::Ink,
-            Self::Ink => Self::Canonical,
+            Self::Ink => Self::Pixel,
+            Self::Pixel => Self::Canonical,
         }
     }
 }
@@ -160,6 +162,25 @@ pub struct CellSurface {
     pub cols: u16,
     pub rows: u16,
     pub cells: Vec<Cell>,
+}
+impl CellSurface {
+    pub fn packed(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.cells.len() * 24);
+        for cell in &self.cells {
+            bytes.extend_from_slice(&(cell.glyph as u32).to_le_bytes());
+            let Rgba8(r, g, b, a) = cell.foreground;
+            bytes.extend_from_slice(&[r, g, b, a]);
+            let Rgba8(r, g, b, a) = cell.background;
+            bytes.extend_from_slice(&[r, g, b, a]);
+            bytes.extend_from_slice(&cell.detail.to_le_bytes());
+            bytes.extend_from_slice(&[u8::from(cell.bold), 0]);
+            bytes.extend_from_slice(&cell.material.0.to_le_bytes());
+            bytes.extend_from_slice(&cell.layer.0.to_le_bytes());
+            bytes.extend_from_slice(&cell.depth.to_le_bytes());
+            bytes.extend_from_slice(&[0, 0]);
+        }
+        bytes
+    }
 }
 
 pub fn compose(scene: &VisualScene) -> CellSurface {

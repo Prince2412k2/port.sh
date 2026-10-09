@@ -1,0 +1,52 @@
+name: V2 clients
+on:
+  push:
+    paths: ["v2/**", "map/**", "skills/**", "portfolio/**", "scripts/**", ".github/workflows/v2.yml"]
+  pull_request:
+    paths: ["v2/**", "map/**", "skills/**", "portfolio/**", "scripts/**", ".github/workflows/v2.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, name: linux-amd64}
+          - {os: ubuntu-24.04-arm, name: linux-arm64}
+          - {os: macos-15-intel, name: darwin-amd64}
+          - {os: macos-14, name: darwin-arm64}
+          - {os: windows-2022, name: windows-amd64}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path v2/Cargo.toml --locked --workspace
+      - run: cargo build --manifest-path v2/Cargo.toml --locked --release -p portfolio-v2-native
+      - name: Package client
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          suffix=""
+          if [ "${{ runner.os }}" = Windows ]; then suffix=.exe; fi
+          cp "v2/target/release/portfolio-v2-native$suffix" "artifacts/portfolio-v2-native-${{ matrix.name }}$suffix"
+          python3 -c 'import hashlib,pathlib; p=next(pathlib.Path("artifacts").glob("portfolio-*")); (p.parent/"SHA256SUMS").write_text(hashlib.sha256(p.read_bytes()).hexdigest()+"  "+p.name+"\n")'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portfolio-v2-${{ matrix.name }}
+          path: artifacts/
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - run: sudo apt-get update && sudo apt-get install -y python3-pil python3-fonttools python3-brotli
+      - run: bash scripts/build-v2-web.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portfolio-v2-web
+          path: v2/crates/browser/dist/

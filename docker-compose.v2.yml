@@ -1,0 +1,57 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: deploy/v2/Dockerfile
+      target: backend
+    restart: unless-stopped
+    ports:
+      - "${V2_WEB_BIND:-0.0.0.0:8332}:8322"
+      - "${V2_SSH_BIND:-0.0.0.0:2223}:2222"
+      - "60100-60110:60100-60110/udp"
+    volumes:
+      - v2-sessions:/app/sessions
+      - ${V2_VECTOR:-./map-data/vector.pmtiles}:/app/map/vector.pmtiles:ro
+      - ${V2_MAP_DIR:-./map-data}/states.tmap:/app/map/states.tmap:ro
+      - ${V2_MAP_DIR:-./map-data}/terrain.tmhg:/app/map/terrain.tmhg:ro
+      - ${V2_BUILDINGS:-./map/data/buildings.tmap}:/app/map/buildings.tmap:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    pids_limit: 64
+    environment:
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      JINA_API_KEY: ${JINA_API_KEY:-}
+      PORTFOLIO_V2_AI_URL: ${PORTFOLIO_V2_AI_URL:-https://ollama.com/api/chat}
+      PORTFOLIO_V2_AI_MODEL: ${PORTFOLIO_V2_AI_MODEL:-qwen3.5:397b}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/portfolio-v2-native", "--endpoint", "http://127.0.0.1:8322"]
+      interval: 3s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+  hosted:
+    build:
+      context: .
+      dockerfile: deploy/v2/Dockerfile
+      target: hosted
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    # The native process connects to the backend over real localhost. Filesystem,
+    # users and process namespaces remain separate from the backend container.
+    network_mode: service:backend
+    volumes:
+      - v2-hostkeys:/keys
+    tmpfs:
+      - /run:size=8m,mode=755
+      - /tmp:size=32m,mode=1777
+    read_only: true
+    mem_limit: 1g
+    pids_limit: 128
+volumes:
+  v2-hostkeys:
+  v2-sessions:

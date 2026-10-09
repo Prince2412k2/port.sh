@@ -4,6 +4,7 @@
 //! are two front ends over one set of modules, and the alternative to this file
 //! is a second copy of the logo pipeline's output.
 
+#[cfg(feature = "native")]
 pub mod app;
 pub mod canvas;
 pub mod cards;
@@ -13,6 +14,8 @@ pub mod grid;
 pub mod logos;
 pub mod marks;
 pub mod scene;
+#[cfg(feature = "native")]
 pub mod snapshot;
 pub mod tile;
+#[cfg(feature = "native")]
 pub mod ui;

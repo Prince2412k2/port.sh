@@ -35,7 +35,7 @@
 //! limitation of it.
 
 use ratatui::layout::Rect;
-use ratatui::Frame;
+use skysheet::cards::DrawTarget;
 use termap::canvas::{Brush, Canvas, Fog, Theme, MAT_DOT, MAT_SOLID, TINT_MONO};
 use termap::raster::{self, Pen};
 
@@ -117,7 +117,7 @@ impl Wall {
 ///
 /// Returns whether there was room to draw anything, which is what the tests ask.
 pub fn draw(
-    f: &mut Frame,
+    f: &mut impl DrawTarget,
     area: Rect,
     wall: Wall,
     hole: Rect,

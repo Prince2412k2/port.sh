@@ -231,6 +231,10 @@ impl MapData {
 }
 
 pub fn parse_features(text: &str) -> Vec<Feature> {
+    parse_features_checked(text).unwrap_or_default()
+}
+pub fn parse_features_checked(text:&str)->Result<Vec<Feature>, &'static str>{
+    if text.len()>16*1024*1024{return Err("map text exceeds byte limit");}
     let mut features = Vec::new();
     let mut lines = text.lines();
 
@@ -239,19 +243,19 @@ pub fn parse_features(text: &str) -> Vec<Feature> {
         if !line.starts_with("F ") {
             continue;
         }
-        let Some(header) = parse_header(line) else {
-            continue;
-        };
-        let Some(coords) = lines.next() else { break };
+        let header=parse_header(line).ok_or("invalid map feature header")?;
+        if header.npts>250_000||features.len()>=65536{return Err("map feature budget exceeded");}
+        let coords=lines.next().ok_or("missing map coordinates")?;
 
-        let mut pts = Vec::with_capacity(header.npts);
+        let mut pts = Vec::with_capacity(header.npts.min(16384));
         let mut nums = coords.split_ascii_whitespace();
         while let (Some(a), Some(b)) = (nums.next(), nums.next()) {
-            let (Ok(lon), Ok(lat)) = (a.parse::<f64>(), b.parse::<f64>()) else {
-                continue;
-            };
+            let lon=a.parse::<f64>().map_err(|_|"invalid longitude")?;let lat=b.parse::<f64>().map_err(|_|"invalid latitude")?;
+            if !lon.is_finite()||!lat.is_finite()||!(-180.0..=180.0).contains(&lon)||!(-90.0..=90.0).contains(&lat){return Err("invalid map coordinates");}
+            if pts.len()>=header.npts{return Err("too many map coordinates");}
             pts.push(lonlat_to_world(lon, lat));
         }
+        if pts.len()!=header.npts{return Err("truncated map coordinates");}
         if pts.is_empty() {
             continue;
         }
@@ -273,7 +277,7 @@ pub fn parse_features(text: &str) -> Vec<Feature> {
         });
     }
 
-    features
+    Ok(features)
 }
 
 /// A small deterministic hash for stable renderer identities. This is not used

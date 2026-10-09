@@ -346,6 +346,13 @@ pub fn draw(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
 
     stats
 }
+/// Shared labels and authored markers without canonical geometry rasterization.
+/// Scene-native GPU packages use this projection for their readable UI layer.
+pub fn draw_annotations(tiles:&[&Tile],canvas:&mut Canvas,o:&SceneOpts){
+    let bounds=o.vp.world_bounds(32.0);
+    if o.show_labels{draw_labels(tiles,canvas,o,&bounds);}
+    draw_home(canvas,o);draw_places(canvas,o);
+}
 
 /// Dither the whole viewport as ocean, then cut the land back out of it.
 ///

@@ -2,7 +2,7 @@ use portfolio_v2_scene::{ArtCell, CellArt, Rgba8};
 
 #[path = "../../../../portfolio/src/portraits.rs"]
 #[allow(dead_code)]
-mod baked;
+pub mod baked;
 
 pub fn home_portrait(max_cols: u16, max_rows: u16, x: u16, y: u16) -> Option<CellArt> {
     let portrait = baked::PORTRAITS

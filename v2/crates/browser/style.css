@@ -1,6 +1,6 @@
 @font-face {
   font-family: "Iosevka Portfolio";
-  src: url("iosevka-portfolio.woff2") format("woff2");
+  src: url("iosevka-portfolio.woff2?v=__V2_BUILD__") format("woff2");
   font-display: swap;
 }
 
@@ -9,6 +9,12 @@
   font-family: "Iosevka Portfolio", "IBM Plex Mono", monospace;
   background: #08090b;
 }
+#ask-editor {position:absolute;z-index:2;display:flex;align-items:center;background:#08090b;color:#c6c8cc;font:13px/17px "Iosevka Portfolio",monospace;height:20px;}
+#ask-editor[hidden]{display:none;}
+#ask-editor textarea {resize:none;flex:1;min-width:0;height:20px;padding:0 8px;border:0;outline:none;color:inherit;background:inherit;font:inherit;white-space:nowrap;overflow:hidden;}
+#ask-editor button {padding:0 8px;border:0;color:#e1a54a;background:inherit;font:inherit;cursor:pointer;}
+:root[data-theme="light"] #ask-editor {background:#eeeae0;color:#34312c;}
+:root[data-renderer="semantic-fallback"] #ask-editor {position:static!important;max-width:42rem;margin:1rem auto;height:3rem;}
 
 :root[data-theme="light"] {
   color-scheme: light;

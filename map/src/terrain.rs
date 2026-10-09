@@ -170,6 +170,7 @@ pub struct Terrain {
     /// never asks for a smoothed height never pays for it, and the cost is a
     /// scan of the whole file.
     higher: OnceLock<Vec<Owned>>,
+    parts:Option<Vec<([f64;4],std::sync::Arc<Terrain>)>>,
 }
 
 enum Base {
@@ -256,6 +257,20 @@ fn validate(head: &[u8], payload_len: usize) -> std::io::Result<Header> {
 }
 
 impl Terrain {
+    /// A complete revision-matched set of demanded tiles. Each tile includes
+    /// its own guard band; ownership is determined by the nominal slippy bounds.
+    pub fn from_tiles(tiles:Vec<(crate::pmtiles::TileId,std::sync::Arc<Terrain>)>)->Self{
+        let mut terrain=Self::new(Header{west:-180.0,south:-85.1,east:180.0,north:85.1,width:2,height:2},Base::Bytes(vec![0;56]));
+        let mut parts=tiles.into_iter().map(|(id,t)|{
+            let n=(1u64<<id.z) as f64;
+            let lat=|y:f64|(std::f64::consts::PI*(1.0-2.0*y/n)).sinh().atan().to_degrees();
+            ([(id.x as f64/n)*360.0-180.0,lat(id.y as f64+1.0),((id.x as f64+1.0)/n)*360.0-180.0,lat(id.y as f64)],t)
+        }).collect::<Vec<_>>();
+        parts.sort_by(|a,b|a.0[0].total_cmp(&b.0[0]).then(a.0[1].total_cmp(&b.0[1])));
+        terrain.m_per_px=parts.iter().map(|(_,t)|t.resolution()).reduce(f64::min).unwrap_or(1.0);
+        terrain.parts=Some(parts);terrain
+    }
+    fn part_at(&self,lon:f64,lat:f64)->Option<&Terrain>{self.parts.as_ref()?.iter().find(|(b,_)|lon>=b[0]&&lon<b[2]&&lat>b[1]&&lat<=b[3]).map(|(_,t)|t.as_ref())}
     #[cfg(feature = "native")]
     pub fn open(path: &Path) -> std::io::Result<Self> {
         let mut f = std::fs::File::open(path)?;
@@ -305,6 +320,7 @@ impl Terrain {
             m_per_px: (header.north - header.south) / header.height as f64 * M_PER_DEG_LAT,
             base,
             higher: OnceLock::new(),
+            parts:None,
         }
     }
 
@@ -315,6 +331,7 @@ impl Terrain {
 
     /// How many levels the pyramid has, level 0 included.
     pub fn levels(&self) -> usize {
+        if let Some(parts)=&self.parts{return parts.iter().map(|(_,t)|t.levels()).max().unwrap_or(1);}
         self.built().len() + 1
     }
 
@@ -369,6 +386,7 @@ impl Terrain {
     /// Outside the grid, and over ocean, this is zero -- the right answer for
     /// both.
     pub fn sample_smooth(&self, lon: f64, lat: f64, smooth_m: f64) -> f32 {
+        if self.parts.is_some(){return self.part_at(lon,lat).map_or(0.0,|t|t.sample_smooth(lon,lat,smooth_m));}
         if !self.inside(lon, lat) {
             return 0.0;
         }
@@ -387,6 +405,7 @@ impl Terrain {
     /// ground under this one thing" and a smoothed answer would float it over
     /// a valley or bury it in a ridge.
     pub fn sample(&self, lon: f64, lat: f64) -> f32 {
+        if self.parts.is_some(){return self.part_at(lon,lat).map_or(0.0,|t|t.sample(lon,lat));}
         if !self.inside(lon, lat) {
             return 0.0;
         }

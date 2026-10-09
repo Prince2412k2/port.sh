@@ -9,6 +9,9 @@
 # Build output, both workspaces. The image compiles its own.
 target/
 ai-sdk/target/
+v2/target/
+v2/crates/browser/dist/
+v2/sessions/
 
 # The basemap. Bind-mounted, and larger than everything else together.
 map-data/

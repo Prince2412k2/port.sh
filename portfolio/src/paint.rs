@@ -5,7 +5,7 @@
 
 use ratatui::layout::Rect;
 use ratatui::style::Color;
-use ratatui::Frame;
+use skysheet::cards::DrawTarget;
 
 use crate::portraits;
 
@@ -140,7 +140,7 @@ pub fn portrait_loop(p: &portraits::Portrait, t: f64, alive: bool) -> &'static [
 /// instead of needing a palette slot each. Cells the region never drew into
 /// are left alone — the test is the page's own ground, not brightness, or the
 /// darkest parts of the field would be indistinguishable from empty.
-pub fn recolour(f: &mut Frame, area: Rect, rgb: (u8, u8, u8), k: f32, th: Theme) {
+pub fn recolour(f: &mut impl DrawTarget, area: Rect, rgb: (u8, u8, u8), k: f32, th: Theme) {
     let (kr, kg, kb) = th.ground();
     let buf = f.buffer_mut();
     for y in area.y..area.y.saturating_add(area.height) {
@@ -204,7 +204,7 @@ fn is_ground(ch: char, bg: portraits::Ink) -> bool {
 }
 
 pub fn portrait(
-    f: &mut Frame,
+    f: &mut impl DrawTarget,
     area: Rect,
     x: u16,
     y: u16,
@@ -254,7 +254,7 @@ pub fn dim_to(c: Color, alpha: f32, th: Theme) -> Color {
 /// Used for the section transition. Compositing the finished frame rather than
 /// asking each section to render itself at an opacity means the shell can fade
 /// anything it can draw, including two renderers that know nothing about it.
-pub fn veil(f: &mut Frame, area: Rect, k: f32, th: Theme) {
+pub fn veil(f: &mut impl DrawTarget, area: Rect, k: f32, th: Theme) {
     if k >= 0.999 {
         return;
     }
@@ -284,7 +284,7 @@ pub fn veil(f: &mut Frame, area: Rect, k: f32, th: Theme) {
 ///
 /// `strength` scales the whole thing, so a panel arriving fades and feathers in
 /// one pass rather than being dimmed twice.
-pub fn feather(f: &mut Frame, area: Rect, strength: f32, th: Theme) {
+pub fn feather(f: &mut impl DrawTarget, area: Rect, strength: f32, th: Theme) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -330,7 +330,7 @@ pub fn feather(f: &mut Frame, area: Rect, strength: f32, th: Theme) {
 ///
 /// `from` applies at the left of `area` and `to` at the right, both as keep
 /// factors like `veil` -- 1 leaves a cell alone.
-pub fn veil_ramp(f: &mut Frame, area: Rect, from: f32, to: f32, th: Theme) {
+pub fn veil_ramp(f: &mut impl DrawTarget, area: Rect, from: f32, to: f32, th: Theme) {
     if area.width == 0 || area.height == 0 {
         return;
     }

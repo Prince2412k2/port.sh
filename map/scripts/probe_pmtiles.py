@@ -203,6 +203,9 @@ def lonlat_to_tile(lon, lat, z):
 
 if __name__ == "__main__":
     path = sys.argv[1]
+    if len(sys.argv) == 2:
+        print(json.dumps(Archive(path).metadata(), indent=2))
+        sys.exit(0)
     lon, lat, z = float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
     a = Archive(path)
     x, y = lonlat_to_tile(lon, lat, z)
@@ -211,6 +214,10 @@ if __name__ == "__main__":
     if not t:
         sys.exit("tile not found")
     print(f"tile bytes (decompressed): {len(t):,}\n")
+    if len(sys.argv) == 6:
+        with open(sys.argv[5], "wb") as output:
+            output.write(t)
+        sys.exit(0)
     for lname, (n, classes) in sorted(parse_mvt(t).items()):
         print(f"  {lname:<12} {n:>6} features")
         for cv, cn in classes.most_common(14):

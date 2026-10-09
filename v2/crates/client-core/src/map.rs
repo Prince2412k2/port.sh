@@ -1,4 +1,8 @@
-use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 use portfolio_v2_scene::{ArtCell, CellArt, Detail, DetailClass, Primitive, Rgba8, VisualScene};
 use ratatui::{
@@ -117,6 +121,30 @@ impl Place {
         lonlat_to_world(self.lon, self.lat)
     }
 }
+#[derive(Clone, Copy, Debug)]
+struct CameraStop {
+    lon: f64,
+    lat: f64,
+    zoom: f64,
+    tilt: f64,
+    bearing: f64,
+}
+impl CameraStop {
+    fn world(self) -> [f64; 2] {
+        lonlat_to_world(self.lon, self.lat)
+    }
+}
+impl From<Place> for CameraStop {
+    fn from(p: Place) -> Self {
+        Self {
+            lon: p.lon,
+            lat: p.lat,
+            zoom: p.zoom,
+            tilt: p.tilt,
+            bearing: p.bearing,
+        }
+    }
+}
 
 const RHO: f64 = 1.42;
 const MIN_TILE_ZOOM: u8 = 5;
@@ -213,8 +241,9 @@ enum Phase {
     Settling,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Tour {
+    stops: Vec<CameraStop>,
     at: usize,
     shown: usize,
     phase: Phase,
@@ -224,6 +253,21 @@ struct Tour {
     from_tilt: f64,
     from_bearing: f64,
 }
+impl Default for Tour {
+    fn default() -> Self {
+        Self {
+            stops: PLACES.into_iter().map(CameraStop::from).collect(),
+            at: 0,
+            shown: 0,
+            phase: Phase::Rest,
+            flight: None,
+            elapsed: 0.0,
+            duration: 0.0,
+            from_tilt: 0.0,
+            from_bearing: 0.0,
+        }
+    }
+}
 
 impl Tour {
     fn moving(&self) -> bool {
@@ -231,7 +275,7 @@ impl Tour {
     }
 
     fn go(&mut self, viewport: &MapViewport, at: usize) {
-        let Some(place) = PLACES.get(at).copied() else {
+        let Some(place) = self.stops.get(at).copied() else {
             return;
         };
         let target_width = viewport.sw / (256.0 * 2f64.powf(place.zoom));
@@ -258,11 +302,14 @@ impl Tour {
     }
 
     fn next(&mut self, viewport: &MapViewport) {
-        self.go(viewport, (self.at + 1) % PLACES.len());
+        self.go(viewport, (self.at + 1) % self.stops.len());
     }
 
     fn previous(&mut self, viewport: &MapViewport) {
-        self.go(viewport, (self.at + PLACES.len() - 1) % PLACES.len());
+        self.go(
+            viewport,
+            (self.at + self.stops.len() - 1) % self.stops.len(),
+        );
     }
 
     fn tick(&mut self, seconds: f64, viewport: &mut MapViewport) {
@@ -270,7 +317,7 @@ impl Tour {
             return;
         }
         self.elapsed += seconds;
-        let place = PLACES[self.at];
+        let place = self.stops[self.at];
         let progress = (self.elapsed / self.duration.max(1e-6)).clamp(0.0, 1.0);
         match self.phase {
             Phase::Flying => {
@@ -322,7 +369,7 @@ impl Tour {
             Phase::Flying => {
                 let progress = (self.elapsed / self.duration.max(1e-6)).clamp(0.0, 1.0);
                 if progress < 0.20 {
-                    (self.shown < PLACES.len())
+                    (self.shown < self.stops.len())
                         .then_some((self.shown, (1.0 - ease(progress / 0.20)) as f32))
                 } else if progress > 0.62 {
                     Some((self.at, ease((progress - 0.62) / (1.0 - 0.62)) as f32))
@@ -351,9 +398,10 @@ pub struct MapState {
     camera: MapViewport,
     tour: Tour,
     opened: bool,
-    tiles: Vec<(u8, u32, u32, Tile)>,
+    tiles: Vec<(u8, u32, u32, std::sync::Arc<Tile>)>,
     pub overlay: Option<Tile>,
     terrain: Option<Rc<Terrain>>,
+    buildings: Option<Tile>,
     relief: Rc<RefCell<Relief>>,
     show_terrain: bool,
     show_labels: bool,
@@ -362,6 +410,12 @@ pub struct MapState {
     road_glyph: RoadGlyph,
     road_weight: f64,
     auto_view: bool,
+    search: Option<String>,
+    results: Vec<portfolio_v2_protocol::map::SearchResult>,
+    search_at: usize,
+    hover: Option<String>,
+    custom_title: Option<String>,
+    places: Vec<portfolio_v2_protocol::Place>,
 }
 
 impl std::fmt::Debug for MapState {
@@ -391,6 +445,7 @@ impl Default for MapState {
             tiles: Vec::new(),
             overlay: None,
             terrain: None,
+            buildings: None,
             relief: Rc::new(RefCell::new(Relief::default())),
             show_terrain: true,
             show_labels: true,
@@ -399,11 +454,585 @@ impl Default for MapState {
             road_glyph: RoadGlyph::Dotted,
             road_weight: 1.0,
             auto_view: false,
+            search: None,
+            results: Vec::new(),
+            search_at: 0,
+            hover: None,
+            custom_title: None,
+            places: PLACES
+                .iter()
+                .map(|p| portfolio_v2_protocol::Place {
+                    id: p.slug.into(),
+                    name: p.name.into(),
+                    kind: p.kind.into(),
+                    where_: p.where_.into(),
+                    years: p.years.into(),
+                    role: p.role.into(),
+                    lonlat: (p.lon, p.lat),
+                    world: p.world(),
+                    zoom: p.zoom,
+                    tilt: p.tilt.to_radians(),
+                    bearing: p.bearing.to_radians(),
+                    note: p.note.into(),
+                })
+                .collect(),
         }
     }
 }
 
 impl MapState {
+    pub fn camera_snapshot(&self) -> [f64; 6] {
+        let (lon, lat) = termap::geo::world_to_lonlat(self.camera.center[0], self.camera.center[1]);
+        [
+            lon,
+            lat,
+            self.camera.zoom,
+            self.camera.tilt,
+            self.camera.bearing,
+            self.camera.persp,
+        ]
+    }
+    pub fn navigation_snapshot(&self) -> (usize, Option<String>) {
+        (self.tour.at, self.custom_title.clone())
+    }
+    pub fn restore_navigation(&mut self, index: usize, title: Option<String>) {
+        if index < self.places.len() {
+            self.tour.at = index;
+            self.tour.shown = index;
+        }
+        self.custom_title = title.map(|s| s.chars().take(128).collect());
+    }
+    pub fn restore_camera(&mut self, camera: [f64; 6]) {
+        if camera.iter().all(|v| v.is_finite())
+            && (-180.0..=180.0).contains(&camera[0])
+            && (-85.0..=85.0).contains(&camera[1])
+        {
+            self.camera.center = lonlat_to_world(camera[0], camera[1]);
+            self.camera.zoom = camera[2].clamp(2.0, 20.0);
+            self.camera.tilt = camera[3].clamp(0.0, 1.2);
+            self.camera.bearing = camera[4].rem_euclid(std::f64::consts::TAU);
+            self.camera.persp = camera[5].clamp(0.0, 1.0);
+            self.tour.phase = Phase::Rest;
+            self.opened = true;
+        }
+    }
+    pub fn set_places(&mut self, places: &[portfolio_v2_protocol::Place]) {
+        if places.is_empty() {
+            return;
+        }
+        self.places = places.to_vec();
+        self.tour.stops = places
+            .iter()
+            .map(|p| CameraStop {
+                lon: p.lonlat.0,
+                lat: p.lonlat.1,
+                zoom: p.zoom,
+                tilt: p.tilt.to_degrees(),
+                bearing: p.bearing.to_degrees(),
+            })
+            .collect();
+        self.tour.at = self.tour.at.min(self.places.len() - 1);
+        self.tour.shown = self.tour.at;
+        self.tour.phase = Phase::Rest;
+        self.opened = false;
+    }
+    pub fn set_buildings(&mut self, tile: Tile) {
+        self.buildings = Some(tile);
+    }
+    pub fn present(&mut self, title: &str, lon: f64, lat: f64, zoom: f64) {
+        self.custom_title = Some(title.into());
+        self.camera.center = lonlat_to_world(lon, lat);
+        self.camera.zoom = zoom;
+        self.camera.tilt = 0.0;
+        self.camera.persp = 0.0;
+        self.opened = true;
+        self.tour.phase = Phase::Rest;
+    }
+    pub fn search_query(&self) -> Option<String> {
+        self.search.clone()
+    }
+    pub fn search_results(
+        &mut self,
+        query: &str,
+        results: Vec<portfolio_v2_protocol::map::SearchResult>,
+    ) {
+        if self.search.as_deref() == Some(query) {
+            self.results = results.into_iter().filter(|r| r.valid()).take(10).collect();
+            self.search_at = 0;
+        }
+    }
+    pub fn search_key(&mut self, key: &str) -> bool {
+        if key == "?" && self.search.is_none() {
+            self.search = Some(String::new());
+            self.results = self
+                .places
+                .iter()
+                .map(|p| portfolio_v2_protocol::map::SearchResult {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    lon: p.lonlat.0,
+                    lat: p.lonlat.1,
+                })
+                .collect();
+            return true;
+        }
+        let Some(query) = &mut self.search else {
+            return false;
+        };
+        match key {
+            "Escape" => {
+                self.search = None;
+            }
+            "ArrowDown" => {
+                self.search_at = (self.search_at + 1).min(self.results.len().saturating_sub(1))
+            }
+            "ArrowUp" => self.search_at = self.search_at.saturating_sub(1),
+            "Enter" => {
+                if let Some(result) = self.results.get(self.search_at) {
+                    self.custom_title = Some(result.name.clone());
+                    self.camera.center = lonlat_to_world(result.lon, result.lat);
+                    self.camera.zoom = 14.0;
+                    self.camera.tilt = 0.0;
+                    self.camera.persp = 0.0;
+                    self.tour.phase = Phase::Rest;
+                    self.search = None;
+                }
+            }
+            "Backspace" => {
+                query.pop();
+                self.search_at = 0;
+                self.results.clear();
+            }
+            _ if key.chars().count() == 1
+                && !key.chars().any(char::is_control)
+                && query.len() + key.len() <= 128 =>
+            {
+                query.push_str(key);
+                self.search_at = 0;
+                self.results.clear();
+            }
+            _ => (),
+        }
+        true
+    }
+    pub fn local_search(&self, query: &str) -> Vec<portfolio_v2_protocol::map::SearchResult> {
+        let query = query.to_lowercase();
+        let mut results = Vec::new();
+        let mut seen = BTreeSet::new();
+        for place in &self.places {
+            if place.name.to_lowercase().contains(&query) {
+                results.push(portfolio_v2_protocol::map::SearchResult {
+                    id: place.id.clone(),
+                    name: place.name.clone(),
+                    lon: place.lonlat.0,
+                    lat: place.lonlat.1,
+                });
+            }
+        }
+        for (_, _, _, tile) in &self.tiles {
+            for feature in &tile.features {
+                let Some(name) = &feature.name else { continue };
+                if !name.to_lowercase().contains(&query) || !seen.insert(name.to_string()) {
+                    continue;
+                }
+                let point = [
+                    (feature.bbox[0] + feature.bbox[2]) * 0.5,
+                    (feature.bbox[1] + feature.bbox[3]) * 0.5,
+                ];
+                let (lon, lat) = termap::geo::world_to_lonlat(point[0], point[1]);
+                results.push(portfolio_v2_protocol::map::SearchResult {
+                    id: format!("{:016x}", feature.stable_id),
+                    name: name.to_string(),
+                    lon,
+                    lat,
+                });
+                if results.len() >= 10 {
+                    return results;
+                }
+            }
+        }
+        results
+    }
+    pub fn hover(&mut self, point: [f64; 2]) -> bool {
+        let mut nearest = 8.0f64;
+        let mut found = None;
+        for (_, _, _, tile) in &self.tiles {
+            for feature in &tile.features {
+                let Some(name) = &feature.name else { continue };
+                for vertex in feature.pts.iter().step_by((feature.pts.len() / 64).max(1)) {
+                    let p = self.camera.project(*vertex);
+                    let distance = (point[0] - p[0]).hypot(point[1] - p[1]);
+                    if distance < nearest {
+                        nearest = distance;
+                        found = Some(name.to_string());
+                    }
+                }
+            }
+        }
+        if self.hover == found {
+            false
+        } else {
+            self.hover = found;
+            true
+        }
+    }
+    pub fn description(&self) -> String {
+        if let Some(title) = &self.custom_title {
+            return title.clone();
+        }
+        let Some(place) = self.places.get(self.tour.shown) else {
+            return "Experience tour: five places in India, from school in Kapadwanj to engineering work in Ahmedabad.".into();
+        };
+        format!(
+            "{} — {}, {}. {}. {}",
+            place.name, place.where_, place.years, place.role, place.note
+        )
+    }
+    pub fn pixel_masks(&self, viewport: Viewport) -> Vec<[u16; 4]> {
+        let gutter = if viewport.cols >= 90 { 7 } else { 0 };
+        let width = viewport.cols.saturating_sub(gutter);
+        let height = viewport.rows.saturating_sub(3);
+        let mut masks = Vec::new();
+        if let Some((at, _)) = self.tour.card().filter(|_| self.custom_title.is_none()) {
+            if width >= 34 && height >= 12 {
+                let lines = wrap(
+                    &self.places[at].note,
+                    width.saturating_sub(6).min(74) as usize,
+                )
+                .len();
+                let lines = lines.min(((height / 3).saturating_sub(4)).clamp(1, 5) as usize);
+                masks.push([
+                    gutter + 2,
+                    1,
+                    width.saturating_sub(4).min(76),
+                    (7 + lines as u16).min(height),
+                ]);
+            }
+        }
+        if let Some(bar) = scalebar(&self.camera, width, height) {
+            masks.push([
+                gutter + bar.rect.x,
+                1 + bar.rect.y,
+                bar.rect.width,
+                bar.rect.height,
+            ]);
+        }
+        masks
+    }
+    /// Experimental scene-native mesh. World geometry and the same elevation
+    /// sampler feed real triangles; no terminal glyphs are used as terrain.
+    pub fn pixel_mesh(&self, viewport: Viewport) -> Vec<f32> {
+        use termap::geo::{meters_per_world_unit, world_to_lonlat};
+        let vp = self.camera;
+        let bounds = vp.world_bounds(16.0);
+        let gutter = if viewport.cols >= 90 { 7.0 } else { 0.0 };
+        let meters = meters_per_world_unit(world_to_lonlat(vp.center[0], vp.center[1]).1);
+        let sample = |point: [f64; 2]| {
+            if !self.show_terrain {
+                return 0.0;
+            }
+            let (lon, lat) = world_to_lonlat(point[0], point[1]);
+            self.terrain.as_ref().map_or(0.0, |t| {
+                t.sample_smooth(lon, lat, (meters / vp.scale()).max(20.0))
+            }) as f64
+        };
+        let datum = sample(vp.center);
+        let height = |p: [f64; 2]| (sample(p) - datum) / meters;
+        let mut out = Vec::new();
+        let mut emit =
+            |point: [f64; 2], altitude: f64, normal: [f32; 3], color: [f32; 3], bias: f32| {
+                // Triangle-aligned ~7 MiB ceiling for the experimental transfer.
+                if out.len() >= 131_070 * 12 {
+                    return false;
+                }
+                let (screen, depth) = vp.project3(point, altitude);
+                if !depth.is_finite() || !screen[0].is_finite() || !screen[1].is_finite() {
+                    return false;
+                }
+                let x = (gutter + screen[0] / 2.0) / viewport.cols as f64 * 2.0 - 1.0;
+                let y = 1.0 - (1.0 + screen[1] / 4.0) / viewport.rows as f64 * 2.0;
+                out.extend_from_slice(&[
+                    x as f32,
+                    y as f32,
+                    (depth + bias).clamp(0.001, 0.999),
+                    normal[0],
+                    normal[1],
+                    normal[2],
+                    color[0],
+                    color[1],
+                    color[2],
+                    ((point[0] - bounds[0]) / (bounds[2] - bounds[0]).max(1e-12)) as f32,
+                    ((point[1] - bounds[1]) / (bounds[3] - bounds[1]).max(1e-12)) as f32,
+                    (altitude / (bounds[2] - bounds[0]).max(1e-12)) as f32,
+                ]);
+                true
+            };
+        const GRID: usize = 64;
+        let sx = (bounds[2] - bounds[0]) / GRID as f64;
+        let sy = (bounds[3] - bounds[1]) / GRID as f64;
+        let mut heights = vec![0.0; (GRID + 1) * (GRID + 1)];
+        for y in 0..=GRID {
+            for x in 0..=GRID {
+                heights[y * (GRID + 1) + x] =
+                    height([bounds[0] + x as f64 * sx, bounds[1] + y as f64 * sy]);
+            }
+        }
+        for y in 0..GRID {
+            for x in 0..GRID {
+                let corners = [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]];
+                let points = corners.map(|[x, y]| {
+                    (
+                        [bounds[0] + x as f64 * sx, bounds[1] + y as f64 * sy],
+                        heights[y * (GRID + 1) + x],
+                    )
+                });
+                for triangle in [[0, 1, 2], [2, 1, 3]] {
+                    let [a, b, c] = triangle.map(|i| points[i]);
+                    let u = [b.0[0] - a.0[0], b.0[1] - a.0[1], b.1 - a.1];
+                    let v = [c.0[0] - a.0[0], c.0[1] - a.0[1], c.1 - a.1];
+                    let nz = (u[0] * v[1] - u[1] * v[0]).max(1e-24);
+                    let normal = [
+                        ((u[1] * v[2] - u[2] * v[1]) / nz) as f32,
+                        ((u[2] * v[0] - u[0] * v[2]) / nz) as f32,
+                        1.0,
+                    ];
+                    let color = if a.1 * meters + datum > 1500.0 {
+                        [0.49, 0.48, 0.38]
+                    } else {
+                        [0.33, 0.44, 0.29]
+                    };
+                    if [a, b, c]
+                        .iter()
+                        .all(|(point, h)| vp.project3(*point, *h).1.is_finite())
+                    {
+                        for (point, h) in [a, b, c] {
+                            emit(point, h, normal, color, 0.0);
+                        }
+                    }
+                }
+            }
+        }
+        // Roads and water use the archive's real paths, draped on that terrain.
+        for tile in self
+            .tiles
+            .iter()
+            .map(|(_, _, _, tile)| tile.as_ref())
+            .chain(self.buildings.iter())
+            .chain(self.overlay.iter())
+        {
+            for feature in &tile.features {
+                if !feature.visible_in(&bounds) {
+                    continue;
+                }
+                if matches!(
+                    feature.layer,
+                    termap::data::Layer::Building | termap::data::Layer::Water
+                ) && feature.closed
+                    && feature.pts.len() >= 3
+                {
+                    let vertices = feature
+                        .pts
+                        .iter()
+                        .flat_map(|p| p.iter().copied())
+                        .collect::<Vec<_>>();
+                    let indices = earcutr::earcut(&vertices, &[], 2).unwrap_or_default();
+                    let building = feature.layer == termap::data::Layer::Building;
+                    let rise = if building {
+                        feature.rank.clamp(3, 120) as f64 / meters
+                    } else {
+                        0.0
+                    };
+                    let base = height([
+                        (feature.bbox[0] + feature.bbox[2]) * 0.5,
+                        (feature.bbox[1] + feature.bbox[3]) * 0.5,
+                    ]);
+                    for triangle in indices.chunks_exact(3) {
+                        if triangle
+                            .iter()
+                            .all(|&i| vp.project3(feature.pts[i], base + rise).1.is_finite())
+                        {
+                            for &i in triangle {
+                                emit(
+                                    feature.pts[i],
+                                    base + rise,
+                                    [0.0, 0.0, 1.0],
+                                    if building {
+                                        [0.65, 0.61, 0.49]
+                                    } else {
+                                        [0.15, 0.37, 0.53]
+                                    },
+                                    if building { -0.006 } else { -0.002 },
+                                );
+                            }
+                        }
+                    }
+                    if building {
+                        for edge in feature.pts.windows(2) {
+                            let a = edge[0];
+                            let b = edge[1];
+                            let dx = b[0] - a[0];
+                            let dy = b[1] - a[1];
+                            let length = dx.hypot(dy).max(1e-12);
+                            let normal = [(-dy / length) as f32, (dx / length) as f32, 0.0];
+                            let face = [(a, base), (b, base), (a, base + rise), (b, base + rise)];
+                            if face.iter().all(|(p, h)| vp.project3(*p, *h).1.is_finite()) {
+                                for index in [0, 1, 2, 2, 1, 3] {
+                                    emit(
+                                        face[index].0,
+                                        face[index].1,
+                                        normal,
+                                        [0.49, 0.45, 0.35],
+                                        -0.004,
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+                let (color, pixels) = match feature.layer {
+                    termap::data::Layer::RoadMajor => ([0.72, 0.64, 0.42], 1.4),
+                    termap::data::Layer::RoadMedium => ([0.64, 0.60, 0.46], 1.0),
+                    termap::data::Layer::RoadMinor => ([0.48, 0.48, 0.39], 0.6),
+                    termap::data::Layer::Rail => ([0.29, 0.31, 0.30], 0.6),
+                    termap::data::Layer::Water => ([0.15, 0.37, 0.53], 1.6),
+                    termap::data::Layer::Boundary => ([0.61, 0.57, 0.38], 0.8),
+                    termap::data::Layer::Coast => ([0.43, 0.54, 0.45], 0.8),
+                    _ => continue,
+                };
+                for segment in feature.pts.windows(2) {
+                    let [a, b] = [segment[0], segment[1]];
+                    let dx = b[0] - a[0];
+                    let dy = b[1] - a[1];
+                    let length = dx.hypot(dy);
+                    if length < 1e-12 {
+                        continue;
+                    }
+                    let weight = pixels * self.road_weight / vp.scale();
+                    let side = [-dy / length * weight, dx / length * weight];
+                    let quad = [
+                        [a[0] + side[0], a[1] + side[1]],
+                        [a[0] - side[0], a[1] - side[1]],
+                        [b[0] + side[0], b[1] + side[1]],
+                        [b[0] - side[0], b[1] - side[1]],
+                    ];
+                    let ha = height(a);
+                    let hb = height(b);
+                    if !quad
+                        .iter()
+                        .enumerate()
+                        .all(|(i, p)| vp.project3(*p, if i < 2 { ha } else { hb }).1.is_finite())
+                    {
+                        continue;
+                    }
+                    for i in [0, 1, 2, 2, 1, 3] {
+                        let p = quad[i];
+                        emit(
+                            p,
+                            if i < 2 { ha } else { hb },
+                            [0.0, 0.0, 1.0],
+                            color,
+                            -0.002,
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
+    pub fn pixel_heightfield(&self) -> Vec<f32> {
+        use termap::geo::{meters_per_world_unit, world_to_lonlat};
+        let vp = self.camera;
+        let bounds = vp.world_bounds(16.0);
+        let sx = (bounds[2] - bounds[0]).max(1e-12);
+        let sy = (bounds[3] - bounds[1]).max(1e-12);
+        let meters = meters_per_world_unit(world_to_lonlat(vp.center[0], vp.center[1]).1);
+        let sample = |point: [f64; 2]| {
+            if !self.show_terrain {
+                return 0.0;
+            }
+            let (lon, lat) = world_to_lonlat(point[0], point[1]);
+            self.terrain.as_ref().map_or(0.0, |t| {
+                t.sample_smooth(lon, lat, (meters / vp.scale()).max(20.0))
+            }) as f64
+        };
+        let datum = sample(vp.center);
+        let mut out = Vec::with_capacity(65 * 65 + 1);
+        out.push((sx / sy) as f32);
+        for y in 0..65 {
+            for x in 0..65 {
+                let point = [
+                    bounds[0] + x as f64 / 64.0 * sx,
+                    bounds[1] + y as f64 / 64.0 * sy,
+                ];
+                out.push(((sample(point) - datum) / meters / sx) as f32);
+            }
+        }
+        for tile in self
+            .tiles
+            .iter()
+            .map(|(_, _, _, tile)| tile.as_ref())
+            .chain(self.buildings.iter())
+        {
+            for feature in &tile.features {
+                if feature.layer != termap::data::Layer::Building
+                    || !feature.closed
+                    || !feature.visible_in(&bounds)
+                {
+                    continue;
+                }
+                let x0 = ((feature.bbox[0] - bounds[0]) / sx * 64.0)
+                    .floor()
+                    .clamp(0.0, 64.0) as usize;
+                let x1 = ((feature.bbox[2] - bounds[0]) / sx * 64.0)
+                    .ceil()
+                    .clamp(0.0, 64.0) as usize;
+                let y0 = ((feature.bbox[1] - bounds[1]) / sy * 64.0)
+                    .floor()
+                    .clamp(0.0, 64.0) as usize;
+                let y1 = ((feature.bbox[3] - bounds[1]) / sy * 64.0)
+                    .ceil()
+                    .clamp(0.0, 64.0) as usize;
+                let center = [
+                    (feature.bbox[0] + feature.bbox[2]) * 0.5,
+                    (feature.bbox[1] + feature.bbox[3]) * 0.5,
+                ];
+                let roof = ((sample(center) - datum) / meters / sx
+                    + feature.rank.clamp(3, 120) as f64 / meters / sx)
+                    as f32;
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        let p = [
+                            bounds[0] + x as f64 / 64.0 * sx,
+                            bounds[1] + y as f64 / 64.0 * sy,
+                        ];
+                        let mut inside = false;
+                        if feature.pts.len() < 3 {
+                            continue;
+                        }
+                        let mut previous = feature.pts[feature.pts.len() - 1];
+                        for &point in &feature.pts {
+                            if (point[1] > p[1]) != (previous[1] > p[1])
+                                && p[0]
+                                    < (previous[0] - point[0]) * (p[1] - point[1])
+                                        / (previous[1] - point[1])
+                                        + point[0]
+                            {
+                                inside = !inside;
+                            }
+                            previous = point;
+                        }
+                        if inside {
+                            let at = 1 + y * 65 + x;
+                            out[at] = out[at].max(roof);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub fn resize(&mut self, viewport: Viewport) {
         let gutter = if viewport.cols >= 90 { 7 } else { 0 };
         self.camera.sw = viewport.cols.saturating_sub(gutter) as f64 * 2.0;
@@ -426,7 +1055,16 @@ impl MapState {
     }
 
     pub fn tick(&mut self, seconds: f64) {
-        self.tour.tick(seconds.min(0.1), &mut self.camera);
+        if !seconds.is_finite() {
+            return;
+        }
+        let mut remaining = seconds.clamp(0.0, 10.0);
+        // Dropping presentation frames must not put the camera in slow motion.
+        while remaining > 0.0 {
+            let step = remaining.min(0.1);
+            self.tour.tick(step, &mut self.camera);
+            remaining -= step;
+        }
     }
 
     pub fn finish_animation(&mut self) {
@@ -441,6 +1079,24 @@ impl MapState {
     }
 
     pub fn command(&mut self, command: crate::MapCommand) {
+        if matches!(
+            command,
+            crate::MapCommand::Next | crate::MapCommand::Previous | crate::MapCommand::Replay
+        ) {
+            self.custom_title = None;
+        }
+        // Direct manipulation takes ownership from the authored camera flight.
+        if matches!(
+            command,
+            crate::MapCommand::Pan(..)
+                | crate::MapCommand::Drag(..)
+                | crate::MapCommand::Zoom(..)
+                | crate::MapCommand::ZoomAt(..)
+                | crate::MapCommand::Tilt(..)
+                | crate::MapCommand::Bearing(..)
+        ) {
+            self.tour.phase = Phase::Rest;
+        }
         match command {
             crate::MapCommand::Next => self.tour.next(&self.camera),
             crate::MapCommand::Previous => self.tour.previous(&self.camera),
@@ -509,10 +1165,17 @@ impl MapState {
             .iter_mut()
             .find(|(tz, tx, ty, _)| (*tz, *tx, *ty) == (z, x, y))
         {
-            existing.3 = tile;
+            existing.3 = std::sync::Arc::new(tile);
         } else {
-            self.tiles.push((z, x, y, tile));
+            self.tiles.push((z, x, y, std::sync::Arc::new(tile)));
+            if self.tiles.len() > 256 {
+                self.tiles.remove(0);
+            }
         }
+    }
+
+    pub fn replace_tiles(&mut self, tiles: Vec<(u8, u32, u32, std::sync::Arc<Tile>)>) {
+        self.tiles = tiles;
     }
 
     pub fn set_terrain(&mut self, terrain: Terrain) {
@@ -577,7 +1240,7 @@ impl MapState {
         };
 
         // Stops are the priority: every place should be complete on arrival.
-        for place in PLACES {
+        for place in &self.tour.stops {
             let mut camera = MapViewport::new(place.world(), place.zoom);
             camera.tilt = place.tilt.to_radians();
             camera.bearing = place.bearing.to_radians();
@@ -587,16 +1250,16 @@ impl MapState {
 
         // The opening descent crosses every map scale and is where a cold tile
         // generation is most visible, so warm it more densely than city hops.
-        let mut opening = MapViewport::new(PLACES[0].world(), PLACES[0].zoom);
+        let mut opening = MapViewport::new(self.tour.stops[0].world(), self.tour.stops[0].zoom);
         opening.resize_for(viewport);
         let lo = lonlat_to_world(67.979_642_6, 36.486_596);
         let hi = lonlat_to_world(97.706_966_8, 5.637_858_1);
         opening.fit([lo[0], lo[1], hi[0], hi[1]]);
-        let target_width = opening.sw / (256.0 * 2f64.powf(PLACES[0].zoom));
+        let target_width = opening.sw / (256.0 * 2f64.powf(self.tour.stops[0].zoom));
         let flight = Flight::new(
             opening.center,
             opening.sw / opening.scale(),
-            PLACES[0].world(),
+            self.tour.stops[0].world(),
             target_width,
         );
         for step in 0..=24 {
@@ -609,7 +1272,7 @@ impl MapState {
         }
 
         // Then warm representative views along every leg of the authored route.
-        for pair in PLACES.windows(2) {
+        for pair in self.tour.stops.windows(2) {
             let from = pair[0];
             let to = pair[1];
             let mut start = MapViewport::new(from.world(), from.zoom);
@@ -686,7 +1349,7 @@ fn tile_zoom(camera_zoom: f64) -> u8 {
 }
 
 fn active_tile_zoom(
-    tiles: &[(u8, u32, u32, Tile)],
+    tiles: &[(u8, u32, u32, std::sync::Arc<Tile>)],
     bounds: [f64; 4],
     camera_zoom: f64,
 ) -> Option<u8> {
@@ -701,6 +1364,12 @@ fn active_tile_zoom(
 }
 
 pub fn render(scene: &mut VisualScene, state: &MapState) {
+    render_inner(scene, state, false);
+}
+pub fn render_annotations(scene: &mut VisualScene, state: &MapState) {
+    render_inner(scene, state, true);
+}
+fn render_inner(scene: &mut VisualScene, state: &MapState, annotations_only: bool) {
     let x = if scene.viewport.cols >= 90 { 7 } else { 0 };
     let area = Rect::new(
         x,
@@ -726,7 +1395,7 @@ pub fn render(scene: &mut VisualScene, state: &MapState) {
     vp.sh = area.height as f64 * 4.0;
     let mut canvas = Canvas::new(area.width as usize, area.height as usize);
     let scalebar = scalebar(&vp, area.width, area.height);
-    let ground = if state.show_terrain {
+    let ground = if state.show_terrain && !annotations_only {
         termap::view::ground_strength(vp.zoom)
     } else {
         0.0
@@ -757,16 +1426,20 @@ pub fn render(scene: &mut VisualScene, state: &MapState) {
         .filter(|(z, x, y, _)| {
             Some(*z) == active_zoom && tile_intersects(*z, *x, *y, visible_bounds)
         })
-        .map(|(_, _, _, tile)| tile)
+        .map(|(_, _, _, tile)| tile.as_ref())
         .collect();
     if let Some(overlay) = &state.overlay {
         tiles.push(overlay);
     }
-    let markers: Vec<_> = PLACES
+    if let Some(buildings) = &state.buildings {
+        tiles.push(buildings);
+    }
+    let markers: Vec<_> = state
+        .places
         .iter()
         .map(|place| PlaceMarker {
-            world: lonlat_to_world(place.lon, place.lat),
-            detail: termap::data::stable_detail_id("authored-place", place.slug),
+            world: lonlat_to_world(place.lonlat.0, place.lonlat.1),
+            detail: termap::data::stable_detail_id("authored-place", &place.id),
         })
         .collect();
     let depth = DepthField {
@@ -776,27 +1449,28 @@ pub fn render(scene: &mut VisualScene, state: &MapState) {
     };
     let mut attribution = vec![CellDetail::default(); area.width as usize * area.height as usize];
     if !tiles.is_empty() {
-        termap::scene::draw(
-            &tiles,
-            &mut canvas,
-            &SceneOpts {
-                vp: &vp,
-                layers: [true; termap::data::LAYER_COUNT],
-                depth: &depth,
-                highlight: None,
-                show_labels: state.show_labels,
-                road_glyph: state.road_glyph,
-                terrain,
-                exag: lift.exag,
-                datum: lift.datum,
-                home: None,
-                road_weight: state.road_weight,
-                mode: termap::view::Mode::of(vp.zoom),
-                reserved: scalebar.as_ref().map(|bar| bar.rect),
-                places: &markers,
-                place_at: state.tour.at,
-            },
-        );
+        let options = SceneOpts {
+            vp: &vp,
+            layers: [true; termap::data::LAYER_COUNT],
+            depth: &depth,
+            highlight: None,
+            show_labels: state.show_labels,
+            road_glyph: state.road_glyph,
+            terrain,
+            exag: lift.exag,
+            datum: lift.datum,
+            home: None,
+            road_weight: state.road_weight,
+            mode: termap::view::Mode::of(vp.zoom),
+            reserved: scalebar.as_ref().map(|bar| bar.rect),
+            places: &markers,
+            place_at: state.tour.at,
+        };
+        if annotations_only {
+            termap::scene::draw_annotations(&tiles, &mut canvas, &options);
+        } else {
+            termap::scene::draw(&tiles, &mut canvas, &options);
+        }
         canvas.resolve_attributed(
             &mut buffer,
             local,
@@ -810,15 +1484,24 @@ pub fn render(scene: &mut VisualScene, state: &MapState) {
         draw_scalebar(&mut buffer, &bar, theme);
         clear_attribution(&mut attribution, area.width, bar.rect);
     }
-    if let Some((at, alpha)) = state.tour.card() {
-        if let Some(rect) = draw_card(&mut buffer, local, at, alpha, theme) {
+    if let Some((at, alpha)) = state.tour.card().filter(|_| state.custom_title.is_none()) {
+        if let Some(rect) = draw_card(&mut buffer, local, at, alpha, theme, &state.places) {
             clear_attribution(&mut attribution, area.width, rect);
         }
     }
     let mut cells = Vec::with_capacity(buffer.content.len());
+    let mut detail_cache = BTreeMap::new();
+    let mut detail_ids = BTreeMap::new();
     for (index, cell) in buffer.content.iter().enumerate() {
         let glyph = cell.symbol().chars().next().unwrap_or(' ');
-        let detail = detail_ref(scene, attribution[index], glyph, &tiles);
+        let detail = detail_ref(
+            scene,
+            attribution[index],
+            glyph,
+            &tiles,
+            &mut detail_cache,
+            &mut detail_ids,
+        );
         cells.push(ArtCell {
             glyph,
             foreground: rgba(cell.fg, theme),
@@ -834,11 +1517,83 @@ pub fn render(scene: &mut VisualScene, state: &MapState) {
         rows: area.height,
         cells,
     }));
+    if let Some(title) = &state.custom_title {
+        crate::put(
+            scene,
+            area.x + 3,
+            area.y + 2,
+            title,
+            crate::PaletteRole::Amber,
+            true,
+        );
+    }
+    if let Some(query) = &state.search {
+        let width = area.width.saturating_sub(6).min(70);
+        for row in 0..(state.results.len() + 3).min(area.height as usize) {
+            crate::put(
+                scene,
+                area.x + 3,
+                area.y + row as u16 + 1,
+                &" ".repeat(width as usize),
+                crate::PaletteRole::Ink,
+                false,
+            );
+        }
+        crate::put(
+            scene,
+            area.x + 3,
+            area.y + 1,
+            &format!("find › {query}"),
+            crate::PaletteRole::Amber,
+            true,
+        );
+        for (index, result) in state.results.iter().enumerate() {
+            if index + 3 >= area.height as usize {
+                break;
+            }
+            let text = format!(
+                "{} {}",
+                if index == state.search_at { "›" } else { " " },
+                result.name
+            );
+            crate::put(
+                scene,
+                area.x + 3,
+                area.y + 3 + index as u16,
+                &text.chars().take(width as usize).collect::<String>(),
+                if index == state.search_at {
+                    crate::PaletteRole::Ink
+                } else {
+                    crate::PaletteRole::Faint
+                },
+                false,
+            );
+        }
+    } else if let Some(hover) = &state.hover {
+        crate::put(
+            scene,
+            area.x + 3,
+            area.y + area.height.saturating_sub(1),
+            hover,
+            crate::PaletteRole::Ink,
+            false,
+        );
+    }
 }
 
-fn detail_ref(scene: &mut VisualScene, source: CellDetail, glyph: char, tiles: &[&Tile]) -> u16 {
+fn detail_ref(
+    scene: &mut VisualScene,
+    source: CellDetail,
+    glyph: char,
+    tiles: &[&Tile],
+    cache: &mut BTreeMap<(u8, u64), u16>,
+    ids: &mut BTreeMap<String, u16>,
+) -> u16 {
     if glyph == ' ' {
         return 0;
+    }
+    if let Some(index) = cache.get(&(source.kind, source.value)) {
+        return *index;
     }
     let resolved = match source.kind {
         DETAIL_GEOMETRY_PICK => {
@@ -877,15 +1632,16 @@ fn detail_ref(scene: &mut VisualScene, source: CellDetail, glyph: char, tiles: &
     let Some((class, id)) = resolved else {
         return 0;
     };
-    if let Some(index) = scene
-        .details
-        .iter()
-        .position(|detail| detail.class == class && detail.id == id)
-    {
-        return (index + 1) as u16;
-    }
-    scene.details.push(Detail { id, class });
-    scene.details.len() as u16
+    let index = if let Some(index) = ids.get(&id) {
+        *index
+    } else {
+        let index = (scene.details.len() + 1) as u16;
+        ids.insert(id.clone(), index);
+        scene.details.push(Detail { id, class });
+        index
+    };
+    cache.insert((source.kind, source.value), index);
+    index
 }
 
 fn clear_attribution(details: &mut [CellDetail], width: u16, rect: Rect) {
@@ -983,20 +1739,27 @@ fn draw_scalebar(buffer: &mut Buffer, bar: &ScaleBar, theme: Theme) {
     );
 }
 
-fn draw_card(buffer: &mut Buffer, area: Rect, at: usize, alpha: f32, theme: Theme) -> Option<Rect> {
+fn draw_card(
+    buffer: &mut Buffer,
+    area: Rect,
+    at: usize,
+    alpha: f32,
+    theme: Theme,
+    places: &[portfolio_v2_protocol::Place],
+) -> Option<Rect> {
     if area.width < 34 || area.height < 12 {
         return None;
     }
-    let place = PLACES[at];
+    let place = &places[at];
     let width = area.width.saturating_sub(6).min(74);
-    let note = wrap(place.note, width as usize);
+    let note = wrap(&place.note, width as usize);
     let max_note = ((area.height / 3).saturating_sub(4)).clamp(1, 5) as usize;
     let note = &note[..note.len().min(max_note)];
     fade_band(buffer, area, 6 + note.len() as u16, 4, alpha, theme);
     let x = area.x + 3;
     let mut y = area.y + 1;
     let row = Rect::new(x, y, width, 1);
-    let pips = PLACES
+    let pips = places
         .iter()
         .enumerate()
         .flat_map(|(index, _)| {
@@ -1030,7 +1793,7 @@ fn draw_card(buffer: &mut Buffer, area: Rect, at: usize, alpha: f32, theme: Them
     ))
     .render(row, buffer);
     Paragraph::new(Span::styled(
-        place.years,
+        place.years.as_str(),
         Style::default().fg(dim(theme.amber(), alpha, theme)),
     ))
     .right_aligned()
@@ -1043,7 +1806,7 @@ fn draw_card(buffer: &mut Buffer, area: Rect, at: usize, alpha: f32, theme: Them
     ))
     .render(row, buffer);
     Paragraph::new(Span::styled(
-        format!("{:.3}°N {:.3}°E", place.lat, place.lon),
+        format!("{:.3}°N {:.3}°E", place.lonlat.1, place.lonlat.0),
         Style::default().fg(dim(theme.ghost(), alpha, theme)),
     ))
     .right_aligned()
@@ -1120,13 +1883,34 @@ fn wrap(value: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn rgba(color: Color, theme: Theme) -> Rgba8 {
+pub(super) fn rgba(color: Color, theme: Theme) -> Rgba8 {
     let (r, g, b) = termap::canvas::rgb_of(color).unwrap_or_else(|| theme.ground());
     Rgba8(r, g, b, 255)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opening_flight_has_a_semantic_description_before_a_card_is_shown() {
+        let mut map = super::MapState::default();
+        map.open(crate::Viewport::default());
+        assert!(map.description().contains("India"));
+        map.tick(0.1);
+        assert!(!map.description().is_empty());
+    }
+    #[test]
+    fn camera_catches_up_when_presentation_frames_are_dropped() {
+        let mut slow = super::MapState::default();
+        slow.open(crate::Viewport::default());
+        let mut fast = slow.clone();
+        slow.tick(1.0);
+        for _ in 0..10 {
+            fast.tick(0.1);
+        }
+        assert!((slow.camera.zoom - fast.camera.zoom).abs() < 1e-9);
+        assert!((slow.camera.center[0] - fast.camera.center[0]).abs() < 1e-9);
+        assert!((slow.camera.center[1] - fast.camera.center[1]).abs() < 1e-9);
+    }
     use super::*;
 
     fn assert_point_close(actual: [f64; 2], expected: [f64; 2]) {
@@ -1200,7 +1984,12 @@ mod tests {
             None,
             vec![[0.5, 0.5], [0.500_01, 0.500_01]],
         );
-        let tiles = vec![(14, 8192, 8192, Tile::new(vec![feature]))];
+        let tiles = vec![(
+            14,
+            8192,
+            8192,
+            std::sync::Arc::new(Tile::new(vec![feature])),
+        )];
         let bounds = [0.5, 0.5, 0.500_02, 0.500_02];
         for zoom in [16.5, 17.0, 18.0] {
             assert_eq!(active_tile_zoom(&tiles, bounds, zoom), Some(14));

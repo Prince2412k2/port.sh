@@ -110,12 +110,15 @@ impl Archive {
     }
 
     fn read_at(&mut self, off: u64, len: usize, gzip: bool) -> std::io::Result<Vec<u8>> {
+        const LIMIT:usize=8*1024*1024;
+        if len>LIMIT{return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"archive entry exceeds byte limit"));}
         self.file.seek(SeekFrom::Start(off))?;
         let mut buf = vec![0u8; len];
         self.file.read_exact(&mut buf)?;
         if gzip {
             let mut out = Vec::with_capacity(len * 4);
-            flate2::read::GzDecoder::new(&buf[..]).read_to_end(&mut out)?;
+            flate2::read::GzDecoder::new(&buf[..]).take((LIMIT+1) as u64).read_to_end(&mut out)?;
+            if out.len()>LIMIT{return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"decompressed tile exceeds byte limit"));}
             return Ok(out);
         }
         Ok(buf)
@@ -123,8 +126,10 @@ impl Archive {
 
     fn directory(&mut self, off: u64, len: u64) -> std::io::Result<&Vec<Entry>> {
         if !self.dirs.contains_key(&(off, len)) {
+            if self.dirs.len()>=64{self.dirs.clear();}
             let raw = self.read_at(off, len as usize, self.internal_gzip)?;
-            self.dirs.insert((off, len), deserialize_dir(&raw));
+            let entries=deserialize_dir(&raw).ok_or_else(||std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid archive directory"))?;
+            self.dirs.insert((off, len),entries);
         }
         Ok(&self.dirs[&(off, len)])
     }
@@ -143,13 +148,14 @@ impl Archive {
             let (run, elen, eoff) = (e.run, e.len, e.off);
             if run == 0 {
                 // A run length of zero means the entry points at a leaf directory.
-                off = self.leaf_off + eoff;
+                off = self.leaf_off.checked_add(eoff).ok_or_else(||std::io::Error::new(std::io::ErrorKind::InvalidData,"archive offset overflow"))?;
                 len = elen as u64;
                 continue;
             }
             let data_off = self.data_off;
             let gz = self.tile_gzip;
-            return Ok(Some(self.read_at(data_off + eoff, elen as usize, gz)?));
+            let offset=data_off.checked_add(eoff).ok_or_else(||std::io::Error::new(std::io::ErrorKind::InvalidData,"archive offset overflow"))?;
+            return Ok(Some(self.read_at(offset, elen as usize, gz)?));
         }
         Ok(None)
     }
@@ -171,27 +177,29 @@ fn find(entries: &[Entry], want: u64) -> Option<&Entry> {
     }
 }
 
-fn varint(b: &[u8], p: &mut usize) -> u64 {
+fn varint(b: &[u8], p: &mut usize) -> Option<u64> {
     let mut r = 0u64;
     let mut s = 0u32;
     while *p < b.len() {
         let x = b[*p];
         *p += 1;
+        if s>63||(s==63&&x>1){return None;}
         r |= ((x & 0x7F) as u64) << s;
         if x & 0x80 == 0 {
-            break;
+            return Some(r);
         }
         s += 7;
     }
-    r
+    None
 }
 
 /// Directories store each column separately, all varint-encoded: tile ids as
 /// deltas, then run lengths, then byte lengths, then offsets (where 0 means
 /// "immediately after the previous entry").
-fn deserialize_dir(b: &[u8]) -> Vec<Entry> {
+fn deserialize_dir(b: &[u8]) -> Option<Vec<Entry>> {
     let mut p = 0usize;
-    let n = varint(b, &mut p) as usize;
+    let n = usize::try_from(varint(b,&mut p)?).ok()?;
+    if n>100000||n>b.len(){return None;}
     let mut out = vec![
         Entry {
             id: 0,
@@ -204,24 +212,24 @@ fn deserialize_dir(b: &[u8]) -> Vec<Entry> {
 
     let mut last = 0u64;
     for e in out.iter_mut() {
-        last += varint(b, &mut p);
+        last = last.checked_add(varint(b,&mut p)?)?;
         e.id = last;
     }
     for e in out.iter_mut() {
-        e.run = varint(b, &mut p) as u32;
+        e.run = u32::try_from(varint(b,&mut p)?).ok()?;
     }
     for e in out.iter_mut() {
-        e.len = varint(b, &mut p) as u32;
+        e.len = u32::try_from(varint(b,&mut p)?).ok()?;
     }
     for i in 0..n {
-        let v = varint(b, &mut p);
+        let v = varint(b, &mut p)?;
         out[i].off = if v == 0 && i > 0 {
-            out[i - 1].off + out[i - 1].len as u64
+            out[i - 1].off.checked_add(out[i - 1].len as u64)?
         } else {
-            v - 1
+            v.checked_sub(1)?
         };
     }
-    out
+    Some(out)
 }
 
 #[cfg(test)]

@@ -7,13 +7,13 @@
 //! previous value.
 
 /// One section of the engineering explanation: a claim and its argument.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Beat {
     pub head: String,
     pub body: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -120,7 +120,7 @@ pub fn parse(src: &str) -> Result<Vec<Project>, String> {
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
 

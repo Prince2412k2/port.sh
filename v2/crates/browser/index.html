@@ -6,11 +6,10 @@
   <meta name="theme-color" content="#08090b">
   <title>Prince Patel / V2</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2308090b'/%3E%3Cpath d='M8 7h9a7 7 0 0 1 0 14h-4v5H8V7zm5 5v4h4a2 2 0 0 0 0-4h-4z' fill='%23e1a54a'/%3E%3C/svg%3E">
-  <link data-trunk rel="rust">
-  <link data-trunk rel="css" href="style.css">
-  <link data-trunk rel="copy-file" href="renderer.js">
-  <link data-trunk rel="copy-file" href="../../../portfolio/data/iosevka-portfolio.woff2">
-  <script src="renderer.js"></script>
+  <link rel="stylesheet" href="build/__V2_BUILD__/style.css">
+  <script defer src="build/__V2_BUILD__/webgl.js"></script>
+  <script defer src="build/__V2_BUILD__/renderer.js"></script>
+  <script type="module" src="build/__V2_BUILD__/host.js"></script>
 </head>
 <body>
   <canvas id="stage" aria-hidden="true"></canvas>
@@ -25,6 +24,13 @@
   </div>
   <div id="status" role="status">INITIALISING V2</div>
   <section id="semantic" class="semantic" aria-label="Portfolio content"></section>
+  <form id="ask-editor" hidden aria-label="Ask the assistant">
+    <label for="question-input">›</label>
+    <textarea id="question-input" aria-label="Question" rows="1" maxlength="4096" placeholder="Ask a question" spellcheck="false"></textarea>
+    <button type="submit" aria-label="Send question">↵</button>
+    <button id="new-conversation" type="button" aria-label="New conversation">+</button>
+    <button id="cancel-answer" type="button" aria-label="Cancel answer">×</button>
+  </form>
   <noscript>This client needs JavaScript. The original portfolio remains at <a href="/">the home page</a>.</noscript>
   <script>
     setTimeout(() => {
