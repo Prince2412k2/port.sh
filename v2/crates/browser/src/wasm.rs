@@ -33,23 +33,27 @@ impl Engine {
     }
 
     pub fn resize(&mut self, width: f32, height: f32, scale: f32) {
+        let cell_scale = (width / 1440.0).max(height / 1020.0).max(1.0);
         self.state.update(Action::Resize(Viewport {
             width,
             height,
             scale,
-            cols: ((width / 8.0).floor() as u16).clamp(20, 180),
-            rows: ((height / 17.0).floor() as u16).clamp(6, 60),
+            cols: ((width / (8.0 * cell_scale)).floor() as u16).clamp(20, 180),
+            rows: ((height / (17.0 * cell_scale)).floor() as u16).clamp(6, 60),
         }));
     }
 
     pub fn key(&mut self, key: &str) -> bool {
-        self.state.key(key)
+        let handled = self.state.key(key);
+        self.terminal_package();
+        handled
     }
     pub fn section(&self) -> String {
         self.state.section.id().into()
     }
     pub fn restore_appearance(&mut self, theme: &str, package: &str, color: &str) {
         self.state.restore_appearance(theme, package, color);
+        self.terminal_package();
     }
     pub fn appearance(&mut self, id: &str) {
         match id {
@@ -58,6 +62,7 @@ impl Engine {
             "color" => self.state.update(Action::ToggleRenderColor),
             _ => (),
         }
+        self.terminal_package();
     }
     pub fn reduced_motion(&mut self, reduced: bool) {
         self.state.update(Action::SetReducedMotion(reduced));
@@ -149,6 +154,9 @@ impl Engine {
     pub fn prefetch(&self) -> String {
         serde_json::to_string(&self.state.map_prefetch_demand().tiles).unwrap()
     }
+    pub fn preview_demand(&self) -> String {
+        serde_json::to_string(&self.preview_tiles()).unwrap()
+    }
     pub fn has_tile(&self, z: u8, x: u32, y: u32) -> bool {
         self.cache.contains(&(z, x, y))
     }
@@ -199,9 +207,27 @@ impl Engine {
 
     /// Fixed-width transferable cells avoid serializing thousands of JSON objects.
     pub fn frame(&mut self) -> Vec<u8> {
+        self.terminal_package();
         let wanted = self.state.map_demand().map(|d| d.tiles).unwrap_or_default();
         self.cache.protect(&wanted);
         if self.state.map_demand().is_some() && wanted != self.active {
+            // A small complete parent generation gives the first view geography
+            // while detailed vectors and their matching elevation arrive.
+            let preview = self.preview_tiles();
+            if !preview.is_empty() {
+                if let Some(tiles) = self.cache.generation(&preview) {
+                    if self.tiled_terrain {
+                        if let Some(terrain) = self.cache.terrain_generation(&preview) {
+                            self.state
+                                .update(Action::MapCompleteGeneration { tiles, terrain });
+                            self.active = preview;
+                        }
+                    } else {
+                        self.state.update(Action::MapGeneration(tiles));
+                        self.active = preview;
+                    }
+                }
+            }
             if let Some(tiles) = self.cache.generation(&wanted) {
                 if self.tiled_terrain {
                     if let Some(terrain) = self.cache.terrain_generation(&wanted) {
@@ -224,8 +250,7 @@ impl Engine {
             "profile": self.state.semantic_home().map(|home| home.profile),
             "section": self.state.section.id(),
             "content": self.state.content_semantics(),
-            "loading": wanted != self.active, "decodedBytes": self.cache.bytes(),
-            "pixelMasks": self.state.pixel_masks(),
+            "loading": self.state.map_demand().is_some() && wanted != self.active, "decodedBytes": self.cache.bytes(),
             "mapDescription": self.state.map_description(),
             "search":self.state.map_search_query(),
             "help":self.state.help_open(),
@@ -249,18 +274,33 @@ impl Engine {
     pub fn canonical_fallback(&mut self) {
         self.state.render_package = portfolio_v2_scene::RenderPackage::Canonical;
     }
-    pub fn pixel_heightfield(&self) -> Vec<f32> {
-        if self.state.render_package == portfolio_v2_scene::RenderPackage::Pixel {
-            self.state.pixel_heightfield()
-        } else {
-            Vec::new()
+}
+
+impl Engine {
+    fn preview_tiles(&self) -> Vec<(u8, u32, u32)> {
+        if !self.active.is_empty() {
+            return Vec::new();
         }
+        let mut tiles: Vec<_> = self
+            .state
+            .map_demand()
+            .map(|d| d.tiles)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(z, x, y)| {
+                let shift = z.saturating_sub(4).min(3);
+                (z - shift, x >> shift, y >> shift)
+            })
+            .collect();
+        tiles.sort_unstable();
+        tiles.dedup();
+        tiles
     }
-    pub fn pixel_mesh(&self) -> Vec<f32> {
-        if self.state.render_package == portfolio_v2_scene::RenderPackage::Pixel {
-            self.state.pixel_mesh()
-        } else {
-            Vec::new()
-        }
+    fn terminal_package(&mut self) {
+        use portfolio_v2_scene::RenderPackage;
+        self.state.render_package = match self.state.render_package {
+            RenderPackage::Ink | RenderPackage::Pixel => RenderPackage::Canonical,
+            package => package,
+        };
     }
 }

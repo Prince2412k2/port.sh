@@ -1,4 +1,3 @@
-import { PixelRenderer } from "./pixel.js?v=__V2_BUILD__";
 const stage = document.getElementById("stage");
 const editor = document.getElementById("ask-editor"),
   questionInput = document.getElementById("question-input");
@@ -29,7 +28,6 @@ questionInput.onkeydown = (event) => {
     questionInput.blur();
   }
 };
-let pixel;
 let worker = new Worker(
   new URL("./worker.js?v=__V2_BUILD__", import.meta.url),
   {
@@ -281,9 +279,10 @@ worker.onmessage = ({ data, target: sourceWorker }) => {
       lastPending = meta.pendingSubmit;
       editor.hidden = meta.section !== "ask";
       if (meta.section === "ask") {
-        editor.style.left = `${(meta.cols >= 90 ? 10 : 3) * 8}px`;
-        editor.style.top = `${(meta.rows - 4) * 17}px`;
-        editor.style.width = `${Math.min(meta.cols - (meta.cols >= 90 ? 13 : 6), 100) * 8}px`;
+        const cw = innerWidth / meta.cols, ch = innerHeight / meta.rows;
+        editor.style.left = `${(meta.cols >= 90 ? 10 : 3) * cw}px`;
+        editor.style.top = `${(meta.rows - 4) * ch}px`;
+        editor.style.width = `${Math.min(meta.cols - (meta.cols >= 90 ? 13 : 6), 100) * cw}px`;
         if (
           (meta.editVersion || 0) >= editVersion &&
           questionInput.value !== meta.content.question
@@ -302,43 +301,10 @@ worker.onmessage = ({ data, target: sourceWorker }) => {
           localStorage.setItem("portfolio-v2-appearance", preference);
         } catch {}
       }
-      if (
-        meta.variant.package === "pixel" &&
-        meta.section === "experience" &&
-        !meta.help
-      ) {
-        pixel ||= new PixelRenderer();
-        pixel.render(
-          new Float32Array(data.mesh),
-          new Float32Array(data.heights),
-          meta,
-        );
-        const gutter = meta.cols >= 90 ? 7 : 0;
-        frame.fallback.cells = frame.fallback.cells.map((cell, index) => {
-          const x = index % meta.cols,
-            y = Math.floor(index / meta.cols);
-          if (
-            x < gutter ||
-            y < 1 ||
-            y >= meta.rows - 2 ||
-            meta.pixelMasks.some(
-              ([mx, my, w, h]) =>
-                x >= mx && x < mx + w && y >= my && y < my + h,
-            )
-          )
-            return cell;
-          const detail = cell.detail ? meta.details[cell.detail - 1] : null;
-          return {
-            ...cell,
-            glyph: detail && detail.class !== "map-geometry" ? cell.glyph : " ",
-            background: [0, 0, 0, 0],
-          };
-        });
-      } else pixel?.hide();
       window.portfolioV2.render(frame);
       semantics(meta);
       document.documentElement.dataset.theme = meta.theme.toLowerCase();
-      const packages = ["canonical", "crt", "vhs", "ink", "pixel"];
+      const packages = ["canonical", "crt", "vhs"];
       const index = packages.indexOf(meta.variant.package);
       document.getElementById("package-name").textContent =
         meta.variant.package.toUpperCase();
@@ -536,8 +502,8 @@ addEventListener("keydown", (event) => {
 function point(event) {
   const box = stage.getBoundingClientRect();
   return {
-    x: (event.clientX - box.left) / 8,
-    y: (event.clientY - box.top) / 17,
+    x: ((event.clientX - box.left) / box.width) * (meta?.cols || 1),
+    y: ((event.clientY - box.top) / box.height) * (meta?.rows || 1),
   };
 }
 stage.addEventListener("pointerdown", (event) => {

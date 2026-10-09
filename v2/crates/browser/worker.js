@@ -27,8 +27,6 @@ let section = "home",
 let socket, reconnectTimer;
 let searchTimer, lastSearch;
 let editVersion = 0;
-let buildingsLoading = false,
-  buildingsLoaded = false;
 function search() {
   const query = engine.search_query();
   if (query === undefined || query === null || query === lastSearch) return;
@@ -220,27 +218,6 @@ function present() {
   const meta = JSON.parse(engine.metadata());
   meta.editVersion = editVersion;
   meta.pendingSubmit = pendingSubmit;
-  if (
-    meta.variant.package === "pixel" &&
-    manifest?.buildings &&
-    !buildingsLoaded &&
-    !buildingsLoading
-  ) {
-    buildingsLoading = true;
-    cache
-      .get(`${manifest.base}/buildings.tmap`, 8 * 1024 * 1024)
-      .then((bytes) => {
-        engine.buildings(bytes);
-        buildingsLoaded = true;
-        schedule();
-      })
-      .catch((error) => status(error.message))
-      .finally(() => {
-        buildingsLoading = false;
-      });
-  }
-  const mesh = engine.pixel_mesh();
-  const heights = engine.pixel_heightfield();
   meta.variant.reduced_motion = reduced;
   wanted = JSON.parse(engine.demand());
   awaiting = true;
@@ -249,12 +226,10 @@ function present() {
     {
       type: "frame",
       cells: cells.buffer,
-      mesh: mesh.buffer,
-      heights: heights.buffer,
       meta,
       buildMs: performance.now() - started,
     },
-    [cells.buffer, mesh.buffer, heights.buffer],
+    [cells.buffer],
   );
   pump();
 }
@@ -265,6 +240,7 @@ function pump() {
   // bound network and decoder pressure, while camera changes replace the queue.
   while (active < 2) {
     const tile = [
+      ...JSON.parse(engine.preview_demand()),
       ...wanted,
       ...prefetch.filter((tile) => !warmed.has(id(tile))),
     ].find(
@@ -307,9 +283,15 @@ function pump() {
       .then(() => {
         failed.delete(key);
         warmed.add(key);
-        if (wanted.some((t) => id(t) === key)) {
+        const preview = JSON.parse(engine.preview_demand());
+        if ([...wanted, ...preview].some((t) => id(t) === key)) {
           status("");
-          schedule();
+          // Partial arrivals cannot be installed atomically. Avoid composing
+          // identical full frames for every tile completion.
+          if ([wanted, preview].some((tiles) => tiles.length && tiles.every(
+            (t) => engine.has_tile(...t) &&
+              (manifest.terrain_format !== "tmhg-tiles-v1" || engine.has_terrain_tile(...t)),
+          ))) schedule();
         }
       })
       .catch((error) => {

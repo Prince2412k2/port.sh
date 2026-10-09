@@ -11,7 +11,7 @@ V2 is an isolated client/server workspace. The backend publishes structured cont
 - `portfolio-v2-scene`: renderer-neutral visual scene and canonical cell compositor.
 - `portfolio-v2-client-core`: deterministic state, layout, semantics, and visual scene.
 - `portfolio-v2-native`: direct client and ANSI cell-diff adapter.
-- `portfolio-v2-browser`: worker-owned WASM engine, transferable cell frames, WebGPU/WebGL2 instanced glyph rendering, semantic fallback, and an experimental geometry-native pixel terrain renderer.
+- `portfolio-v2-browser`: worker-owned WASM engine, transferable cell frames, WebGPU/WebGL2 instanced terminal glyph rendering, and semantic fallback.
 - `portfolio-v2-backend`: content publication and `/api/v2` server.
 
 ## Run
@@ -120,11 +120,11 @@ V2 uses SSH port 2223 and UDP 60100–60110 to coexist with V1. `V2_WEB_BIND`, `
 - At most one worker presentation is in flight. Inputs are coalesced once per browser frame, and camera simulation catches up when presentation drops frames.
 - The renderer uses persistent GPU cell instances and changed-range uploads. It does not expand every glyph into CPU triangle arrays or parse ANSI.
 - Each web build publishes a fingerprinted bundle directory. HTML revalidates; scripts, workers, fonts, and WASM resolve within the same immutable bundle to prevent mixed-version cache failures.
-- Base, CRT, VHS, and ink share the canonical logical surface. Light theme selects ink; dark selects CRT. `p` cycles packages and `c` toggles monochrome.
-- Ink coverage is evaluated per glyph on the GPU: impact, ribbon variation, misregistration, fibre-dependent spread, absorption, and bounded removed-glyph history. Settled ink stops scheduling frames.
-- Pixel mode consumes real terrain/vector/building triangles, with depth testing, height-field shadows, discrete lighting/palette ramps, and animated water. It is experimental; building coverage and art-direction acceptance depend on the supplied data and release fixtures.
+- Canonical, CRT, and VHS share the canonical logical surface. Light theme selects Canonical; dark selects CRT. `p` cycles these three packages and `c` toggles monochrome. Saved Ink/Pixel preferences resolve to Canonical.
+- The bounded grid scales to fill the browser viewport; pointer coordinates and the Ask editor use the same cell metrics. Linear glyph sampling keeps fractional cell scaling smooth. CRT history settles after a short bounded repaint interval.
+- V2 tilted maps cover visible ground rather than an inset display slab, without edge fading; distance fog retains distant detail.
 - Browser caches are revision-keyed: 32 MiB encoded RAM cache, 96 MiB persistent Cache Storage budget, and 48 MiB decoded tile cache. Requests are coalesced with two concurrent reads, declared-empty tiles are cached, and errors have retry backoff. Authored tour prefetch is bounded and runs behind visible demand.
-- Vector/elevation generations install atomically; incomplete/error generations retain the previous visible generation. Native output similarly retains only the latest pending frame and computes diffs against the last frame actually written.
+- Vector/elevation generations install atomically. The browser initially requests a small coarse parent generation before detailed tiles; incomplete/error generations retain the previous visible generation. Partial arrivals do not trigger identical full-frame composition. Loading status is shown at the edge of the viewport only for a map view. Native output similarly retains only the latest pending frame and computes diffs against the last frame actually written.
 
 ## Ask backend
 
@@ -153,6 +153,7 @@ writes a `.message.json` record in the session store without calling the model.
 cargo test --manifest-path v2/Cargo.toml --workspace
 python3 scripts/test-v2-http.py http://127.0.0.1:8322
 node scripts/test-v2-parity.mjs http://127.0.0.1:8322
+node scripts/test-v2-browser-engine.mjs http://127.0.0.1:8322
 python3 scripts/test-v2-sessions.py v2/target/release/portfolio-v2-backend
 python3 scripts/test-v2-pty.py -- v2/target/release/portfolio-v2-native --endpoint http://127.0.0.1:8322
 python3 scripts/test-v2-pty.py -- ssh -tt -p 2223 portfolio@localhost

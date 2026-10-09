@@ -250,7 +250,8 @@ pub fn draw(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                                 continue;
                             }
                             pen.depth = (z0 + z1) * 0.5;
-                            let fade = plate_fade(a, plate).min(plate_fade(b, plate));
+                            let fade = viewport_plate_fade(o.vp, a, plate)
+                                .min(viewport_plate_fade(o.vp, b, plate));
                             if fade > 0.02 {
                                 let clipped = Pen {
                                     alpha: pen.alpha * fade,
@@ -306,7 +307,8 @@ pub fn draw(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
                             continue;
                         }
                         let fade = if bounded {
-                            plate_fade(c0, plate).min(plate_fade(c1, plate))
+                            viewport_plate_fade(o.vp, c0, plate)
+                                .min(viewport_plate_fade(o.vp, c1, plate))
                         } else {
                             1.0
                         };
@@ -348,10 +350,13 @@ pub fn draw(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) -> Stats {
 }
 /// Shared labels and authored markers without canonical geometry rasterization.
 /// Scene-native GPU packages use this projection for their readable UI layer.
-pub fn draw_annotations(tiles:&[&Tile],canvas:&mut Canvas,o:&SceneOpts){
-    let bounds=o.vp.world_bounds(32.0);
-    if o.show_labels{draw_labels(tiles,canvas,o,&bounds);}
-    draw_home(canvas,o);draw_places(canvas,o);
+pub fn draw_annotations(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts) {
+    let bounds = o.vp.world_bounds(32.0);
+    if o.show_labels {
+        draw_labels(tiles, canvas, o, &bounds);
+    }
+    draw_home(canvas, o);
+    draw_places(canvas, o);
 }
 
 /// Dither the whole viewport as ocean, then cut the land back out of it.
@@ -410,6 +415,14 @@ fn ocean_wash(
 
 /// How much of the slab's edge to dissolve over, as a share of its extent.
 const FADE: f64 = 0.22;
+
+pub fn viewport_plate_fade(vp: &Viewport, m: [f64; 2], plate: [f64; 4]) -> f32 {
+    if vp.full_view {
+        1.0
+    } else {
+        plate_fade(m, plate)
+    }
+}
 
 /// Fades to zero at the slab boundary.
 ///
@@ -669,7 +682,8 @@ fn draw_buildings(tiles: &[&Tile], canvas: &mut Canvas, o: &SceneOpts, bounds: &
         }
         let depth = depth_sum / base.len() as f32;
 
-        let fade = plate_fade(
+        let fade = viewport_plate_fade(
+            o.vp,
             o.vp.plane_of([(f.bbox[0] + f.bbox[2]) * 0.5, (f.bbox[1] + f.bbox[3]) * 0.5]),
             plate,
         );

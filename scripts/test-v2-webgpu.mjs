@@ -33,14 +33,14 @@ const pixels=await evaluate('window.portfolioV2.inspect_pixels?.()'),presented=a
 if(!pixels||pixels.length<2||!presented||presented.length<2)throw new Error('WebGPU rendered a blank logical/presentation target');
 const image=await command('Page.captureScreenshot',{format:'png'});
 await writeFile('/tmp/opencode/v2-webgpu-map.png',Buffer.from(image.data,'base64'));
-for(const [key,expected]of [['i','ink'],['p','pixel']]){
+for(const [key,expected]of [['p','crt'],['p','vhs'],['p','canonical'],['i','canonical']]){
   await keypress(key);const deadline=Date.now()+90000;
   while(Date.now()<deadline){if(await evaluate(`window.portfolioV2RenderMetrics.activePackage===${JSON.stringify(expected)}`))break;await new Promise(r=>setTimeout(r,100));}
   if(!(await evaluate(`window.portfolioV2RenderMetrics.activePackage===${JSON.stringify(expected)}`)))throw new Error(`Package ${expected} failed to present`);
 }
 const result=await evaluate('({renderer:document.documentElement.dataset.renderer,status:document.getElementById("status").textContent,metrics:window.portfolioV2RenderMetrics,worker:window.portfolioV2Worker})');
 if(errors.length||result.status.includes('GPU view unavailable'))throw new Error(JSON.stringify({errors,result}));
-console.log('PASS: actual WebGPU pipeline creation, map/ink/pixel switching without uncaught errors',JSON.stringify(result));
+console.log('PASS: actual WebGPU pipeline creation, terminal package and theme switching without uncaught errors',JSON.stringify(result));
 if(!workerSession)throw new Error('No engine worker target attached');
 const originalWorker=workerSession;
 await command('Runtime.evaluate',{expression:'setTimeout(()=>{throw new Error("intentional worker recovery fixture")},0)'},workerSession);

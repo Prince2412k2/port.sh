@@ -435,6 +435,7 @@ impl Default for MapState {
     fn default() -> Self {
         let place = PLACES[0];
         let mut camera = MapViewport::new(place.world(), place.zoom);
+        camera.full_view = true;
         camera.tilt = place.tilt.to_radians();
         camera.bearing = place.bearing.to_radians();
         camera.persp = termap::view::auto_persp(camera.zoom);
@@ -1304,6 +1305,7 @@ trait ResizeMapViewport {
 
 impl ResizeMapViewport for MapViewport {
     fn resize_for(&mut self, viewport: Viewport) {
+        self.full_view = true;
         let gutter = if viewport.cols >= 90 { 7 } else { 0 };
         self.sw = viewport.cols.saturating_sub(gutter) as f64 * 2.0;
         self.sh = viewport.rows.saturating_sub(3) as f64 * 4.0;
@@ -1357,7 +1359,6 @@ fn active_tile_zoom(
     tiles
         .iter()
         .filter(|(z, x, y, _)| tile_intersects(*z, *x, *y, bounds))
-        .filter(|(z, _, _, _)| z.abs_diff(target) <= 2)
         .filter(|(_, _, _, tile)| !tile.features.is_empty())
         .map(|(z, _, _, _)| *z)
         .min_by_key(|z| (z.abs_diff(target), *z > target))
@@ -1474,7 +1475,11 @@ fn render_inner(scene: &mut VisualScene, state: &MapState, annotations_only: boo
         canvas.resolve_attributed(
             &mut buffer,
             local,
-            &Fog::default(),
+            &Fog {
+                near: 1.0,
+                far: 0.72,
+                gamma: 0.85,
+            },
             state.mono,
             theme,
             &mut attribution,

@@ -63,6 +63,9 @@ pub fn meters_per_world_unit(lat: f64) -> f64 {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {
+    /// Full projected viewport coverage for local V2 clients. Legacy authored
+    /// plate compositions retain their original framing by default.
+    pub full_view: bool,
     /// Map centre, world coords.
     pub center: [f64; 2],
     pub zoom: f64,
@@ -86,6 +89,7 @@ pub struct Viewport {
 impl Viewport {
     pub fn new(center: [f64; 2], zoom: f64) -> Self {
         Self {
+            full_view: false,
             center,
             zoom,
             sw: 1.0,
@@ -226,6 +230,38 @@ impl Viewport {
     /// sizing the slab with parallel maths leaves it hugging the top of the
     /// frame with the near half of the view empty.
     pub fn plate(&self) -> [f64; 4] {
+        if self.full_view {
+            let guard = 16.0f64;
+            // A screen ray beyond the perspective horizon cannot hit ground.
+            // Keep the far edge in front of that singularity rather than
+            // accepting the inverse projection's behind-camera solution.
+            let top = if self.persp > 1e-9 && self.tilt.sin() > 1e-9 {
+                let eye = self.sh / self.persp;
+                (-guard).max(
+                    self.sh * 0.5 - eye * PIXEL_ASPECT * self.tilt.cos() / self.tilt.sin() * 0.9,
+                )
+            } else {
+                -guard
+            };
+            let corners = [
+                [-guard, top],
+                [self.sw + guard, top],
+                [-guard, self.sh * (1.0 + LIFT_HEADROOM) + guard],
+                [self.sw + guard, self.sh * (1.0 + LIFT_HEADROOM) + guard],
+            ];
+            let mut width = 0.0f64;
+            let mut far = f64::INFINITY;
+            let mut near = f64::NEG_INFINITY;
+            for point in corners {
+                let plane = self.plane_of(self.unproject(point));
+                if plane[0].is_finite() && plane[1].is_finite() {
+                    width = width.max(plane[0].abs());
+                    far = far.min(plane[1]);
+                    near = near.max(plane[1]);
+                }
+            }
+            return [width, far, near, near];
+        }
         // Target rows for the far and near edges, relative to centre.
         let far_py = -self.sh * PLATE_FAR;
         let near_py = self.sh * PLATE_NEAR;
@@ -786,6 +822,38 @@ mod bounds_tests {
                                 );
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_view_plate_covers_visible_ground_without_crossing_the_horizon() {
+        for tilt in [0.3f64, 0.8, 1.2] {
+            for perspective in [0.0, 0.35, 0.85] {
+                let mut v = viewport();
+                v.full_view = true;
+                v.tilt = tilt;
+                v.persp = perspective;
+                v.bearing = 0.7;
+                let plate = v.plate();
+                assert!(plate.iter().all(|value| value.is_finite()));
+                assert!(plate[0] > 0.0 && plate[1] < 0.0 && plate[2] > 0.0);
+                for y in [0.0, v.sh * 0.25, v.sh * 0.5, v.sh] {
+                    for x in [0.0, v.sw * 0.5, v.sw] {
+                        let world = v.unproject([x, y]);
+                        let projected = v.project3(world, 0.0);
+                        if !projected.1.is_finite() || (projected.0[1] - y).abs() > 1e-6 {
+                            continue;
+                        }
+                        // The small horizon guard intentionally excludes rays
+                        // within ten percent of the inverse singularity.
+                        let m = v.plane_of(world);
+                        if m[1] < plate[1] {
+                            continue;
+                        }
+                        assert!(m[0].abs() <= plate[0] + 1e-6 && m[1] <= plate[2] + 1e-6);
                     }
                 }
             }

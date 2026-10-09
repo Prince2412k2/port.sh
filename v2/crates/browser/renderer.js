@@ -1,9 +1,7 @@
 (() => {
   "use strict";
-  const CW = 8,
-    CH = 17,
-    STRIDE = 32,
-    WET_SECONDS = 1.4;
+  const STRIDE = 32,
+    WET_SECONDS = 0.65;
   const metrics = (window.portfolioV2RenderMetrics = {
     renderCalls: 0,
     paintedFrames: 0,
@@ -66,16 +64,6 @@
       if (uv.z == 0.0 || any(local < vec2f(0)) || any(local > vec2f(1))) { return 0.0; }
       return textureSampleLevel(font,fontSampler,uv.xy + local * uv.zw,0).a;
     }
-    fn pigment(uv: vec4f, local: vec2f, age: f32, seed: f32) -> f32 {
-      let pixel = vec2f(1.0/8.0,1.0/17.0);
-      let fibre = noise(floor(local * vec2f(16,34)) + seed);
-      let spread = (0.16 + smoothstep(0.0,1.4,age) * 0.48) * pixel;
-      let core = cover(uv,local);
-      let edge = max(max(cover(uv,local+vec2f(spread.x,0)),cover(uv,local-vec2f(spread.x,0))),
-                     max(cover(uv,local+vec2f(0,spread.y)),cover(uv,local-vec2f(0,spread.y))));
-      let impact = smoothstep(0.0,0.045,age);
-      return clamp((core * (0.80+fibre*0.20) + max(edge-core,0.0)*(0.14+fibre*0.20)) * impact,0.0,1.0);
-    }
     @fragment fn fs(in: Out) -> @location(0) vec4f {
       let cell = cells[in.index];
       var fg = cell.fg.rgb; var bg = cell.bg.rgb;
@@ -95,25 +83,8 @@
         let lineNoise=(noise(vec2f(floor(in.position.y),floor(p.time*24.0)))-.5)*.015;
         return vec4f(mix(bg,fg,coverage)+lineNoise*coverage,1);
       }
-      if (p.mode != 3u) {
-        let mask=cover(cell.uv,in.local);let alpha=select(1.0,max(cell.bg.a,mask),p.mode==4u);
-        return vec4f(mix(bg,fg,mask)*alpha,alpha);
-      }
-      let seed = cell.life.z;
-      let dark = dot(bg,vec3f(.299,.587,.114)) < .35;
-      let fibre = (noise(floor(in.position.xy * vec2f(.31,1.2))) - .5) * .035;
-      let grain = (noise(in.position.xy) - .5) * .018;
-      let paper = select(vec3f(.934,.915,.862),vec3f(.075,.066,.055),dark) + fibre + grain;
-      let shift = vec2f(noise(vec2f(seed,1)),noise(vec2f(seed,2))) - .5;
-      let local = in.local + shift * vec2f(.055,.028);
-      let age = select(max(p.time-cell.life.x,0.0),2.0,p.reduced == 1u);
-      let ink = pigment(cell.uv,local,age,seed);
-      let ribbon = .84 + noise(vec2f(seed,3))*.16;
-      var color = select(vec3f(.12,.095,.065),vec3f(.84,.81,.72),dark);
-      if (p.mono == 0u) { let chroma = fg - vec3f(dot(fg,vec3f(.299,.587,.114))); color = clamp(color + chroma*.55,vec3f(.025),vec3f(.95)); }
-      let ghostAge = max(p.time-cell.life.y,0.0);
-      let ghost = select(pigment(cell.historyUV,in.local,2.0,seed) * pow(max(1.0-ghostAge/1.4,0.0),2.0)*.18,0.0,p.reduced==1u);
-      return vec4f(mix(paper,color,clamp(ink*ribbon+ghost,0,1)),1);
+      let mask=cover(cell.uv,in.local);
+      return vec4f(mix(bg,fg,mask),1);
     }
   `;
   const presentShader = `
@@ -211,8 +182,8 @@
       );
       atlasView = atlas.createView();
       sampler = device.createSampler({
-        magFilter: "nearest",
-        minFilter: "nearest",
+        magFilter: "linear",
+        minFilter: "linear",
       });
       uniform = device.createBuffer({
         size: 32,
@@ -260,10 +231,10 @@
   function resources(frame) {
     const canvas = document.getElementById("stage");
     const dpr = Math.min(devicePixelRatio || 1, 2),
-      w = Math.ceil(frame.fallback.cols * CW * dpr),
-      h = Math.ceil(frame.fallback.rows * CH * dpr);
-    canvas.style.width = `${frame.fallback.cols * CW}px`;
-    canvas.style.height = `${frame.fallback.rows * CH}px`;
+      w = Math.ceil(innerWidth * dpr),
+      h = Math.ceil(innerHeight * dpr);
+    canvas.style.width = `${innerWidth}px`;
+    canvas.style.height = `${innerHeight}px`;
     if (!target || w !== width || h !== height) {
       width = w;
       height = h;
@@ -418,7 +389,7 @@
       f[2] = frame.fallback.cols;
       f[3] = frame.fallback.rows;
       f[4] = now;
-      u[5] = ["canonical", "crt", "vhs", "ink", "pixel"].indexOf(
+      u[5] = ["canonical", "crt", "vhs"].indexOf(
         frame.variant.package,
       );
       u[6] = frame.variant.color === "monochrome" ? 1 : 0;
@@ -463,7 +434,7 @@
       if (
         !frame.variant.reduced_motion &&
         (frame.variant.package === "vhs" ||
-          (["ink", "crt"].includes(frame.variant.package) && now < wetUntil))
+          (frame.variant.package === "crt" && now < wetUntil))
       )
         requestPaint();
     } catch (error) {
@@ -622,14 +593,14 @@
           c.beginPath();
           c.arc(0, 0, 11, 0, Math.PI * 2);
           c.stroke();
-          for (let i = 0; i < 5; i++) {
-            const a = Math.PI * 0.75 + (Math.PI * 1.5 * i) / 4;
+           for (let i = 0; i < 3; i++) {
+             const a = Math.PI * 0.75 + (Math.PI * 1.5 * i) / 2;
             c.beginPath();
             c.moveTo(Math.cos(a) * 14, Math.sin(a) * 14);
             c.lineTo(Math.cos(a) * 17, Math.sin(a) * 17);
             c.stroke();
           }
-          const a = Math.PI * 0.75 + (Math.PI * 1.5 * index) / 4;
+           const a = Math.PI * 0.75 + (Math.PI * 1.5 * index) / 2;
           c.strokeStyle = "#ffb040";
           c.lineWidth = 1.8;
           c.beginPath();

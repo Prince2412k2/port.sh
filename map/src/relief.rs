@@ -462,7 +462,7 @@ impl Relief {
                     if m[0].abs() > plate[0] || m[1] < plate[1] || m[1] > plate[2] {
                         continue;
                     }
-                    fade = crate::scene::plate_fade(m, plate);
+                    fade = crate::scene::viewport_plate_fade(vp, m, plate);
                     if fade <= 0.02 {
                         continue;
                     }
