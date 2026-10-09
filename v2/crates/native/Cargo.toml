@@ -1,0 +1,19 @@
+[package]
+name = "portfolio-v2-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+portfolio-v2-client-core = { path = "../client-core" }
+portfolio-v2-protocol = { path = "../protocol" }
+portfolio-v2-scene = { path = "../scene" }
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
+crossterm = "0.29"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+ciborium = "0.2"
+unicode-width = "0.2"
+termap = { path = "../../../map", default-features = false, features = ["browser-core"] }

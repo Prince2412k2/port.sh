@@ -133,13 +133,22 @@ pub fn line(c: &mut Canvas, a: [f64; 2], b: [f64; 2], pen: &Pen) {
         // The centreline is written at full alpha to the subpixel that actually
         // contains it. Splatting alone spreads a diagonal thin enough to fall
         // under the dot threshold, which turns solid roads into dotted ones.
-        c.plot(x.floor() as isize, y.floor() as isize, pen.alpha, &pen.brush());
+        c.plot(
+            x.floor() as isize,
+            y.floor() as isize,
+            pen.alpha,
+            &pen.brush(),
+        );
         // A weaker splat on top gives the neighbours a soft shoulder, so the
         // brightness still varies with how the line falls across the grid. Kept
         // well under the quadrant threshold: a solid glyph is all-or-nothing
         // over four times the area, so a halo strong enough to trip it would
         // double the apparent width of every road.
-        let halo = if pen.mat == crate::canvas::MAT_SOLID { 0.30 } else { 0.5 };
+        let halo = if pen.mat == crate::canvas::MAT_SOLID {
+            0.30
+        } else {
+            0.5
+        };
         c.splat(x, y, pen.alpha * halo, &pen.brush());
 
         // Widen along the perpendicular using coverage as a function of
@@ -221,23 +230,39 @@ pub fn polyline(c: &mut Canvas, pts: &[[f64; 2]], pen: &Pen) {
 /// Dashed polyline with the dash phase carried across segment joins, so the
 /// pattern stays even through corners.
 pub fn dashed_polyline(c: &mut Canvas, pts: &[[f64; 2]], pen: &Pen, on: f64, off: f64) {
-    let period = on + off;
     let mut phase = 0.0f64;
 
     for w in pts.windows(2) {
+        dashed_segment(c, w[0], w[1], pen, on, off, &mut phase);
+    }
+}
+
+pub fn dashed_segment(
+    c: &mut Canvas,
+    start: [f64; 2],
+    end: [f64; 2],
+    pen: &Pen,
+    on: f64,
+    off: f64,
+    phase: &mut f64,
+) {
+    let period = on + off;
+    {
         // Clip before walking: an off-screen segment would otherwise cost one
         // loop iteration per dash for its entire notional length.
-        let Some((a, b)) = clip(c, w[0], w[1]) else { continue };
+        let Some((a, b)) = clip(c, start, end) else {
+            return;
+        };
         let dx = b[0] - a[0];
         let dy = b[1] - a[1];
         let len = (dx * dx + dy * dy).sqrt();
         if len < 1e-6 {
-            continue;
+            return;
         }
 
         let mut t = 0.0;
         while t < len {
-            let in_period = phase % period;
+            let in_period = *phase % period;
             let (seg, drawing) = if in_period < on {
                 (on - in_period, true)
             } else {
@@ -249,7 +274,7 @@ pub fn dashed_polyline(c: &mut Canvas, pts: &[[f64; 2]], pen: &Pen, on: f64, off
                 let p1 = [a[0] + dx * (end / len), a[1] + dy * (end / len)];
                 line(c, p0, p1, pen);
             }
-            phase += end - t;
+            *phase += end - t;
             t = end;
         }
     }

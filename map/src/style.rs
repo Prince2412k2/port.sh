@@ -25,8 +25,8 @@ pub struct LayerStyle {
 
 pub fn style(layer: Layer) -> LayerStyle {
     use crate::canvas::{
-        MAT_DOT, MAT_SOLID, TINT_BORDER, TINT_COAST, TINT_GREEN, TINT_LANDMARK, TINT_MAJOR, TINT_MEDIUM,
-        TINT_MINOR, TINT_MONO, TINT_RAIL, TINT_WATER,
+        MAT_DOT, MAT_SOLID, TINT_BORDER, TINT_COAST, TINT_GREEN, TINT_LANDMARK, TINT_MAJOR,
+        TINT_MEDIUM, TINT_MINOR, TINT_MONO, TINT_RAIL, TINT_WATER,
     };
     match layer {
         Layer::Landuse => LayerStyle {

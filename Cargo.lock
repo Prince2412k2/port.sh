@@ -2996,6 +2996,7 @@ dependencies = [
  "flate2",
  "memmap2",
  "ratatui",
+ "serde",
 ]
 
 [[package]]

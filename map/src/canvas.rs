@@ -41,12 +41,7 @@ const QUAD_ON: f32 = 0.52;
 
 /// Dot bit for [row][col] within a braille cell. The ordering is historical:
 /// dots 1-6 fill column-major, then 7 and 8 were bolted on underneath.
-const BRAILLE: [[u8; SUB_X]; SUB_Y] = [
-    [0x01, 0x08],
-    [0x02, 0x10],
-    [0x04, 0x20],
-    [0x40, 0x80],
-];
+const BRAILLE: [[u8; SUB_X]; SUB_Y] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 /// Quadrant blocks, indexed by (TL=1, TR=2, BL=4, BR=8).
 ///
@@ -127,7 +122,10 @@ pub struct Ground {
 
 impl Default for Ground {
     fn default() -> Self {
-        Ground { rgb: PAGE[0], dark: true }
+        Ground {
+            rgb: PAGE[0],
+            dark: true,
+        }
     }
 }
 
@@ -140,7 +138,10 @@ impl Ground {
     pub fn of(rgb: (u8, u8, u8)) -> Self {
         let (r, g, b) = rgb;
         let y = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
-        Ground { rgb, dark: y < 128.0 }
+        Ground {
+            rgb,
+            dark: y < 128.0,
+        }
     }
 }
 
@@ -225,7 +226,11 @@ impl Theme {
     /// it is the colour it always was; on a light one it is darkened just far
     /// enough to be read, and no further, so a brand keeps its hue.
     pub fn recast_identity(self, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
-        if self.dark() { rgb } else { legible(rgb, self.ground()) }
+        if self.dark() {
+            rgb
+        } else {
+            legible(rgb, self.ground())
+        }
     }
 
     /// A colour whose brightness *is* its loudness, on this theme's ground.
@@ -234,7 +239,11 @@ impl Theme {
     /// the note above `by_strength`. Chrome greys go through here, brand
     /// colours through there.
     pub fn recast_strength(self, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
-        if self.dark() { rgb } else { by_strength(rgb, self.ground()) }
+        if self.dark() {
+            rgb
+        } else {
+            by_strength(rgb, self.ground())
+        }
     }
 
     /// The colour a mark fades into as its strength goes to zero.
@@ -424,7 +433,6 @@ const LINE_HEAVY: [char; 16] = [
 pub const MAT_DOT: u8 = 0;
 pub const MAT_SOLID: u8 = 1;
 
-
 /// How roads are drawn. Cycled at runtime because the trade-off is genuinely a
 /// matter of taste and of what the terminal's font renders well.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -520,7 +528,18 @@ pub struct Overlay {
     pub tint: u8,
     pub lum: f32,
     pub bold: bool,
+    pub detail: CellDetail,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellDetail {
+    pub kind: u8,
+    pub value: u64,
+}
+
+pub const DETAIL_GEOMETRY_PICK: u8 = 1;
+pub const DETAIL_MAP_LABEL: u8 = 2;
+pub const DETAIL_MAP_MARKER: u8 = 3;
 
 /// Steps in the brightness ramp.
 ///
@@ -568,7 +587,11 @@ fn is_neutral(r: u8, g: u8, b: u8) -> bool {
 
 #[inline]
 fn quantise_for(l: f32, r: u8, g: u8, b: u8) -> f32 {
-    if is_neutral(r, g, b) { quantise(l) } else { quantise_hued(l) }
+    if is_neutral(r, g, b) {
+        quantise(l)
+    } else {
+        quantise_hued(l)
+    }
 }
 
 /// Turn a resolved colour into the cheapest escape that still draws it.
@@ -686,9 +709,17 @@ fn walk_to_contrast(
         // From the page outwards. A strength colour stops at the first
         // lightness that matches; an identity one has already been let through
         // if it did not need moving at all.
-        let nl = if away < 0.0 { page_l * (1.0 - t) } else { page_l + (1.0 - page_l) * t };
+        let nl = if away < 0.0 {
+            page_l * (1.0 - t)
+        } else {
+            page_l + (1.0 - page_l) * t
+        };
         let room = 1.0 - (2.0 * nl - 1.0).abs();
-        let ns = if room < 1e-6 { 0.0 } else { (chroma / room).min(1.0) };
+        let ns = if room < 1e-6 {
+            0.0
+        } else {
+            (chroma / room).min(1.0)
+        };
         let c = from_hls(h, nl, ns);
         let gap = (contrast(c, page) - want).abs();
         if gap < best_gap {
@@ -707,7 +738,11 @@ fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
     let lum = |c: (u8, u8, u8)| {
         let ch = |v: u8| {
             let v = v as f32 / 255.0;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * ch(c.0) + 0.7152 * ch(c.1) + 0.0722 * ch(c.2)
     };
@@ -716,7 +751,11 @@ fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
 }
 
 fn to_hls(rgb: (u8, u8, u8)) -> (f32, f32, f32) {
-    let (r, g, b) = (rgb.0 as f32 / 255.0, rgb.1 as f32 / 255.0, rgb.2 as f32 / 255.0);
+    let (r, g, b) = (
+        rgb.0 as f32 / 255.0,
+        rgb.1 as f32 / 255.0,
+        rgb.2 as f32 / 255.0,
+    );
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
     let l = (max + min) / 2.0;
     let d = max - min;
@@ -774,7 +813,9 @@ pub fn recast_region(buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::R
     let page = th.ground();
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
-            let Some(cell) = buf.cell_mut((x, y)) else { continue };
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
             let turn = |c: Color| match rgb_of(c) {
                 Some(rgb) if rgb != page => {
                     let (r, g, b) = by_strength(rgb, page);
@@ -820,7 +861,11 @@ pub struct Fog {
 
 impl Default for Fog {
     fn default() -> Self {
-        Fog { near: 1.0, far: 0.22, gamma: 1.0 }
+        Fog {
+            near: 1.0,
+            far: 0.22,
+            gamma: 1.0,
+        }
     }
 }
 
@@ -1025,7 +1070,6 @@ impl Canvas {
         }
     }
 
-
     /// Nearest owning feature within `radius` subpixels of a cell. Used for
     /// hover: the cursor is a whole cell wide, so an exact hit is too strict.
     pub fn pick_near(&self, cx: usize, cy: usize, radius: isize) -> Option<u32> {
@@ -1060,9 +1104,35 @@ impl Canvas {
 
     /// Collapse the subpixel buffer into glyphs and colours.
     pub fn resolve(&self, buf: &mut Buffer, area: Rect, fog: &Fog, mono: bool, theme: Theme) {
+        self.resolve_inner(buf, area, fog, mono, theme, None);
+    }
+
+    pub fn resolve_attributed(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        fog: &Fog,
+        mono: bool,
+        theme: Theme,
+        details: &mut [CellDetail],
+    ) {
+        details.fill(CellDetail::default());
+        self.resolve_inner(buf, area, fog, mono, theme, Some(details));
+    }
+
+    fn resolve_inner(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        fog: &Fog,
+        mono: bool,
+        theme: Theme,
+        mut details: Option<&mut [CellDetail]>,
+    ) {
         for cy in 0..self.ch.min(area.height as usize) {
             for cx in 0..self.cw.min(area.width as usize) {
                 let (sx, sy) = (area.x + cx as u16, area.y + cy as u16);
+                let detail_index = cy * self.cw + cx;
 
                 if let Some(o) = self.overlay[cy * self.cw + cx] {
                     // Selection and position keep their colour in monochrome:
@@ -1079,6 +1149,11 @@ impl Canvas {
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
                         cell.set_char(o.ch).set_style(style);
                     }
+                    if let Some(detail) =
+                        details.as_deref_mut().and_then(|d| d.get_mut(detail_index))
+                    {
+                        *detail = o.detail;
+                    }
                     continue;
                 }
 
@@ -1087,6 +1162,16 @@ impl Canvas {
                     let fg = theme.paint(l.tint as usize, fog.factor(l.depth), mono, false);
                     if let Some(cell) = buf.cell_mut((sx, sy)) {
                         cell.set_char(table[(l.mask & 15) as usize]).set_fg(fg);
+                    }
+                    if l.pick != u32::MAX {
+                        if let Some(detail) =
+                            details.as_deref_mut().and_then(|d| d.get_mut(detail_index))
+                        {
+                            *detail = CellDetail {
+                                kind: DETAIL_GEOMETRY_PICK,
+                                value: u64::from(l.pick),
+                            };
+                        }
                     }
                     continue;
                 }
@@ -1102,6 +1187,7 @@ impl Canvas {
                 // Fallback for features too faint to trip DOT_ON anywhere in the
                 // cell -- without this, thin distant roads vanish entirely.
                 let mut strongest = (0.0f32, 0u8);
+                let mut dominant_pick = (0.0f32, u32::MAX);
 
                 for (row, dots) in BRAILLE.iter().enumerate() {
                     for (col, &dot) in dots.iter().enumerate() {
@@ -1127,6 +1213,9 @@ impl Canvas {
                         if a > strongest.0 {
                             strongest = (a, dot);
                         }
+                        if self.pick[i] != u32::MAX && a > dominant_pick.0 {
+                            dominant_pick = (a, self.pick[i]);
+                        }
                     }
                 }
 
@@ -1151,8 +1240,8 @@ impl Canvas {
                 // The floor is now just enough that a lit dot is not literally
                 // the background, and the gamma is what keeps faint marks
                 // legible instead.
-                let tone = (INK_FLOOR + (1.0 - INK_FLOOR) * mean.powf(INK_GAMMA))
-                    * fog.factor(near);
+                let tone =
+                    (INK_FLOOR + (1.0 - INK_FLOOR) * mean.powf(INK_GAMMA)) * fog.factor(near);
                 let tint = weight
                     .iter()
                     .enumerate()
@@ -1213,6 +1302,16 @@ impl Canvas {
                 if let Some(cell) = buf.cell_mut((sx, sy)) {
                     cell.set_char(ch).set_fg(color);
                 }
+                if dominant_pick.1 != u32::MAX {
+                    if let Some(detail) =
+                        details.as_deref_mut().and_then(|d| d.get_mut(detail_index))
+                    {
+                        *detail = CellDetail {
+                            kind: DETAIL_GEOMETRY_PICK,
+                            value: u64::from(dominant_pick.1),
+                        };
+                    }
+                }
             }
         }
     }
@@ -1231,9 +1330,7 @@ mod theme_tests {
     #[test]
     fn a_colour_never_moves_towards_a_light_page() {
         let page = PAGE[1];
-        let lum = |c: (u8, u8, u8)| {
-            0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32
-        };
+        let lum = |c: (u8, u8, u8)| 0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32;
         // Brand colours, which is the case the mirror got wrong: real logo
         // values, several of them already darker than the page.
         let brands = [
@@ -1282,9 +1379,16 @@ mod theme_tests {
     fn the_strong_stay_stronger_than_the_faint() {
         let page = PAGE[1];
         // Strongest to faintest, as chosen against black.
-        let ladder = [(232, 232, 226), (168, 166, 162), (118, 124, 140), (74, 80, 92)];
-        let on_page: Vec<f32> =
-            ladder.iter().map(|c| contrast(by_strength(*c, page), page)).collect();
+        let ladder = [
+            (232, 232, 226),
+            (168, 166, 162),
+            (118, 124, 140),
+            (74, 80, 92),
+        ];
+        let on_page: Vec<f32> = ladder
+            .iter()
+            .map(|c| contrast(by_strength(*c, page), page))
+            .collect();
         for w in on_page.windows(2) {
             assert!(w[0] > w[1], "the ladder came out {on_page:?}");
         }
@@ -1298,9 +1402,10 @@ mod theme_tests {
             let m = [c.0, c.1, c.2];
             (0..3).max_by_key(|&k| m[k]).unwrap()
         };
-        for c in TINT_NIGHT.iter().filter(|c| {
-            c.0.max(c.1).max(c.2) - c.0.min(c.1).min(c.2) > 24
-        }) {
+        for c in TINT_NIGHT
+            .iter()
+            .filter(|c| c.0.max(c.1).max(c.2) - c.0.min(c.1).min(c.2) > 24)
+        {
             let got = legible(*c, page);
             assert_eq!(channel(got), channel(*c), "{c:?} changed hue: {got:?}");
         }
@@ -1332,7 +1437,11 @@ mod theme_tests {
     /// it would cover a background image or a transparent window.
     #[test]
     fn the_system_theme_never_paints_a_page() {
-        for g in [Ground::of((0, 0, 0)), Ground::of((30, 30, 46)), Ground::of((238, 234, 224))] {
+        for g in [
+            Ground::of((0, 0, 0)),
+            Ground::of((30, 30, 46)),
+            Ground::of((238, 234, 224)),
+        ] {
             assert_eq!(Theme::System(g).page(), Color::Reset, "{g:?}");
         }
         assert_ne!(Theme::Night.page(), Color::Reset);
@@ -1356,13 +1465,22 @@ mod theme_tests {
             0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
         };
         // Full-strength ink is far from the ground; faint ink is near it.
-        assert!(lum(dark.ink()) > lum(dark.faint()), "dark ink runs the wrong way");
-        assert!(lum(light.ink()) < lum(light.faint()), "light ink runs the wrong way");
+        assert!(
+            lum(dark.ink()) > lum(dark.faint()),
+            "dark ink runs the wrong way"
+        );
+        assert!(
+            lum(light.ink()) < lum(light.faint()),
+            "light ink runs the wrong way"
+        );
 
         // And the faintest mark sits at the ground it was told about, not at
         // black: on this terminal that is a luminance of about 31.
         let whisper = lum(dark.grey(0.0));
-        assert!((whisper - 31.0).abs() < 12.0, "faintest ink landed at {whisper:.0}, not the page");
+        assert!(
+            (whisper - 31.0).abs() < 12.0,
+            "faintest ink landed at {whisper:.0}, not the page"
+        );
     }
 
     /// A cycle does not forget what the terminal said.
@@ -1418,7 +1536,10 @@ mod theme_tests {
                 );
                 last = away;
             }
-            assert!(last > 60.0, "{theme:?} never gets far from its page: {last}");
+            assert!(
+                last > 60.0,
+                "{theme:?} never gets far from its page: {last}"
+            );
         }
     }
 
@@ -1433,7 +1554,8 @@ mod theme_tests {
     fn the_motorway_is_the_loudest_line_on_either_ground() {
         for theme in [Theme::Night, Theme::Paper] {
             let page = lum_of(theme.page());
-            let contrast = |t: u8| (lum_of(theme.paint(t as usize, 1.0, false, false)) - page).abs();
+            let contrast =
+                |t: u8| (lum_of(theme.paint(t as usize, 1.0, false, false)) - page).abs();
             let road = contrast(TINT_MAJOR);
             for quieter in [TINT_MEDIUM, TINT_MINOR, TINT_GREEN, TINT_WATER] {
                 assert!(
@@ -1443,7 +1565,6 @@ mod theme_tests {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1464,7 +1585,13 @@ mod nan_tests {
     use super::*;
 
     fn brush() -> Brush {
-        Brush { depth: 0.5, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, behind: Behind::Ignore }
+        Brush {
+            depth: 0.5,
+            tint: TINT_GREEN,
+            mat: MAT_DOT,
+            pick: u32::MAX,
+            behind: Behind::Ignore,
+        }
     }
 
     /// A NaN position must not reach the buffer.
@@ -1493,7 +1620,10 @@ mod nan_tests {
         // And an ordinary mark still lands, so the guard is not simply off.
         let mut c = Canvas::new(8, 4);
         c.splat(4.0, 4.0, 1.0, &brush());
-        assert!(c.cov.iter().any(|v| *v > 0.0), "the guard rejected a real mark");
+        assert!(
+            c.cov.iter().any(|v| *v > 0.0),
+            "the guard rejected a real mark"
+        );
     }
 
     /// And if one ever does get in, the frame must still draw.
@@ -1510,7 +1640,11 @@ mod nan_tests {
         c.cov[2 * c.sw + 2] = f32::NAN;
         c.cov[2 * c.sw + 3] = 0.9;
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
-        let fog = Fog { near: 1.0, far: 0.3, gamma: 1.0 };
+        let fog = Fog {
+            near: 1.0,
+            far: 0.3,
+            gamma: 1.0,
+        };
         c.resolve(&mut buf, Rect::new(0, 0, 8, 4), &fog, false, Theme::Night);
     }
 }
@@ -1520,7 +1654,13 @@ mod veil_tests {
     use super::*;
 
     fn at(behind: Behind, depth: f32) -> Brush {
-        Brush { depth, tint: TINT_GREEN, mat: MAT_DOT, pick: u32::MAX, behind }
+        Brush {
+            depth,
+            tint: TINT_GREEN,
+            mat: MAT_DOT,
+            pick: u32::MAX,
+            behind,
+        }
     }
 
     fn ink(c: &Canvas, x: usize, y: usize) -> f32 {
@@ -1543,14 +1683,25 @@ mod veil_tests {
             // headroom left to read the dimming in.
             c.plot(2, 2, 0.2, &at(Behind::Hide, near));
             // Then a mark that many layers behind it.
-            c.plot(2, 2, 1.0, &at(Behind::Veil, near + VEIL_STEP * layers as f32 + 0.001));
+            c.plot(
+                2,
+                2,
+                1.0,
+                &at(Behind::Veil, near + VEIL_STEP * layers as f32 + 0.001),
+            );
             seen.push(ink(&c, 2, 2));
         }
         // The front layer is undimmed; each one behind is fainter than the last.
         for w in seen.windows(2) {
-            assert!(w[1] <= w[0], "a layer further back came out brighter: {seen:?}");
+            assert!(
+                w[1] <= w[0],
+                "a layer further back came out brighter: {seen:?}"
+            );
         }
-        assert!(seen[0] > seen[1], "the first layer back was not dimmed at all");
+        assert!(
+            seen[0] > seen[1],
+            "the first layer back was not dimmed at all"
+        );
         assert_eq!(
             seen[VEIL_LIMIT as usize + 1],
             seen[VEIL_LIMIT as usize],
@@ -1580,13 +1731,20 @@ mod veil_tests {
         c.plot(2, 2, 1.0, &at(Behind::Hide, 0.10));
         let front_only = ink(&c, 2, 2);
         c.plot(2, 2, 1.0, &at(Behind::Hide, 0.90));
-        assert_eq!(ink(&c, 2, 2), front_only, "something behind was allowed through");
+        assert_eq!(
+            ink(&c, 2, 2),
+            front_only,
+            "something behind was allowed through"
+        );
 
         let mut c = Canvas::new(4, 2);
         c.plot(2, 2, 0.5, &at(Behind::Hide, 0.10));
         let before = ink(&c, 2, 2);
         c.plot(2, 2, 0.5, &at(Behind::Ignore, 0.90));
-        assert!(ink(&c, 2, 2) > before, "Ignore should draw regardless of depth");
+        assert!(
+            ink(&c, 2, 2) > before,
+            "Ignore should draw regardless of depth"
+        );
     }
 }
 
@@ -1596,14 +1754,30 @@ mod tint_tests {
     use super::*;
 
     fn brush(tint: u8) -> Brush {
-        Brush { depth: 0.5, tint, mat: MAT_DOT, pick: u32::MAX, behind: Behind::Ignore }
+        Brush {
+            depth: 0.5,
+            tint,
+            mat: MAT_DOT,
+            pick: u32::MAX,
+            behind: Behind::Ignore,
+        }
     }
 
     fn colour_of(cell_paint: impl Fn(&mut Canvas)) -> Color {
         let mut c = Canvas::new(2, 1);
         cell_paint(&mut c);
         let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
-        c.resolve(&mut buf, Rect::new(0, 0, 2, 1), &Fog { near: 1.0, far: 1.0, gamma: 1.0 }, false, Theme::Night);
+        c.resolve(
+            &mut buf,
+            Rect::new(0, 0, 2, 1),
+            &Fog {
+                near: 1.0,
+                far: 1.0,
+                gamma: 1.0,
+            },
+            false,
+            Theme::Night,
+        );
         buf.cell((0, 0)).unwrap().fg
     }
 
@@ -1623,9 +1797,11 @@ mod tint_tests {
         let hue = |c: Color| match c {
             Color::Rgb(r, g, b) => {
                 let m = r.max(g).max(b).max(1) as f32;
-                ((r as f32 / m * 8.0).round() as u8,
-                 (g as f32 / m * 8.0).round() as u8,
-                 (b as f32 / m * 8.0).round() as u8)
+                (
+                    (r as f32 / m * 8.0).round() as u8,
+                    (g as f32 / m * 8.0).round() as u8,
+                    (b as f32 / m * 8.0).round() as u8,
+                )
             }
             other => panic!("expected a hue, got {other:?}"),
         };
@@ -1640,7 +1816,10 @@ mod tint_tests {
             c.plot(0, 1, 0.9, &brush(TINT_MAJOR));
             c.plot(1, 1, 0.9, &brush(TINT_MAJOR));
         }));
-        assert_ne!(ground, road, "the two tints are not distinguishable to begin with");
+        assert_ne!(
+            ground, road,
+            "the two tints are not distinguishable to begin with"
+        );
 
         // A hillside with a road through it: outnumbered three to one on
         // coverage, and it still has to be the road you see.
@@ -1672,11 +1851,19 @@ mod tint_tests {
         let hue = |c: Color| match c {
             Color::Rgb(r, g, b) => {
                 let m = r.max(g).max(b).max(1) as f32;
-                Some(((r as f32 / m * 8.0) as u8, (g as f32 / m * 8.0) as u8, (b as f32 / m * 8.0) as u8))
+                Some((
+                    (r as f32 / m * 8.0) as u8,
+                    (g as f32 / m * 8.0) as u8,
+                    (b as f32 / m * 8.0) as u8,
+                ))
             }
             _ => None,
         };
-        assert_eq!(hue(alone), hue(reference), "ground changed colour on its own");
+        assert_eq!(
+            hue(alone),
+            hue(reference),
+            "ground changed colour on its own"
+        );
     }
 
     /// Every tint has a weight, or the lookup would panic on the one that does
@@ -1688,5 +1875,49 @@ mod tint_tests {
         for (i, p) in TINT_PULL.iter().enumerate() {
             assert!(*p > 0.0, "tint {i} would never win a cell it was alone in");
         }
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_reports_overlay_detail_instead_of_geometry_beneath_it() {
+        let mut canvas = Canvas::new(1, 1);
+        let brush = Brush {
+            depth: 0.5,
+            tint: TINT_MONO,
+            mat: MAT_DOT,
+            pick: 17,
+            behind: Behind::Ignore,
+        };
+        canvas.plot(0, 0, 1.0, &brush);
+        canvas.set_overlay(
+            0,
+            0,
+            Overlay {
+                ch: 'A',
+                tint: TINT_LANDMARK,
+                lum: 1.0,
+                bold: false,
+                detail: CellDetail {
+                    kind: DETAIL_MAP_LABEL,
+                    value: 1234,
+                },
+            },
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+        let mut details = [CellDetail::default()];
+        canvas.resolve_attributed(
+            &mut buffer,
+            Rect::new(0, 0, 1, 1),
+            &Fog::default(),
+            false,
+            Theme::Night,
+            &mut details,
+        );
+        assert_eq!(details[0].kind, DETAIL_MAP_LABEL);
+        assert_eq!(details[0].value, 1234);
     }
 }

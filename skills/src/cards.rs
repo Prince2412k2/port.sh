@@ -16,7 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 use termap::canvas::Theme;
 
@@ -77,7 +77,18 @@ pub struct Hit {
     pub pips: Rect,
 }
 
-pub fn render(f: &mut Frame, full: Rect, v: &View) -> Hit {
+/// A data-only target lets the client worker reuse authored diagrams without
+/// creating a terminal backend or importing input/transport adapters.
+pub trait DrawTarget {
+    fn buffer_mut(&mut self) -> &mut Buffer;
+    fn render_widget(&mut self, widget: impl Widget, area: Rect) {
+        widget.render(area, self.buffer_mut());
+    }
+}
+impl DrawTarget for Buffer { fn buffer_mut(&mut self) -> &mut Buffer { self } }
+impl DrawTarget for Frame<'_> { fn buffer_mut(&mut self) -> &mut Buffer { Frame::buffer_mut(self) } }
+
+pub fn render(f: &mut impl DrawTarget, full: Rect, v: &View) -> Hit {
     let p = &v.projects[v.at];
     let accent = marks::find(&p.mark).map_or((190, 195, 205), |m| m.rgb);
 
@@ -155,7 +166,7 @@ fn mark_h(_v: &View) -> u16 {
 }
 
 /// The mark, its box, the pips, and the loop of tools.
-fn corner(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
+fn corner(f: &mut impl DrawTarget, area: Rect, v: &View, accent: (u8, u8, u8)) -> Hit {
     let p = &v.projects[v.at];
     let Some(m) = marks::find(&p.mark) else { return Hit::default() };
 
@@ -308,7 +319,7 @@ fn draw_mark(
 /// The tools, looping past. Always moving, because a strip that only scrolls
 /// when it overflows changes character between projects for no reason the
 /// reader can see.
-fn strip(f: &mut Frame, area: Rect, v: &View) {
+fn strip(f: &mut impl DrawTarget, area: Rect, v: &View) {
     let p = &v.projects[v.at];
     let arts: Vec<_> = p.tools.iter().filter_map(|t| logos::find(t)).collect();
     if arts.is_empty() || area.height == 0 {
@@ -331,7 +342,7 @@ fn strip(f: &mut Frame, area: Rect, v: &View) {
 }
 
 /// The fallback for projects with no diagram yet, and the home of the prose.
-fn prose(f: &mut Frame, area: Rect, v: &View, accent: (u8, u8, u8)) {
+fn prose(f: &mut impl DrawTarget, area: Rect, v: &View, accent: (u8, u8, u8)) {
     let p = &v.projects[v.at];
     let w = area.width.max(20) as usize;
     let acc = mix(accent, 1.0, v.theme);

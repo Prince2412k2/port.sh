@@ -46,6 +46,10 @@ mod tests {
     /// workspace. If this fails, the portfolio is about to render Mumbai.
     #[test]
     fn the_data_directory_is_found_from_wherever_the_tests_run() {
-        assert!(data_file("places.txt").is_some(), "candidates: {:?}", candidates());
+        assert!(
+            data_file("places.txt").is_some(),
+            "candidates: {:?}",
+            candidates()
+        );
     }
 }

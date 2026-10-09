@@ -5,7 +5,7 @@
 //! paragraph sit in the file as a paragraph instead of one long line.
 
 /// One stop on the tour.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default,PartialEq,serde::Serialize,serde::Deserialize)]
 pub struct Place {
     pub id: String,
     pub name: String,
@@ -17,6 +17,7 @@ pub struct Place {
     pub role: String,
     pub lonlat: (f64, f64),
     /// World (Mercator) coordinates, converted once at load.
+    #[serde(skip)]
     pub world: [f64; 2],
     pub zoom: f64,
     /// Radians, both of them: the file says degrees, the camera wants radians,
@@ -30,10 +31,12 @@ pub struct Place {
 /// Loaded from `data/places.txt` if it is there, otherwise from the copy built
 /// into the binary. The disk path wins so the sheet can be edited and reloaded
 /// without a rebuild; the embedded copy means a bare binary still has a tour.
+#[cfg(feature="native")]
 pub fn load() -> Vec<Place> {
-    let disk = crate::paths::data_file("places.txt")
-        .and_then(|p| std::fs::read_to_string(p).ok());
-    let src = disk.as_deref().unwrap_or(include_str!("../data/places.txt"));
+    let disk = crate::paths::data_file("places.txt").and_then(|p| std::fs::read_to_string(p).ok());
+    let src = disk
+        .as_deref()
+        .unwrap_or(include_str!("../data/places.txt"));
     match parse(src) {
         Ok(v) => v,
         Err(e) => {
@@ -63,7 +66,10 @@ pub fn parse(src: &str) -> Result<Vec<Place>, String> {
             if word != "place" {
                 return Err(format!("line {no}: unknown record `{word}`"));
             }
-            out.push(Place { id: id.trim().to_string(), ..Default::default() });
+            out.push(Place {
+                id: id.trim().to_string(),
+                ..Default::default()
+            });
             last_key.clear();
             continue;
         }
@@ -130,8 +136,8 @@ pub fn parse(src: &str) -> Result<Vec<Place>, String> {
                     .to_radians()
             }
             _ => {
-                let field = field_mut(p, key)
-                    .ok_or_else(|| format!("line {no}: unknown key `{key}`"))?;
+                let field =
+                    field_mut(p, key).ok_or_else(|| format!("line {no}: unknown key `{key}`"))?;
                 field.push_str(val);
             }
         }

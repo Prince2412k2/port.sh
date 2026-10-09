@@ -1,0 +1,8 @@
+[package]
+name = "portfolio-v2-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+portfolio-v2-scene = { path = "../scene" }

@@ -88,7 +88,15 @@ impl Flight {
         // same place, and the general solution divides by u1. Degenerating to a
         // pure exponential zoom is not an approximation — it is the limit.
         if u1 < w0 * 1e-3 {
-            return Flight { c0, d, w0, w1, u1: 0.0, r0: 0.0, s: (w1 / w0).ln().abs() / RHO };
+            return Flight {
+                c0,
+                d,
+                w0,
+                w1,
+                u1: 0.0,
+                r0: 0.0,
+                s: (w1 / w0).ln().abs() / RHO,
+            };
         }
 
         let (rho2, rho4) = (RHO * RHO, RHO * RHO * RHO * RHO);
@@ -101,7 +109,15 @@ impl Flight {
         let r0 = ((b0 * b0 + 1.0).sqrt() - b0).ln();
         let r1 = ((b1 * b1 + 1.0).sqrt() - b1).ln();
 
-        Flight { c0, d, w0, w1, u1, r0, s: (r1 - r0) / RHO }
+        Flight {
+            c0,
+            d,
+            w0,
+            w1,
+            u1,
+            r0,
+            s: (r1 - r0) / RHO,
+        }
     }
 
     /// Seconds this flight should take.
@@ -307,7 +323,11 @@ impl Tour {
                 vp.bearing = angle_lerp(self.from_bearing, p.bearing, k);
                 // Convergence arrives with the lean rather than independently:
                 // perspective on a flat map only distorts it.
-                let lean = if p.tilt > 1e-6 { (vp.tilt / p.tilt).clamp(0.0, 1.0) } else { 0.0 };
+                let lean = if p.tilt > 1e-6 {
+                    (vp.tilt / p.tilt).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 vp.persp = view::auto_persp(vp.zoom) * lean;
                 if f >= 1.0 {
                     self.phase = Phase::Rest;
@@ -406,12 +426,24 @@ mod tests {
     fn a_long_flight_climbs_and_a_short_one_barely_does() {
         let w = 2.4e-5; // ~zoom 16 on a 200-column terminal
         let far = Flight::new([0.700, 0.420], w, [0.7016, 0.4192], w);
-        let peak = (0..=40).map(|i| far.at(i as f64 / 40.0).1).fold(0.0, f64::max);
-        assert!(peak > 8.0 * w, "long flight did not climb: {:.1}x", peak / w);
+        let peak = (0..=40)
+            .map(|i| far.at(i as f64 / 40.0).1)
+            .fold(0.0, f64::max);
+        assert!(
+            peak > 8.0 * w,
+            "long flight did not climb: {:.1}x",
+            peak / w
+        );
 
         let near = Flight::new([0.700, 0.420], w, [0.70002, 0.42001], w);
-        let peak = (0..=40).map(|i| near.at(i as f64 / 40.0).1).fold(0.0, f64::max);
-        assert!(peak < 3.0 * w, "short flight over-climbed: {:.1}x", peak / w);
+        let peak = (0..=40)
+            .map(|i| near.at(i as f64 / 40.0).1)
+            .fold(0.0, f64::max);
+        assert!(
+            peak < 3.0 * w,
+            "short flight over-climbed: {:.1}x",
+            peak / w
+        );
     }
 
     /// The closed form should actually be the geodesic it claims to be.
@@ -472,7 +504,10 @@ mod tests {
 
         let naive = |t: f64| {
             // Linear in centre, linear in zoom — the obvious implementation.
-            ([c0[0] + (c1[0] - c0[0]) * t, c0[1] + (c1[1] - c0[1]) * t], w)
+            (
+                [c0[0] + (c1[0] - c0[0]) * t, c0[1] + (c1[1] - c0[1]) * t],
+                w,
+            )
         };
         let arc = peak(&|t| f.at(t));
         let flat = peak(&naive);
@@ -515,11 +550,23 @@ mod tests {
             }
         }
         assert!(!tour.moving(), "tour never came to rest");
-        assert!((vp.center[0] - target.world[0]).abs() < 1e-9, "{:?}", vp.center);
-        assert!((vp.center[1] - target.world[1]).abs() < 1e-9, "{:?}", vp.center);
+        assert!(
+            (vp.center[0] - target.world[0]).abs() < 1e-9,
+            "{:?}",
+            vp.center
+        );
+        assert!(
+            (vp.center[1] - target.world[1]).abs() < 1e-9,
+            "{:?}",
+            vp.center
+        );
         assert!((vp.zoom - target.zoom).abs() < 1e-6, "zoom {}", vp.zoom);
         assert!((vp.tilt - target.tilt).abs() < 1e-6, "tilt {}", vp.tilt);
-        assert!((vp.bearing - target.bearing).abs() < 1e-6, "bearing {}", vp.bearing);
+        assert!(
+            (vp.bearing - target.bearing).abs() < 1e-6,
+            "bearing {}",
+            vp.bearing
+        );
     }
 
     /// Travel is flat and arrival is not. If this stops holding, the two
@@ -542,7 +589,10 @@ mod tests {
                 mid_tilt = mid_tilt.min(vp.tilt);
             }
         }
-        assert!(mid_tilt.abs() < 1e-9, "camera was leaning mid-flight: {mid_tilt}");
+        assert!(
+            mid_tilt.abs() < 1e-9,
+            "camera was leaning mid-flight: {mid_tilt}"
+        );
         assert!(vp.tilt > 0.6, "camera never leaned on arrival: {}", vp.tilt);
     }
 
@@ -589,7 +639,11 @@ mod tests {
         while tour.moving() {
             tour.tick(DT, &mut vp);
             let db = (vp.bearing - last_b).rem_euclid(std::f64::consts::TAU);
-            let db = if db > std::f64::consts::PI { db - std::f64::consts::TAU } else { db };
+            let db = if db > std::f64::consts::PI {
+                db - std::f64::consts::TAU
+            } else {
+                db
+            };
             wb = wb.max(db.abs());
             wt = wt.max((vp.tilt - last_t).abs());
             wz = wz.max((vp.zoom - last_z).abs());
@@ -609,6 +663,10 @@ mod tests {
         let b = 10f64.to_radians();
         let mid = angle_lerp(a, b, 0.5);
         // Should pass through 0/360, not through 180.
-        assert!((mid - 2.0 * PI).abs() < 1e-9 || mid.abs() < 1e-9, "{}", mid.to_degrees());
+        assert!(
+            (mid - 2.0 * PI).abs() < 1e-9 || mid.abs() < 1e-9,
+            "{}",
+            mid.to_degrees()
+        );
     }
 }
